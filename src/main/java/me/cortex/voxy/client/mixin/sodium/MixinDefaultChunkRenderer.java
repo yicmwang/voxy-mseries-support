@@ -42,7 +42,17 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = DefaultChunkRenderer.class, remap = false)
 public abstract class MixinDefaultChunkRenderer {
-    @Inject(method = "render", at = @At(value = "HEAD"))
+    // Injected at the TAIL of the pass (just before Sodium ends it), not HEAD.
+    //
+    // Under whole-frame Metal this matters: Metallum opens its render encoder lazily on Sodium's
+    // first draw, so at HEAD there is no open encoder and no bound attachments -- Voxy would have
+    // nothing to render into. By the tail Sodium has drawn, Metallum's encoder is live, and Voxy
+    // can borrow it and share the pass's depth. Depth testing still gives the right result either
+    // way: LOD fragments behind the near terrain are rejected, and those showing through sky gaps
+    // draw.
+    @Inject(method = "render", at = @At(value = "INVOKE",
+            target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/ShaderChunkRenderer;end(Lnet/caffeinemc/mods/sodium/client/render/chunk/terrain/TerrainRenderPass;)V",
+            shift = At.Shift.BEFORE))
     private void voxy$injectRender(ChunkRenderMatrices matrices,
                                    ChunkRenderListIterable renderLists,
                                    TerrainRenderPass renderPass,

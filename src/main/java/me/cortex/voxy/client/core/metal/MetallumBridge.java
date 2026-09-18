@@ -22,7 +22,7 @@ public final class MetallumBridge {
 
     private static Method mIsAvailable, mDeviceHandle, mCommandQueueHandle, mCommandBufferHandle,
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
-            mViewportWidth, mViewportHeight, mFlushFrame;
+            mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -46,6 +46,8 @@ public final class MetallumBridge {
             mViewportWidth = interop.getMethod("currentViewportWidth");
             mViewportHeight = interop.getMethod("currentViewportHeight");
             mFlushFrame = interop.getMethod("flushFrame");
+            mAcquireRenderEncoder = interop.getMethod("acquireRenderEncoder", long.class, long.class, int.class, int.class);
+            mInvalidateRenderPassState = interop.getMethod("invalidateRenderPassState");
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
             Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
@@ -153,6 +155,42 @@ public final class MetallumBridge {
     public static boolean supportsFlushFrame() {
         resolve();
         return mFlushFrame != null;
+    }
+
+    /**
+     * Borrows Metallum's render encoder for these attachments, reusing Metallum's open encoder when
+     * the attachments match. Drawing on Metallum's encoder is the only legal way to share a pass:
+     * asking Metal for a second encoder on the same command buffer trips
+     * "A command encoder is already encoding to this command buffer".
+     *
+     * <p>Returns 0 when Metallum is absent; the caller then owns its own encoder.
+     */
+    public static long acquireRenderEncoder(final long colorHandle, final long depthHandle,
+                                            final int width, final int height) {
+        resolve();
+        if (mAcquireRenderEncoder == null) {
+            return 0L;
+        }
+        try {
+            Object r = mAcquireRenderEncoder.invoke(null, colorHandle, depthHandle, width, height);
+            return r instanceof Number n ? n.longValue() : 0L;
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.acquireRenderEncoder failed", t);
+            return 0L;
+        }
+    }
+
+    /** Marks Metallum's pass state stale after Voxy borrowed and drew on its encoder. */
+    public static void invalidateRenderPassState() {
+        resolve();
+        if (mInvalidateRenderPassState == null) {
+            return;
+        }
+        try {
+            mInvalidateRenderPassState.invoke(null);
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.invalidateRenderPassState failed", t);
+        }
     }
 
     private static long call(Method m) {

@@ -29,8 +29,20 @@ public final class MetalRenderEncoder implements RenderEncoder {
         return this.encoderHandle;
     }
 
+    /**
+     * True when this encoder belongs to Metallum and is merely borrowed for Voxy's draws. Closing a
+     * borrowed encoder must NOT end it: Metallum keeps drawing on it afterwards. Instead it marks
+     * Metallum's pass state stale so Metallum rebinds before its next draw.
+     */
+    private final boolean borrowed;
+
     MetalRenderEncoder(long encoderHandle) {
+        this(encoderHandle, false);
+    }
+
+    MetalRenderEncoder(long encoderHandle, boolean borrowed) {
         this.encoderHandle = encoderHandle;
+        this.borrowed = borrowed;
     }
 
     @Override
@@ -247,8 +259,13 @@ public final class MetalRenderEncoder implements RenderEncoder {
     @Override
     public void close() {
         if (this.encoderHandle == 0) return;
-        MetalNative.mtlEncoderEndEncoding(this.encoderHandle);
-        MetalNative.mtlRelease(this.encoderHandle);
+        if (this.borrowed) {
+            // Shared with Metallum: leave the encoder open and let Metallum rebind its own state.
+            MetallumBridge.invalidateRenderPassState();
+        } else {
+            MetalNative.mtlEncoderEndEncoding(this.encoderHandle);
+            MetalNative.mtlRelease(this.encoderHandle);
+        }
         this.encoderHandle = 0;
         // Free the per-instance off-heap scratch buffer (MemoryUtil.memAlloc in the
         // field initializer). It is native memory, NOT GC-tracked, so without this

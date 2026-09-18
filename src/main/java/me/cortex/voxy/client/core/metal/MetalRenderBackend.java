@@ -549,10 +549,14 @@ public class MetalRenderBackend implements RenderBackend {
             throw new RuntimeException("mtlNewRenderPassDescriptor returned NULL");
         }
         long encoder;
+        boolean borrowed = false;
         try {
+            long colorHandle = 0L;
+            long depthHandle = 0L;
             for (int i = 0; i < desc.colorAttachments().size(); i++) {
                 RenderPassDesc.ColorAttachment c = desc.colorAttachments().get(i);
                 long texHandle = MetalHandleMap.getHandle(c.texture().id());
+                if (i == 0) colorHandle = texHandle;
                 MetalNative.mtlRenderPassSetColorAttachment(passDescHandle, i,
                         texHandle, mapLoadAction(c.loadAction()),
                         mapStoreAction(c.storeAction()), c.level());
@@ -564,6 +568,7 @@ public class MetalRenderBackend implements RenderBackend {
             if (desc.depthAttachment() != null) {
                 RenderPassDesc.DepthAttachment d = desc.depthAttachment();
                 long texHandle = MetalHandleMap.getHandle(d.texture().id());
+                depthHandle = texHandle;
                 MetalNative.mtlRenderPassSetDepthAttachment(passDescHandle, texHandle,
                         mapLoadAction(d.loadAction()), mapStoreAction(d.storeAction()),
                         d.clearDepth(), d.level());
@@ -573,21 +578,30 @@ public class MetalRenderBackend implements RenderBackend {
             // (one encoder at a time per buffer; copies feed the pass anyway).
             this.endActiveBlitEncoder();
             this.ensureActiveCommandBuffer();
-            // Metal allows one open encoder per command buffer. When Metallum owns the frame its
-            // render encoder is usually still open here, so close it before opening ours; Metallum
-            // reopens lazily on its next draw with load actions that preserve what we write.
-            this.endForeignEncoderIfNeeded();
 
-            encoder = MetalNative.mtlCommandBufferNewRenderEncoder(this.activeCommandBuffer, passDescHandle);
-            if (encoder == 0) {
-                throw new RuntimeException("mtlCommandBufferNewRenderEncoder returned NULL");
+            // Prefer BORROWING Metallum's encoder for these attachments. Asking Metal for a second
+            // encoder on the same command buffer is illegal ("A command encoder is already encoding
+            // to this command buffer"), and closing Metallum's to open our own costs a pass split for
+            // no reason. Borrowing also means Voxy's draws land in Metallum's pass directly, sharing
+            // its depth. Falls back to owning an encoder when Metallum is absent.
+            long shared = MetallumBridge.acquireRenderEncoder(
+                    colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight());
+            if (shared != 0L) {
+                encoder = shared;
+                borrowed = true;
+            } else {
+                this.endForeignEncoderIfNeeded();
+                encoder = MetalNative.mtlCommandBufferNewRenderEncoder(this.activeCommandBuffer, passDescHandle);
+                if (encoder == 0) {
+                    throw new RuntimeException("mtlCommandBufferNewRenderEncoder returned NULL");
+                }
             }
         } finally {
             // The render encoder retains a reference to the descriptor; we can drop ours.
             MetalNative.mtlRelease(passDescHandle);
         }
 
-        MetalRenderEncoder result = new MetalRenderEncoder(encoder);
+        MetalRenderEncoder result = new MetalRenderEncoder(encoder, borrowed);
         this.lastRenderEncoder = result;
         return result;
     }

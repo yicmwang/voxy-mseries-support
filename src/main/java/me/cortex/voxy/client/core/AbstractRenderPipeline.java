@@ -131,6 +131,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
+    private int diagCount;
 
     /**
      * Blit destination for {@link #metalDepthTex} (w×h raw D32F floats) and
@@ -551,6 +552,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         }
         this.useMetallumTarget = metallumTarget
                 && this.metallumColor.id() != -1 && this.metallumDepth.id() != -1;
+        if (this.diagCount < 5) {
+            this.diagCount++;
+            me.cortex.voxy.common.Logger.info(
+                    "[Metal-DIAG] metallumTarget=" + metallumTarget
+                    + " colorHandle=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.colorAttachment())
+                    + " depthHandle=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.depthAttachment())
+                    + " encoder=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.renderEncoder())
+                    + " colorId=" + this.metallumColor.id()
+                    + " depthId=" + this.metallumDepth.id()
+                    + " useMetallumTarget=" + this.useMetallumTarget);
+        }
         if (this.useMetallumTarget) {
             // Whole-frame Metal: draw straight into the frame's own attachments. LOAD on both,
             // not CLEAR -- at SOLID-head the frame already holds the sky and MC's cleared depth,
@@ -595,19 +607,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             submersionSkip = envEnd < 128.0f && rdBlocks > envEnd * 2.0f;
         }
         if (!this.useMetallumTarget) {
-            // Without Metallum's attachments there is nothing to render into: the pass would have
-            // no attachments at all and beginRenderPass would get a NULL encoder back.
+            // No attachments to render into: the pass would be empty and Metal returns a NULL
+            // encoder. Metallum has not opened a render encoder for this pass yet, so there is
+            // nothing to borrow (verified: colorHandle=0x0 encoder=0x0 at this point, even at the
+            // Sodium pass tail).
             //
-            // This is reachable on the FIRST frame(s) after a level load: Voxy hooks the head of
-            // Sodium's SOLID pass, and Metallum opens its render encoder lazily on Sodium's first
-            // draw -- so at hook time there is no encoder and no bound attachment yet. Skipping is
-            // correct here; the next frame has one. (Rendering LODs properly needs the hook moved
-            // to the pass tail, where the attachments exist.)
-            if (!this.loggedNoMetallumTarget) {
-                this.loggedNoMetallumTarget = true;
+            // Skipping keeps the client running on Metal. Rendering LODs needs the attachments to
+            // actually be bound by the time Voxy's hook fires.
+            if (this.diagCount <= 5) {
+                this.diagCount++;
                 me.cortex.voxy.common.Logger.warn(
-                        "Metallum attachments not bound yet (Sodium SOLID head); skipping this frame's "
-                        + "LOD pass. The LOD hook will need to move to the pass tail to render.");
+                        "[Metal] no Metallum attachments to render into; skipping the LOD pass this frame");
             }
             return;
         }
