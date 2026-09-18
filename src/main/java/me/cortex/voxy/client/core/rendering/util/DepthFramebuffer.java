@@ -46,6 +46,12 @@ public class DepthFramebuffer {
     }
 
     public void clear(float depth) {
+        // GL-only. On Metal the bound-depth target is cleared as part of Voxy's own render pass
+        // (ChunkBoundRenderer.renderMetal); glClearNamedFramebufferfi with no context aborts the JVM.
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            return;
+        }
         GLCompat.clearDepthFramebuffer(this.framebuffer.id(), depth);
     }
 

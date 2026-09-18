@@ -17,6 +17,14 @@ public class ShaderLoader {
     public static String parse(String id) {
         var src =  "#version 460 core\n";
         src += String.join("\n", ShaderLoadingParser.parseRoot(Identifier.parse(id)));
+        // Strip printf calls unless printf debugging is on. Voxy's debug helpers in node.glsl /
+        // queue.glsl declare them unconditionally, and glslang rejects `printf(string-literal, ...)`
+        // unless GL_EXT_debug_printf is requested -- which the runtime SPIRV/MSL path does not do.
+        // Without this the compute pipelines fail to transpile and the renderer never starts.
+        // (Upstream does this via PrintfInjector; this loader keeps the simpler substitution.)
+        if (!me.cortex.voxy.client.core.rendering.util.PrintfDebugUtil.ENABLE_PRINTF_DEBUGGING) {
+            src = src.replace("printf", "//printf");
+        }
         return src;
     }
 

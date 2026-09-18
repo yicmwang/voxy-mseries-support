@@ -41,7 +41,21 @@ import static org.lwjgl.opengl.GL45C.nglNamedBufferSubData;
  */
 public class FullscreenBlit {
 
-    private static final int EMPTY_VAO = glGenVertexArrays();
+    private static final int EMPTY_VAO = initEmptyVao();
+
+    /**
+     * GL-only empty VAO, required by the raw-GL blit path.
+     *
+     * <p>Static initializer: glGenVertexArrays would run on class load, and with no GL context
+     * (whole-frame Metal) it aborts the JVM rather than throwing. Zero there, where nothing reads it.
+     */
+    private static int initEmptyVao() {
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            return 0;
+        }
+        return glGenVertexArrays();
+    }
 
     private final IGpuPipeline pipeline;
     /** Cached GL program id for the bind path. 0 on non-GL backends. */

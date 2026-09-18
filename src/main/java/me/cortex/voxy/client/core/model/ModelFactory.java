@@ -319,10 +319,15 @@ public class ModelFactory {
         var upload = this.uploadResults.poll();
         if (upload==null) return;
 
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        // GL unpack state for the texture uploads below. Metal's uploadSubImage2D takes an explicit
+        // region and has no equivalent global state; glPixelStorei with no context aborts the JVM.
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+            glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        }
         do {
             // Register water-animated cells on the render thread while the
             // upload still carries its modelId (upload() resets it to -1).

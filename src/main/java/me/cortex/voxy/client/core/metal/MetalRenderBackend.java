@@ -406,6 +406,7 @@ public class MetalRenderBackend implements RenderBackend {
         // encoder instead of one throwaway command buffer per entry.
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
+            this.endForeignEncoderIfNeeded();
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -442,6 +443,7 @@ public class MetalRenderBackend implements RenderBackend {
         }
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
+            this.endForeignEncoderIfNeeded();
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -470,6 +472,17 @@ public class MetalRenderBackend implements RenderBackend {
             if (this.activeCommandBuffer == 0) {
                 throw new RuntimeException("mtlCommandQueueNewCommandBuffer returned NULL");
             }
+        }
+    }
+
+    /**
+     * Metal forbids two open encoders on one command buffer, and Metallum's render encoder is
+     * typically open when Voxy wants a blit. Close it first; Metallum reopens lazily on its next
+     * draw, with load actions that preserve whatever Voxy writes. No-op when Voxy owns the buffer.
+     */
+    private void endForeignEncoderIfNeeded() {
+        if (!this.ownsActiveCommandBuffer) {
+            MetallumBridge.endCurrentEncoder();
         }
     }
 
@@ -560,6 +573,10 @@ public class MetalRenderBackend implements RenderBackend {
             // (one encoder at a time per buffer; copies feed the pass anyway).
             this.endActiveBlitEncoder();
             this.ensureActiveCommandBuffer();
+            // Metal allows one open encoder per command buffer. When Metallum owns the frame its
+            // render encoder is usually still open here, so close it before opening ours; Metallum
+            // reopens lazily on its next draw with load actions that preserve what we write.
+            this.endForeignEncoderIfNeeded();
 
             encoder = MetalNative.mtlCommandBufferNewRenderEncoder(this.activeCommandBuffer, passDescHandle);
             if (encoder == 0) {

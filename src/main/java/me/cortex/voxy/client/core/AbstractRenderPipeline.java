@@ -73,10 +73,24 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         return false;
     }
 
-    private static final int DEPTH_SAMPLER = glGenSamplers();
-    static {
-        glSamplerParameteri(DEPTH_SAMPLER, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glSamplerParameteri(DEPTH_SAMPLER, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    private static final int DEPTH_SAMPLER = initDepthSampler();
+
+    /**
+     * GL sampler used by {@link #initDepthStencil}, which is itself GL-only.
+     *
+     * <p>Must not be created on a non-GL backend: this is a <em>static initializer</em>, so
+     * glGenSamplers runs on class load -- with no GL context it aborts the whole JVM before any
+     * exception can be caught. Zero on Metal, where nothing reads it.
+     */
+    private static int initDepthSampler() {
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            return 0;
+        }
+        int sampler = glGenSamplers();
+        glSamplerParameteri(sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        return sampler;
     }
 
     protected AbstractRenderPipeline(AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier, boolean deferTranslucency) {
@@ -116,6 +130,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private me.cortex.voxy.client.core.metal.MetallumAttachmentTexture metallumDepth;
     /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
     private boolean useMetallumTarget;
+    private boolean loggedNoMetallumTarget;
 
     /**
      * Blit destination for {@link #metalDepthTex} (w×h raw D32F floats) and
@@ -578,6 +593,23 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             float envEnd = viewport.fogParameters.environmentalEnd();
             int rdBlocks = net.minecraft.client.Minecraft.getInstance().options.getEffectiveRenderDistance() * 16;
             submersionSkip = envEnd < 128.0f && rdBlocks > envEnd * 2.0f;
+        }
+        if (!this.useMetallumTarget) {
+            // Without Metallum's attachments there is nothing to render into: the pass would have
+            // no attachments at all and beginRenderPass would get a NULL encoder back.
+            //
+            // This is reachable on the FIRST frame(s) after a level load: Voxy hooks the head of
+            // Sodium's SOLID pass, and Metallum opens its render encoder lazily on Sodium's first
+            // draw -- so at hook time there is no encoder and no bound attachment yet. Skipping is
+            // correct here; the next frame has one. (Rendering LODs properly needs the hook moved
+            // to the pass tail, where the attachments exist.)
+            if (!this.loggedNoMetallumTarget) {
+                this.loggedNoMetallumTarget = true;
+                me.cortex.voxy.common.Logger.warn(
+                        "Metallum attachments not bound yet (Sodium SOLID head); skipping this frame's "
+                        + "LOD pass. The LOD hook will need to move to the pass tail to render.");
+            }
+            return;
         }
         try (var enc = backend.beginRenderPass(pass)) {
             enc.setViewport(0, 0, fbw, fbh, 0.0f, 1.0f);

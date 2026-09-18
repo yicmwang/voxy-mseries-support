@@ -32,7 +32,15 @@ public class BasicSectionGeometryData implements IGeometryData {
         }
         Logger.info(msg);
         Logger.info("if your game crashes/exits here without any other log message, try manually decreasing the geometry capacity");
-        glGetError();//Clear any errors
+        // The allocation is backend-agnostic; only the error reporting around it is GL-specific.
+        // Calling glGetError with no GL context aborts the JVM, and sparse-buffer commitment is a
+        // GL extension Metal has no equivalent for (its buffers are always fully committed).
+        boolean glBackend = RenderBackendFactory.get().getType()
+                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
+
+        if (glBackend) {
+            glGetError();//Clear any errors
+        }
         IGpuBuffer buffer = null;
         if (!(Capabilities.INSTANCE.isNvidia)) {// && ThreadUtils.isWindows
             buffer = RenderBackendFactory.get().createBuffer(geometryCapacity, 0, false);//Only do this if we are not on nvidia
@@ -40,6 +48,15 @@ public class BasicSectionGeometryData implements IGeometryData {
             // or dont zero it at all
         } else {
             Logger.info("Running on nvidia, using workaround sparse buffer allocation");
+        }
+        if (!glBackend) {
+            if (buffer == null) {
+                throw new IllegalStateException("Unable to allocate geometry buffer");
+            }
+            this.geometryBuffer = buffer;
+            Logger.info("Successfully allocated the geometry buffer in "
+                    + (System.currentTimeMillis() - start) + "ms");
+            return;
         }
         int error = glGetError();
         if (error != GL_NO_ERROR || buffer == null) {

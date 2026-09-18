@@ -397,8 +397,11 @@ public class HierarchicalOcclusionTraverser {
     }
 
     private void traverseInternal(Viewport<?> viewport) {
-        {
-            //Fix mesa bug — these stick around between texture uploads and need resetting.
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            // Mesa workaround: these stick around between texture uploads and need resetting.
+            // GL-only state; Metal has no such global unpack state, and calling glPixelStorei
+            // with no context aborts the JVM.
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
             glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);

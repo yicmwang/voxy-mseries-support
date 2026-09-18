@@ -23,7 +23,12 @@ public class ModelStore {
     final IGpuBuffer modelBuffer;
     final IGpuBuffer modelColourBuffer;
     final IGpuTexture textures;
-    public final int blockSampler = glGenSamplers();
+    /**
+     * GL sampler for {@link #textures}. Zero under a non-GL backend: the raw-GL
+     * {@code glGenSamplers}/{@code glSamplerParameteri} calls abort the JVM with no context, and
+     * nothing reads this on Metal (the render encoder uses {@link #atlasSampler}).
+     */
+    public final int blockSampler;
     /**
      * Cross-backend sampler for {@link #textures}. Used by Metal's render
      * encoder path (MDIC's renderTerrainMetal). On GL we keep the legacy
@@ -53,10 +58,16 @@ public class ModelStore {
                 .getTexture(Identifier.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png")))
                 .maxMipLevel;
 
-        glSamplerParameteri(this.blockSampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-        glSamplerParameteri(this.blockSampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glSamplerParameteri(this.blockSampler, GL_TEXTURE_MIN_LOD, 0);
-        glSamplerParameteri(this.blockSampler, GL_TEXTURE_MAX_LOD, mipLvl);//Integer.numberOfTrailingZeros(ModelFactory.MODEL_TEXTURE_SIZE)
+        if (RenderBackendFactory.get().getType()
+                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            this.blockSampler = glGenSamplers();
+            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MIN_LOD, 0);
+            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MAX_LOD, mipLvl);//Integer.numberOfTrailingZeros(ModelFactory.MODEL_TEXTURE_SIZE)
+        } else {
+            this.blockSampler = 0;
+        }
 
         // Cross-backend mirror of blockSampler — same filter/wrap state.
         // Used by Metal's RenderEncoder.setSampler path; GL still uses

@@ -37,6 +37,11 @@ public class ModelTextureBakery {
     //Note: the first bit of metadata is if alpha discard is enabled
     private static final Matrix4f[] VIEWS = new Matrix4f[6];
 
+    /**
+     * GL capture target for the GL bake path. Null under a non-GL backend: constructing it calls
+     * glGenTextures, which aborts the JVM with no context. Metal uses {@link #metalCapture}, and the
+     * GL path is only entered when {@code isMetal} is false.
+     */
     private final GlViewCapture capture;
     /** M13 chunk 1: Metal-side bake target + atlas mirror + renderer. Lazy. */
     private MetalViewCapture metalCapture;
@@ -45,7 +50,10 @@ public class ModelTextureBakery {
     private final int width;
     private final int height;
     public ModelTextureBakery(int width, int height) {
-        this.capture = new GlViewCapture(width, height);
+        this.capture = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL
+                ? new GlViewCapture(width, height)
+                : null;
         this.width = width;
         this.height = height;
     }
@@ -128,7 +136,9 @@ public class ModelTextureBakery {
     }
 
     public void free() {
-        this.capture.free();
+        if (this.capture != null) {
+            this.capture.free();
+        }
         if (this.metalCapture != null) {
             this.metalCapture.free();
             this.metalCapture = null;

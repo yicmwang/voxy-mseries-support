@@ -271,10 +271,12 @@ public class VoxyRenderSystem {
             }
         }
 
-        for (int i = 0; i < 12; i++) {
-            GlStateManager._activeTexture(GlConst.GL_TEXTURE0+i);
-            GlStateManager._bindTexture(0);
-            glBindSampler(i, 0);
+        if (SAVE_GL_STATE) {
+            for (int i = 0; i < 12; i++) {
+                GlStateManager._activeTexture(GlConst.GL_TEXTURE0+i);
+                GlStateManager._bindTexture(0);
+                glBindSampler(i, 0);
+            }
         }
     }
 
@@ -413,11 +415,18 @@ public class VoxyRenderSystem {
         //var projection = ShadowMatrices.createOrthoMatrix(160, -16*300, 16*300);
         //var projection = new Matrix4f(matrices.projection());
 
-        int[] dims = new int[4];
-        glGetIntegerv(GL_VIEWPORT, dims);
-
-        int width = dims[2];
-        int height = dims[3];
+        // GL_VIEWPORT is only readable with a GL context; on Metal the non-GL branch below
+        // derives the size from MC's main render target instead (and does so deliberately --
+        // see its note on why GL_VIEWPORT is untrustworthy there anyway).
+        int width = 0;
+        int height = 0;
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            int[] dims = new int[4];
+            glGetIntegerv(GL_VIEWPORT, dims);
+            width = dims[2];
+            height = dims[3];
+        }
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                 != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
             // GL_VIEWPORT is NOT trustworthy here: MC re-renders the 16x16
