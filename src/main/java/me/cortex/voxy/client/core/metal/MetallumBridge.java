@@ -67,37 +67,45 @@ public final class MetallumBridge {
 
     /** Metallum's {@code MTLDevice}, or 0. */
     public static long device() {
+        resolve();
         return call(mDeviceHandle);
     }
 
     /** Metallum's {@code MTLCommandQueue}, or 0. */
     public static long commandQueue() {
+        resolve();
         return call(mCommandQueueHandle);
     }
 
     /** The frame's {@code MTLCommandBuffer}, or 0. */
     public static long commandBuffer() {
+        resolve();
         return call(mCommandBufferHandle);
     }
 
     /** The open {@code MTLRenderCommandEncoder}, or 0. */
     public static long renderEncoder() {
+        resolve();
         return call(mRenderEncoderHandle);
     }
 
     public static long colorAttachment() {
+        resolve();
         return call(mColorAttachment);
     }
 
     public static long depthAttachment() {
+        resolve();
         return call(mDepthAttachment);
     }
 
     public static int viewportWidth() {
+        resolve();
         return (int) call(mViewportWidth);
     }
 
     public static int viewportHeight() {
+        resolve();
         return (int) call(mViewportHeight);
     }
 

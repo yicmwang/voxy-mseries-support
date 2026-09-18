@@ -531,10 +531,41 @@ tasks.register('testVulkanClear', JavaExec) {
     }
 }
 
+// A second test source set that puts a fake com.metallum.render.MetalInterop on the classpath.
+// MetallumBridge resolves that class by name, so this is the only way to exercise the "Metallum
+// present" path: the main test source set must see it absent, and one JVM cannot see it both ways.
+sourceSets {
+    testMetallum {
+        java.srcDir 'src/testMetallum/java'
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+configurations {
+    testMetallumImplementation.extendsFrom testImplementation
+    testMetallumRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
 tasks.named('test', Test) {
     useJUnitPlatform()
     testLogging {
         events "passed", "failed", "skipped"
         exceptionFormat "full"
     }
+}
+
+tasks.register('testMetallum', Test) {
+    group = 'verification'
+    description = 'Runs tests with a fake Metallum MetalInterop on the classpath.'
+    testClassesDirs = sourceSets.testMetallum.output.classesDirs
+    classpath = sourceSets.testMetallum.runtimeClasspath
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "failed", "skipped"
+        exceptionFormat "full"
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('testMetallum')
 }
