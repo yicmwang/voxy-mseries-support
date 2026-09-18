@@ -36,6 +36,8 @@ public class MetalRenderBackend implements RenderBackend {
     private final long maxBufferLength;
     /** Lazily allocated MTLCommandBuffer for the current frame; 0 when no commands are queued. */
     private long activeCommandBuffer = 0;
+    /** False when the active buffer belongs to Metallum and must not be committed or released. */
+    private boolean ownsActiveCommandBuffer = true;
     /** Lazily-opened MTLBlitCommandEncoder on the active buffer for stream copies; 0 when closed. */
     private long activeBlitEncoder = 0;
     /**
@@ -61,7 +63,14 @@ public class MetalRenderBackend implements RenderBackend {
             throw new RuntimeException("Metal native library is not available");
         }
 
-        this.device = MetalNative.mtlCreateSystemDefaultDevice();
+        // Whole-frame Metal: Metallum owns the device and queue. Fall back to creating our own
+        // only when Metallum is absent (the standalone smoke-test path).
+        long metallumDevice = MetallumBridge.available() ? MetallumBridge.device() : 0L;
+        if (metallumDevice != 0) {
+            this.device = metallumDevice;
+        } else {
+            this.device = MetalNative.mtlCreateSystemDefaultDevice();
+        }
         if (this.device == 0) {
             throw new RuntimeException("Failed to create Metal device");
         }
@@ -69,7 +78,9 @@ public class MetalRenderBackend implements RenderBackend {
         String deviceName = MetalNative.mtlDeviceGetName(this.device);
         Logger.info("Metal device: " + deviceName);
 
-        this.commandQueue = MetalNative.mtlDeviceNewCommandQueue(this.device);
+        long metallumQueue = MetallumBridge.available() ? MetallumBridge.commandQueue() : 0L;
+        this.commandQueue = metallumQueue != 0 ? metallumQueue
+                : MetalNative.mtlDeviceNewCommandQueue(this.device);
         if (this.commandQueue == 0) {
             throw new RuntimeException("Failed to create Metal command queue");
         }
@@ -446,7 +457,16 @@ public class MetalRenderBackend implements RenderBackend {
 
     private void ensureActiveCommandBuffer() {
         if (this.activeCommandBuffer == 0) {
+            // Under whole-frame Metal, encode into Metallum's frame buffer so our passes are
+            // ordered with Sodium's and share its depth attachment. We must not commit it.
+            long metallumBuffer = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
+            if (metallumBuffer != 0) {
+                this.activeCommandBuffer = metallumBuffer;
+                this.ownsActiveCommandBuffer = false;
+                return;
+            }
             this.activeCommandBuffer = MetalNative.mtlCommandQueueNewCommandBuffer(this.commandQueue);
+            this.ownsActiveCommandBuffer = true;
             if (this.activeCommandBuffer == 0) {
                 throw new RuntimeException("mtlCommandQueueNewCommandBuffer returned NULL");
             }
@@ -850,6 +870,15 @@ public class MetalRenderBackend implements RenderBackend {
             this.pendingFenceSignals.clear();
         }
         this.activeBufferHasBlits = false;
+
+        if (!this.ownsActiveCommandBuffer) {
+            // Metallum owns this buffer and commits it once at end of frame. Drop our reference
+            // (not the buffer) so the next call picks up the frame's current buffer. Mid-frame
+            // readbacks cannot be satisfied from here — that is P3's fence work.
+            this.activeCommandBuffer = 0;
+            return;
+        }
+
         MetalNative.mtlCommandBufferCommit(this.activeCommandBuffer);
         // Sync mode for M3: wait for completion so the smoke test can check status
         // before the buffer is released. M5+ will move to async + per-frame fences.
