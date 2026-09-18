@@ -187,19 +187,7 @@ public final class ShaderCompilerSmokeTest {
                 // Phase C (issue #11) material g-buffer: quads.frag's PATCHED_SHADER
                 // path + the MetalVxGbufferEmitter appended, writing the 3 MRT planes.
                 // Probes that this permutation transpiles to MSL on Apple before the
-                // pipeline is wired on-device (MDIC vxMaterialMode path).
-                new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
-                        Map.of("PATCHED_SHADER", "", "VOXY_VX_GBUFFER", "", "VOXY_FORCE_OPAQUE_ALPHA", "",
-                               "NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0", "DOWN_FACE_TINT", "0.5",
-                               "Z_AXIS_FACE_TINT", "0.8", "X_AXIS_FACE_TINT", "0.6"),
-                        "lod/gl46/quads.frag (Phase C material g-buffer — opaque)",
-                        me.cortex.voxy.client.core.util.MetalVxGbufferEmitter.SOURCE),
-                new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
-                        Map.of("PATCHED_SHADER", "", "VOXY_VX_GBUFFER", "", "TRANSLUCENT", "",
-                               "NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0", "DOWN_FACE_TINT", "0.5",
-                               "Z_AXIS_FACE_TINT", "0.8", "X_AXIS_FACE_TINT", "0.6"),
-                        "lod/gl46/quads.frag (Phase C material g-buffer — translucent)",
-                        me.cortex.voxy.client.core.util.MetalVxGbufferEmitter.SOURCE),
+                // P2: the Phase C material g-buffer cases were Iris-only and are gone with Iris.
         };
 
         int passSpv = 0, failSpv = 0, passMsl = 0, failMsl = 0;

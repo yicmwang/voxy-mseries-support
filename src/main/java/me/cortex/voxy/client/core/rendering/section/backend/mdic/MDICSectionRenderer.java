@@ -344,9 +344,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // on dev); only the TRANSLUCENT (water) layer goes through the material g-buffer
             // + voxy_translucent resolve (issue #11). This is the mergeable shape.
             boolean vxOpaqueMat = pipeline.vxOpaqueMaterialMode();
-            String emitter = me.cortex.voxy.client.core.util.MetalVxGbufferEmitter.SOURCE;
-            String vxOpaqueFrag = vxOpaqueMat ? frag + emitter : frag;
-            String vxTransFrag = vxMaterial ? frag + emitter : frag;
+            // P2: the Phase C material g-buffer emitter was Iris-only and is gone with Iris.
+            String vxOpaqueFrag = frag;
+            String vxTransFrag = frag;
             boolean gbufferDebug = "1".equals(System.getenv("VOXY_VX_GBUFFER_DEBUG"));
             if (vxOpaqueMat) {
                 opaqueDefines.put("PATCHED_SHADER", "");
