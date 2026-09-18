@@ -1,5 +1,5 @@
 plugins {
-    id 'fabric-loom' version "1.14-SNAPSHOT"
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
     id 'maven-publish'
 }
 
@@ -107,11 +107,11 @@ loom {
     }
 }
 
-def modRuntimeOnlyMsk = {arg->}
+def runtimeOnlyMsk = {arg->}
 if (!isInGHA) {
-    modRuntimeOnlyMsk = { arg ->
+    runtimeOnlyMsk = { arg ->
         dependencies {
-            modRuntimeOnly(arg)
+            runtimeOnly(arg)
         }
     }
 }
@@ -119,58 +119,57 @@ if (!isInGHA) {
 dependencies {
     // To change the versions see the gradle.properties file
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings loom.officialMojangMappings()
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
 
-    modRuntimeOnlyMsk(fabricApi.module("fabric-api-base", project.fabric_version))
-    modRuntimeOnlyMsk(fabricApi.module("fabric-rendering-fluids-v1", project.fabric_version))
-    modRuntimeOnlyMsk(fabricApi.module("fabric-resource-loader-v0", project.fabric_version))
-    modRuntimeOnlyMsk(fabricApi.module("fabric-command-api-v2", project.fabric_version))
+    runtimeOnlyMsk(fabricApi.module("fabric-api-base", project.fabric_version))
+    runtimeOnlyMsk(fabricApi.module("fabric-rendering-fluids-v1", project.fabric_version))
+    runtimeOnlyMsk(fabricApi.module("fabric-resource-loader-v0", project.fabric_version))
+    runtimeOnlyMsk(fabricApi.module("fabric-command-api-v2", project.fabric_version))
 
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
     if (true) {
-        modImplementation "maven.modrinth:sodium:mc1.21.11-0.8.1-fabric"
+        implementation "maven.modrinth:sodium:mc26.2-0.9.2-fabric"
     } else {
-        modImplementation "net.caffeinemc:sodium-fabric:0.8.1-SNAPSHOT+mc1.21.11+"
+        implementation "net.caffeinemc:sodium-fabric:0.8.1-SNAPSHOT+mc1.21.11+"
     }
 
-    modImplementation("maven.modrinth:lithium:mc1.21.11-0.21.0-fabric")
+    implementation("maven.modrinth:lithium:mc26.2-0.25.1-fabric")
 
-    //modRuntimeOnlyMsk "drouarb:nvidium:0.4.1-beta4:1.21.6@jar"
-    modCompileOnly "drouarb:nvidium:0.4.1-beta4:1.21.6@jar"
+    //runtimeOnlyMsk "drouarb:nvidium:0.4.1-beta4:1.21.6@jar"
+    // dropped for 26.2: compileOnly "drouarb:nvidium:0.4.1-beta4:1.21.6@jar"
 
-    modCompileOnly("maven.modrinth:modmenu:17.0.0-alpha.1")
-    modRuntimeOnlyMsk("maven.modrinth:modmenu:17.0.0-alpha.1")
+    compileOnly("maven.modrinth:modmenu:20.0.0")
+    runtimeOnlyMsk("maven.modrinth:modmenu:20.0.0")
 
-    modCompileOnly("maven.modrinth:iris:1.10.7+1.21.11-fabric")
+    compileOnly("maven.modrinth:iris:1.11.2+26.2-fabric")
     // Iris in the dev runtime by default: this fork is being compat-tested
     // alongside Iris + other mods. Note Voxy's Iris pipeline integration is
     // GL-only — on Metal, LOD terrain is NOT shaded by packs; this tests
     // coexistence (load order, mixins, GL state), not pack support.
-    modRuntimeOnlyMsk("maven.modrinth:iris:1.10.7+1.21.11-fabric")
+    runtimeOnlyMsk("maven.modrinth:iris:1.11.2+26.2-fabric")
 
-    //modCompileOnly("maven.modrinth:starlight:1.1.3+1.20.4")
+    //compileOnly("maven.modrinth:starlight:1.1.3+1.20.4")
 
-    //modCompileOnly("maven.modrinth:immersiveportals:v5.1.7-mc1.20.4")
+    //compileOnly("maven.modrinth:immersiveportals:v5.1.7-mc1.20.4")
 
-    modCompileOnly("maven.modrinth:chunky:1.4.55-fabric")
-    modRuntimeOnlyMsk("maven.modrinth:chunky:1.4.55-fabric")
+    compileOnly("maven.modrinth:chunky:DCgX52a5")
+    runtimeOnlyMsk("maven.modrinth:chunky:DCgX52a5")
 
-    modRuntimeOnlyMsk("maven.modrinth:spark:1.10.152-fabric")
-    modRuntimeOnlyMsk("maven.modrinth:fabric-permissions-api:0.6.1")
-    //modRuntimeOnly("maven.modrinth:nsight-loader:1.2.0")
+    // dropped for 26.2: runtimeOnlyMsk("maven.modrinth:spark:1.10.152-fabric")
+    // dropped for 26.2: runtimeOnlyMsk("maven.modrinth:fabric-permissions-api:0.6.1")
+    //runtimeOnly("maven.modrinth:nsight-loader:1.2.0")
 
-    //modImplementation('io.github.douira:glsl-transformer:2.0.1')
+    //implementation('io.github.douira:glsl-transformer:2.0.1')
 
-    modCompileOnly("maven.modrinth:vivecraft:1.21.9-1.3.2-fabric")
+    compileOnly("maven.modrinth:vivecraft:26.2-1.3.12-fabric")
 
-    modCompileOnly("maven.modrinth:flashback:rNCr1Rbs")
+    compileOnly("maven.modrinth:flashback:VaqZB1DF")
 }
 
 // Iris dev-runtime fix: Loom does not load the nested (jar-in-jar) libraries
-// of modRuntimeOnly dependencies, so Iris's bundled shader-preprocessor libs
+// of runtimeOnly dependencies, so Iris's bundled shader-preprocessor libs
 // (jcpp, glsl-transformer, antlr4-runtime) were missing in runClient and Iris
 // crashed loading any shader pack (NoClassDefFoundError:
 // org/anarres/cpp/LexerException). glsl-transformer 3.0.0-preX is not
@@ -179,7 +178,7 @@ dependencies {
 // is bumped. Dev-runtime only; no effect on the built mod jar.
 if (!isInGHA) {
     def irisJijConfig = configurations.detachedConfiguration(
-            dependencies.create("maven.modrinth:iris:1.10.7+1.21.11-fabric"))
+            dependencies.create("maven.modrinth:iris:1.11.2+26.2-fabric"))
     irisJijConfig.transitive = false
     def irisJijDir = layout.buildDirectory.dir("iris-jij").get().asFile
     def extractIrisJij = tasks.register('extractIrisJij', Copy) {
@@ -202,7 +201,7 @@ if (!isInGHA) {
 }
 
 
-def targetJavaVersion = 21
+def targetJavaVersion = 25
 tasks.withType(JavaCompile).configureEach {
     it.options.encoding = "UTF-8"
     it.options.release = targetJavaVersion
@@ -265,16 +264,12 @@ processIncludeJars {
     jars.from(makeExcludedRocksDB)
 }
 
-remapJar {
-    doFirst {
-        delete fileTree(getDestinationDirectory().get())
-    }
-
-    if (!isInGHA) {
-        def hash = gitCommitHash();
-        if (!hash.equals("<UnknownCommit>")) {
-            archiveClassifier.set(hash);
-        }
+// 26.2: MC ships deobfuscated, so the new loom plugin has no remapJar task.
+// The commit-hash classifier is applied to `jar` instead.
+if (!isInGHA) {
+    def hash = gitCommitHash();
+    if (!hash.equals("<UnknownCommit>")) {
+        tasks.named('jar') { archiveClassifier.set(hash) }
     }
 }
 
@@ -352,7 +347,7 @@ if (!isInGHA) {
 
     dependencies {
         /*
-        modRuntimeOnly('me.djtheredstoner:DevAuth-fabric:1.2.1') {
+        runtimeOnly('me.djtheredstoner:DevAuth-fabric:1.2.1') {
             exclude group: 'net.fabricmc', module: 'fabric-loader'
         }*/
     }
