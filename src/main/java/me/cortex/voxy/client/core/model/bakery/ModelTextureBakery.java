@@ -1,5 +1,9 @@
 package me.cortex.voxy.client.core.model.bakery;
 
+import com.mojang.blaze3d.textures.GpuTexture;
+import me.cortex.voxy.client.core.gpu.IGpuTexture;
+import me.cortex.voxy.client.core.metal.MetallumAttachmentTexture;
+import me.cortex.voxy.client.core.metal.MetallumBridge;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.core.BlockPos;
@@ -440,6 +444,38 @@ public class ModelTextureBakery {
      * re-uploads the mesh per face (each in its own LOAD-action pass so the
      * accumulated pixels survive).
      */
+    /**
+     * Adapter over MC's block atlas when it is already a Metallum texture, created once and
+     * re-pointed per bake. Kept as a field rather than made fresh each call because the adapter owns
+     * a registration in the backend's handle map, and churning that once per bake would leak ids.
+     */
+    private MetallumAttachmentTexture directBlockAtlas;
+
+    private static GpuTexture mcBlockAtlas() {
+        return Minecraft.getInstance().getTextureManager()
+                .getTexture(Identifier.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png"))
+                .getTexture();
+    }
+
+    /**
+     * Open the bake pass with whichever atlas source this backend has. Split out because the two
+     * paths take different arguments: the Metal one an {@link IGpuTexture} over MC's own texture, the
+     * GL one a raw GL id for the mirror to read back.
+     */
+    private void beginBake(long atlasMetalHandle, int blockTextureId,
+                           long meshAddr, int quadCount, boolean clear) {
+        if (atlasMetalHandle == 0L) {
+            this.metalCapture.beginBake(blockTextureId, meshAddr, quadCount, clear);
+            return;
+        }
+        if (this.directBlockAtlas == null) {
+            this.directBlockAtlas = MetallumAttachmentTexture.ofMetalTexture(
+                    "mc-block-atlas", () -> MetallumBridge.textureHandle(mcBlockAtlas()));
+        }
+        this.directBlockAtlas.refresh();
+        this.metalCapture.beginBake(this.directBlockAtlas, meshAddr, quadCount, clear);
+    }
+
     private int renderToStreamMetal(BlockState state, long destAddr) {
         GlViewCapture.DIAG_BAKE_INVOCATIONS.incrementAndGet();
         if (state.getRenderShape() == RenderShape.INVISIBLE && !(state.getBlock() instanceof LiquidBlock)) {
@@ -459,13 +495,27 @@ public class ModelTextureBakery {
             isBlock = false;
         }
 
-        // MC's block atlas — same lookup the GL path does. We pass the GL id
-        // through to the AtlasMirror (inside MetalViewCapture) which lifts it
-        // onto a Shared Metal texture lazily.
-        var tex = Minecraft.getInstance().getTextureManager()
-                .getTexture(Identifier.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png"))
-                .getTexture();
-        int blockTextureId = ((com.mojang.blaze3d.opengl.GlTexture) tex).glId();
+        // MC's block atlas, resolved to something the Metal bake can sample.
+        //
+        // Under whole-frame Metal the atlas is already an MTLTexture on Metallum's device, so it is
+        // sampled directly and the AtlasMirror is bypassed entirely. Only when it is a GL texture
+        // (the hybrid/GL backends) does the mirror's readback-and-upload path get used, and only
+        // then is `glId()` meaningful — casting unconditionally is what made this method throw
+        // ClassCastException on Metal and forced the whole bakery behind VOXY_BAKERY_OFF.
+        GpuTexture atlasTexture = mcBlockAtlas();
+        long atlasMetalHandle = MetallumBridge.textureHandle(atlasTexture);
+        int blockTextureId = 0;
+        if (atlasMetalHandle == 0L) {
+            if (atlasTexture instanceof com.mojang.blaze3d.opengl.GlTexture gl) {
+                blockTextureId = gl.glId();
+            } else {
+                // Not a Metallum texture and not a GL one: no backend can supply the atlas. Bake
+                // nothing and let the caller see a blank slot, rather than aborting the frame on a
+                // cast -- the failure mode that put this whole method behind a kill switch.
+                zeroDestAddr(destAddr);
+                return 0;
+            }
+        }
 
         boolean isAnyShaded = false;
         boolean isAnyDarkend = false;
@@ -481,7 +531,7 @@ public class ModelTextureBakery {
             isAnyShaded  |= this.vc.anyShaded;
             isAnyDarkend |= this.vc.anyDarkendTex;
             if (!this.vc.isEmpty()) {
-                this.metalCapture.beginBake(blockTextureId,
+                this.beginBake(atlasMetalHandle, blockTextureId,
                         this.vc.getAddress(), this.vc.quadCount(), /*clear*/false);
                 for (int i = 0; i < VIEWS.length; i++) {
                     // M13 chunk 1 fix (2026-05-16): Metal-friendly projection
@@ -518,7 +568,7 @@ public class ModelTextureBakery {
                 if (this.vc.isEmpty()) continue;
                 isAnyShaded  |= this.vc.anyShaded;
                 isAnyDarkend |= this.vc.anyDarkendTex;
-                this.metalCapture.beginBake(blockTextureId,
+                this.beginBake(atlasMetalHandle, blockTextureId,
                         this.vc.getAddress(), this.vc.quadCount(), /*clear*/false);
                 // Same Metal projection as the block loop above: m11=-2/m31=+1
                 // Y-flip + z compressed to NDC [0.25, 0.75]. The z compression

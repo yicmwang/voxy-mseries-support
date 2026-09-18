@@ -23,7 +23,7 @@ public final class MetallumBridge {
     private static Method mIsAvailable, mDeviceHandle, mCommandQueueHandle, mCommandBufferHandle,
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
             mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
-            mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport;
+            mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -43,6 +43,7 @@ public final class MetallumBridge {
             mEndCurrentEncoder = interop.getMethod("endCurrentEncoder");
             mEndCurrentEncoderAndReport = interop.getMethod("endCurrentEncoderAndReport");
             mOpenEncoderHandle = interop.getMethod("openEncoderHandle");
+            mTextureHandle = interop.getMethod("textureHandle", Class.forName("com.mojang.blaze3d.textures.GpuTexture"));
             mRenderEncoderHandle = interop.getMethod("currentRenderEncoderHandle");
             mColorAttachment = interop.getMethod("currentColorAttachmentHandle");
             mDepthAttachment = interop.getMethod("currentDepthAttachmentHandle");
@@ -145,6 +146,27 @@ public final class MetallumBridge {
             Object v = mOpenEncoderHandle.invoke(null);
             return v instanceof Long l ? l : 0L;
         } catch (Throwable t) {
+            return 0L;
+        }
+    }
+
+    /**
+     * The raw {@code MTLTexture} handle behind a Blaze3D texture, or {@code 0} when it is not a
+     * Metallum texture (or Metallum is absent).
+     *
+     * <p>This is how Voxy samples Minecraft's own textures under whole-frame Metal — notably the
+     * block atlas, which is already on Metallum's device and so needs no readback or mirror.
+     */
+    public static long textureHandle(Object gpuTexture) {
+        resolve();
+        if (mTextureHandle == null || gpuTexture == null) {
+            return 0L;
+        }
+        try {
+            Object v = mTextureHandle.invoke(null, gpuTexture);
+            return v instanceof Long l ? l : 0L;
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.textureHandle failed", t);
             return 0L;
         }
     }

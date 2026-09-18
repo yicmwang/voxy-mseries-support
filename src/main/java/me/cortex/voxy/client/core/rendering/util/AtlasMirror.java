@@ -163,6 +163,24 @@ public final class AtlasMirror {
         return this.mirror;
     }
 
+    /**
+     * Sampler conventions for sampling MC's block atlas in the bakery.
+     *
+     * <p>Shared by both atlas sources — the mirrored GL texture and the direct Metal one — so a block
+     * cannot bake differently depending on which path produced its atlas. NEAREST mip filter (Voxy's
+     * terrain shader uses {@code textureGrad} and needs derivatives, but the bakery shaders use
+     * {@code textureLod}); MIN/MAG are LINEAR so the bake does not look pixelated when projected
+     * through the 6-face cube transforms.
+     */
+    public static IGpuSampler createAtlasSampler(final RenderBackend backend) {
+        return backend.createSampler(SamplerDesc.builder()
+                .filter(SamplerDesc.Filter.LINEAR, SamplerDesc.Filter.LINEAR)
+                .mipFilter(SamplerDesc.MipFilter.NEAREST)
+                .wrap(SamplerDesc.Wrap.CLAMP_TO_EDGE, SamplerDesc.Wrap.CLAMP_TO_EDGE)
+                .label("Voxy.MCBlockAtlasSampler")
+                .build());
+    }
+
     public IGpuTexture texture() { return this.mirror; }
     public IGpuSampler sampler() { return this.sampler; }
     public int width()  { return this.width; }
@@ -191,17 +209,7 @@ public final class AtlasMirror {
             this.lastSyncedGlId = -1;
         }
         if (this.sampler == null) {
-            // Match MC's block-atlas sampler conventions: NEAREST mip filter
-            // (Voxy's terrain shader uses textureGrad which needs derivatives
-            // but the bakery shaders typically use textureLod). MAX/MIN are
-            // LINEAR so the bake doesn't look pixelated when projected
-            // through the 6-face cube transforms.
-            this.sampler = this.backend.createSampler(SamplerDesc.builder()
-                    .filter(SamplerDesc.Filter.LINEAR, SamplerDesc.Filter.LINEAR)
-                    .mipFilter(SamplerDesc.MipFilter.NEAREST)
-                    .wrap(SamplerDesc.Wrap.CLAMP_TO_EDGE, SamplerDesc.Wrap.CLAMP_TO_EDGE)
-                    .label("Voxy.MCBlockAtlasSampler")
-                    .build());
+            this.sampler = createAtlasSampler(this.backend);
         }
     }
 

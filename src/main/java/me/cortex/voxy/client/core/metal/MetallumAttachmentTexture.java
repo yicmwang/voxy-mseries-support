@@ -5,7 +5,9 @@ import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import java.util.function.LongSupplier;
 
 /**
- * Adapts one of Metallum's frame attachments to {@link IGpuTexture}.
+ * Adapts a Metallum-owned texture to {@link IGpuTexture} — most often one of the frame's
+ * attachments, but any texture already on Metallum's device qualifies (see
+ * {@link #ofMetalTexture}).
  *
  * <p>This is the piece that lets the P2 bridge rewire keep the existing render path: instead of
  * rendering into an IOSurface-backed texture and compositing, Voxy renders straight into the frame's
@@ -32,6 +34,17 @@ public final class MetallumAttachmentTexture implements IGpuTexture {
     public MetallumAttachmentTexture(String label, LongSupplier handleSource) {
         this.label = label;
         this.handleSource = handleSource;
+    }
+
+    /**
+     * An {@link IGpuTexture} over an arbitrary Metallum texture — not necessarily a frame attachment.
+     *
+     * <p>For textures that already live on Metallum's device and therefore need no cross-API mirror,
+     * such as Minecraft's block atlas under whole-frame Metal. The supplier is re-read on every
+     * {@link #refresh()}, so a resource-pack reload that swaps the texture is picked up.
+     */
+    public static MetallumAttachmentTexture ofMetalTexture(String label, LongSupplier handleSource) {
+        return new MetallumAttachmentTexture(label, handleSource);
     }
 
     /** Metallum's currently bound colour attachment. */

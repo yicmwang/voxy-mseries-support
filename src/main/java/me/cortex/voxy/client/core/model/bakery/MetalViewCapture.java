@@ -1,6 +1,7 @@
 package me.cortex.voxy.client.core.model.bakery;
 
 import me.cortex.voxy.client.core.gpu.BackendType;
+import me.cortex.voxy.client.core.gpu.IGpuSampler;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import me.cortex.voxy.client.core.gpu.RenderBackend;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
@@ -57,6 +58,8 @@ public final class MetalViewCapture {
     private final RenderBackend backend;
     private final MetalTexture bakeTarget;
     private final AtlasMirror atlasMirror;
+    /** Atlas sampler, created on first bake and shared by both atlas sources. */
+    private IGpuSampler sampler;
     private final MetalBudgetBufferRenderer renderer;
     private final long readbackBuffer;
     private final long readbackBytes;
@@ -117,11 +120,29 @@ public final class MetalViewCapture {
         this.backend.submit();
     }
 
+    /**
+     * GL path: MC's atlas is a GL texture, so it has to be mirrored onto the Metal device first.
+     * {@code mcAtlasGlId} is the id of {@code textures/atlas/blocks.png}.
+     */
     public void beginBake(int mcAtlasGlId, long meshAddr, int quadCount, boolean clear) {
+        beginBake(this.atlasMirror.syncMetal(mcAtlasGlId), meshAddr, quadCount, clear);
+    }
+
+    /**
+     * Whole-frame Metal: MC's atlas is <b>already</b> a Metal texture on this device, so it is
+     * sampled directly.
+     *
+     * <p>This is strictly better than the mirror path rather than merely a port of it. The mirror
+     * exists to cross a context boundary — bind the GL texture, read every texel back through
+     * {@code nglGetTexImage}, upload it to a Metal texture, and repeat whenever the atlas id changes.
+     * Under whole-frame Metal there is no boundary to cross: the source is already samplable, so the
+     * readback, the staging buffer, the id-change cache and its warm-up heuristic all drop away, and
+     * the real mip chain comes along instead of being truncated to level 0.
+     */
+    public void beginBake(IGpuTexture atlas, long meshAddr, int quadCount, boolean clear) {
         if (this.activeBake) {
             throw new IllegalStateException("beginBake while a previous bake is active");
         }
-        IGpuTexture atlas = this.atlasMirror.syncMetal(mcAtlasGlId);
         if (atlas == null) {
             // MC's atlas not yet ready — leave the bake target zeroed. The
             // pack loop below will emit transparent black pixels which the
@@ -129,8 +150,19 @@ public final class MetalViewCapture {
             return;
         }
         this.renderer.beginPass(this.bakeTarget, this.totalW, this.totalH, clear);
-        this.renderer.setup(meshAddr, quadCount, atlas, this.atlasMirror.sampler());
+        this.renderer.setup(meshAddr, quadCount, atlas, this.bakeSampler());
         this.activeBake = true;
+    }
+
+    /**
+     * Sampler for the atlas, created once. Both paths share {@link AtlasMirror}'s conventions so a
+     * block cannot bake differently depending on which one supplied its atlas.
+     */
+    private IGpuSampler bakeSampler() {
+        if (this.sampler == null) {
+            this.sampler = AtlasMirror.createAtlasSampler(this.backend);
+        }
+        return this.sampler;
     }
 
     /**
@@ -343,6 +375,7 @@ public final class MetalViewCapture {
     public void free() {
         this.renderer.shutdown();
         this.atlasMirror.free();
+        if (this.sampler != null) { this.sampler.close(); this.sampler = null; }
         if (this.bakeTarget != null) this.bakeTarget.free();
         if (this.readbackBuffer != 0L) MemoryUtil.nmemFree(this.readbackBuffer);
     }
