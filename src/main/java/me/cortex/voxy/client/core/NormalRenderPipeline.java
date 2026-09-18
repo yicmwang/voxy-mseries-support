@@ -139,7 +139,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
                 long addr = stack.nmalloc(FOG_PUSH_SIZE);
                 if (Math.abs(end - start) > 1) {
                     float invEndFogDelta = 1f / (end - start);
-                    float endDistance = Math.max(Minecraft.getInstance().gameRenderer.getRenderDistance(), 20 * 16);//TODO: make this constant a config option
+                    float endDistance = Math.max((Minecraft.getInstance().options.renderDistance().get() * 16), 20 * 16);//TODO: make this constant a config option
                     endDistance *= (float) Math.sqrt(3);
                     float startDelta = -start * invEndFogDelta;
                     // endParams vec4

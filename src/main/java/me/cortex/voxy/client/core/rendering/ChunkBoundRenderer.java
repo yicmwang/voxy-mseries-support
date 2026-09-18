@@ -264,7 +264,7 @@ public class ChunkBoundRenderer {
                 (float) (viewport.cameraY - sy),
                 (float) (viewport.cameraZ - sz));
         negInnerSec.getToAddress(ptr + 80);
-        float renderDistance = Math.max(Minecraft.getInstance().gameRenderer.getRenderDistance(), 20 * 16);
+        float renderDistance = Math.max((Minecraft.getInstance().options.renderDistance().get() * 16), 20 * 16);
         MemoryUtil.memPutFloat(ptr + 92, renderDistance);
 
         var mvp = viewport.MVP.translate(negInnerSec.negate(), new Matrix4f());

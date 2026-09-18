@@ -149,7 +149,7 @@ public final class IrisGbufferInjector {
             // (which ends at renderDistance << frac*far), still < 1.0 for the
             // pack's sky test, but outside the saturated fog band.
             // VOXY_IRIS_DEPTH_CLAMP_FRAC tunes (default 0.75).
-            float mcFar = net.minecraft.client.Minecraft.getInstance().gameRenderer.getDepthFar();
+            float mcFar = (net.minecraft.client.Minecraft.getInstance().options.renderDistance().get() * 16f);
             org.joml.Vector4f clampPoint = new org.joml.Vector4f(0, 0, -DEPTH_CLAMP_FRAC * mcFar, 1)
                     .mul(viewport.vanillaProjection);
             float maxNdcZ = clampPoint.z / clampPoint.w;

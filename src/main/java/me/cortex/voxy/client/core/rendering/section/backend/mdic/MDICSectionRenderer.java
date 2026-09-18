@@ -821,7 +821,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             if (Math.abs(end - start) > 1) {
                 float invEndFogDelta = 1f / (end - start);
                 float endDistance = Math.max(
-                        Minecraft.getInstance().gameRenderer.getRenderDistance(),
+                        (Minecraft.getInstance().options.renderDistance().get() * 16),
                         20 * 16);
                 endDistance *= (float) Math.sqrt(3);
                 float startDelta = -start * invEndFogDelta;
@@ -861,7 +861,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             }
             // Ramp window: start past the LOD<->MC seam (seam parity keeps MC's
             // exact 0.706), reach the target alpha a few render distances out.
-            float rdBlocks = Math.max(Minecraft.getInstance().gameRenderer.getRenderDistance(), 32f);
+            float rdBlocks = Math.max((Minecraft.getInstance().options.renderDistance().get() * 16), 32f);
             float rampStart = WATER_FAR_ALPHA_START > 0f
                     ? WATER_FAR_ALPHA_START
                     : Math.max(rdBlocks * 1.5f, 384f);
