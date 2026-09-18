@@ -109,6 +109,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     }
 
     /** IOSurface bridge for the Metal render path. Lazy-allocated on first non-GL frame. */
+    /**
+     * Whole-frame Metal: the frame's own attachments, adapted to IGpuTexture. When these are bound
+     * Voxy renders straight into Metallum's pass and there is no bridge and no composite.
+     */
+    private me.cortex.voxy.client.core.metal.MetallumAttachmentTexture metallumColor;
+    private me.cortex.voxy.client.core.metal.MetallumAttachmentTexture metallumDepth;
+    /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
+    private boolean useMetallumTarget;
+
     private me.cortex.voxy.client.core.interop.IOSurfaceBridge metalBridge;
     private int metalBridgeWidth;
     private int metalBridgeHeight;
@@ -591,7 +600,9 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //    bridge is the cross-context handle: Metal renders into the
         //    backing MTLTexture, IOSurfaceBridgeCompositor blits it into MC's
         //    main RT via a CGL-bound GL_TEXTURE_RECTANGLE source FBO.
-        if (this.metalBridge == null || this.metalBridgeWidth != fbw || this.metalBridgeHeight != fbh) {
+        boolean metallumTarget = me.cortex.voxy.client.core.metal.MetallumBridge.available();
+        if (!metallumTarget
+                && (this.metalBridge == null || this.metalBridgeWidth != fbw || this.metalBridgeHeight != fbh)) {
             if (this.metalBridge != null) this.metalBridge.close();
             this.metalBridge = me.cortex.voxy.client.core.interop.IOSurfaceBridge.create(
                     mrb.device(), fbw, fbh,
@@ -776,14 +787,41 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.metalVxTrans2 = ensurePlaneBridge(this.metalVxTrans2, mrb, fbw, fbh);
         }
         var passBuilder = me.cortex.voxy.client.core.gpu.RenderPassDesc.builder(fbw, fbh);
-        if (vxOpaqueMat) {
+        if (metallumTarget) {
+            if (this.metallumColor == null) {
+                this.metallumColor = me.cortex.voxy.client.core.metal.MetallumAttachmentTexture.color();
+            }
+            if (this.metallumDepth == null) {
+                this.metallumDepth = me.cortex.voxy.client.core.metal.MetallumAttachmentTexture.depth();
+            }
+            this.metallumColor.refresh();
+            this.metallumDepth.refresh();
+        }
+        this.useMetallumTarget = metallumTarget
+                && this.metallumColor.id() != -1 && this.metallumDepth.id() != -1;
+        if (this.useMetallumTarget) {
+            // Whole-frame Metal: draw straight into the frame's own attachments. LOAD on both,
+            // not CLEAR -- at SOLID-head the frame already holds the sky and MC's cleared depth,
+            // and Sodium's near terrain draws over the LODs afterwards. Voxy owns neither buffer,
+            // so it must not clear them.
+            passBuilder.addColorAttachment(this.metallumColor, 0,
+                            me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
+                            me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
+                            0f, 0f, 0f, 0f)
+                    .depthAttachment(this.metallumDepth, 0,
+                            me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
+                            me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
+                            0f);
+        } else if (vxOpaqueMat) {
             passBuilder.clearColor(this.metalVxOpaque0.asGpuTexture(), 0f, 0f, 0f, 0f)
                        .clearColor(this.metalVxOpaque1.asGpuTexture(), 0f, 0f, 0f, 0f)
                        .clearColor(this.metalVxOpaque2.asGpuTexture(), 0f, 0f, 0f, 0f);
         } else {
             passBuilder.clearColor(this.metalBridge.asGpuTexture(), clearR, clearG, clearB, clearA);
         }
-        var pass = passBuilder.clearDepth(this.metalDepthTex, 1.0f).build();
+        var pass = this.useMetallumTarget
+                ? passBuilder.build()
+                : passBuilder.clearDepth(this.metalDepthTex, 1.0f).build();
         // Submersion far-field skip: with the eye in water/lava the env fog
         // saturates at 24-96 blocks while every LOD fragment sits far beyond
         // it — the whole LOD field is 100% fog colour by construction. Drawing
