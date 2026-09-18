@@ -308,7 +308,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             Logger.info("[Metal-VXSTATS] skyLight   hist[0..15]=" + java.util.Arrays.toString(skyHist));
             var mc = net.minecraft.client.Minecraft.getInstance();
             if (mc != null && mc.level != null) {
-                long dt = mc.level.getLevelData().getDayTime() % 24000L;
+                long dt = mc.level.getLevelData().getGameTime() % 24000L;
                 Logger.info("[Metal-VXSTATS] worldDayTime=" + dt + " (0-12000=day, 13000-23000=night)");
             }
         } finally {

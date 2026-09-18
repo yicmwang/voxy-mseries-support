@@ -60,10 +60,13 @@ public class LightMapHelper {
     private static long stagingAddr;
     private static int lastSyncedFrame = -1;
     private static boolean lightmapSizeWarned = false;
+    private static boolean warnedNoGlLightmap = false;
 
     public static void bind(int lightingIndex) {
-        glBindSampler(lightingIndex, 0);
-        bindTextureUnit(lightingIndex, ((com.mojang.blaze3d.opengl.GlTexture)(Minecraft.getInstance().gameRenderer.lightmap().getTextureView().texture())).glId());
+        // P1: GL lightmap mirror is a no-op. This whole helper is replaced in P2 by
+        // binding Metallum's lightmap texture directly.
+        if (!warnedNoGlLightmap) { warnedNoGlLightmap = true;
+            me.cortex.voxy.common.Logger.warn("LightMapHelper: GL lightmap mirror disabled (P1 no-op)"); }
     }
 
     /**
@@ -118,8 +121,12 @@ public class LightMapHelper {
         if (frameId == lastSyncedFrame) return;
         lastSyncedFrame = frameId;
 
-        var lightTex = Minecraft.getInstance().gameRenderer.lightmap().getTextureView().texture();
-        int glId = ((com.mojang.blaze3d.opengl.GlTexture) lightTex).glId();
+        // P1: GL lightmap mirror is disabled — there is no GL context under Metal. P2 binds
+        // Metallum's lightmap texture directly instead of copying from GL.
+        if (true) {
+            return;
+        }
+        int glId = 0;
 
         int prevActive = glGetInteger(GL_ACTIVE_TEXTURE);
         glActiveTexture(GL_TEXTURE0);

@@ -16,8 +16,8 @@ import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.util.Pair;
 import me.cortex.voxy.common.world.other.Mapper;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.color.block.BlockColor;
-import net.minecraft.client.renderer.ItemBlockRenderTypes;
+import net.minecraft.client.color.block.BlockTintSource;
+import java.util.List;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -430,7 +430,7 @@ public class ModelFactory {
             }
         }
 
-        var colourProvider = getColourProvider(blockState.getBlock());
+        var colourProvider = getTintSources(blockState);
 
         boolean isBiomeColourDependent = false;
         if (colourProvider != null) {
@@ -466,16 +466,8 @@ public class ModelFactory {
             this.fluidStateLUT[modelId] = clientFluidStateId;
         }
 
-        ChunkSectionLayer blockRenderLayer = null;
-        if (blockState.getBlock() instanceof LiquidBlock) {
-            blockRenderLayer = ItemBlockRenderTypes.getRenderLayer(blockState.getFluidState());
-        } else {
-            if (blockState.getBlock() instanceof LeavesBlock) {
-                blockRenderLayer = ChunkSectionLayer.SOLID;
-            } else {
-                blockRenderLayer = ItemBlockRenderTypes.getChunkRenderType(blockState);
-            }
-        }
+        // 26.2 removed ItemBlockRenderTypes; LayerFor mirrors the same decision the bakery uses.
+        ChunkSectionLayer blockRenderLayer = layerFor(blockState);
 
 
         int checkMode = blockRenderLayer==ChunkSectionLayer.SOLID?TextureUtils.WRITE_CHECK_STENCIL:TextureUtils.WRITE_CHECK_ALPHA;
@@ -820,7 +812,7 @@ public class ModelFactory {
         int i = 0;
         long modelUpPtr = result.modelBiomeIndexPairs.address;
         for (var entry : this.modelsRequiringBiomeColours) {
-            var colourProvider = getColourProvider(entry.right().getBlock());
+            var colourProvider = getTintSources(entry.right());
             if (colourProvider == null) {
                 throw new IllegalStateException();
             }
@@ -839,14 +831,29 @@ public class ModelFactory {
         return result;
     }
 
-    private static BlockColor getColourProvider(Block block) {
-        return Minecraft.getInstance().getBlockColors().blockColors.byId(BuiltInRegistries.BLOCK.getId(block));
+    /** Mirrors ModelTextureBakery.layerFor: 26.2 has no per-state layer lookup. */
+    private static ChunkSectionLayer layerFor(BlockState state) {
+        if (state.getBlock() instanceof LiquidBlock) return ChunkSectionLayer.TRANSLUCENT;
+        if (state.getBlock() instanceof LeavesBlock) return ChunkSectionLayer.SOLID;
+        return ChunkSectionLayer.CUTOUT;
+    }
+
+    private static List<BlockTintSource> getTintSources(BlockState block) {
+        if (block.getBlock() instanceof LiquidBlock) {//If is pure fluid
+            var tintSource = Minecraft.getInstance().getModelManager().getFluidStateModelSet().get(block.getFluidState()).tintSource();
+            if (tintSource == null) return null;
+            return List.of(tintSource);
+        } else {
+            var tints = Minecraft.getInstance().getBlockColors().getTintSources(block);
+            if (tints.isEmpty()) return null;
+            return tints;
+        }
     }
 
     //TODO: add a method to detect biome dependent colours (can do by detecting if getColor is ever called)
     // if it is, need to add it to a list and mark it as biome colour dependent or something then the shader
     // will either use the uint as an index or a direct colour multiplier
-    private static int captureColourConstant(BlockColor colorProvider, BlockState state, Biome biome) {
+    private static int captureColourConstant(List<BlockTintSource> tintSources, BlockState state, Biome biome) {
         var getter = new BlockAndTintGetter() {
             @Override
             public net.minecraft.world.level.CardinalLighting cardinalLighting() {
@@ -894,13 +901,17 @@ public class ModelFactory {
                 return 0;
             }
         };
-        //Multiple layer bs to do with flower beds
-        int c = colorProvider.getColor(state, getter, BlockPos.ZERO, 0);
-        if (c!=-1) return c;
-        return colorProvider.getColor(state, getter, BlockPos.ZERO, 1);
+        for (var source : tintSources) {
+            if (source != null) {
+                //Multiple layer bs to do with flower beds
+                int c = source.colorInWorld(state, getter, BlockPos.ZERO);
+                if (c != -1) return c;
+            }
+        }
+        return -1;
     }
 
-    private static boolean isBiomeDependentColour(BlockColor colorProvider, BlockState state) {
+    private static boolean isBiomeDependentColour(List<BlockTintSource> tintSources, BlockState state) {
         boolean[] biomeDependent = new boolean[1];
         var getter = new BlockAndTintGetter() {
             @Override
@@ -950,8 +961,11 @@ public class ModelFactory {
                 return 0;
             }
         };
-        colorProvider.getColor(state, getter, BlockPos.ZERO, 0);
-        colorProvider.getColor(state, getter, BlockPos.ZERO, 1);
+        for (var source : tintSources) {
+            if (source != null) {
+                source.colorInWorld(state, getter, BlockPos.ZERO);
+            }
+        }
         return biomeDependent[0];
     }
 

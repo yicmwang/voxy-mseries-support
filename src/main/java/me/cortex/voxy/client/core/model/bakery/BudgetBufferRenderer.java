@@ -103,7 +103,7 @@ public class BudgetBufferRenderer {
     }
 
     public static void drawFast(MeshData buffer, GpuTexture tex, Matrix4f matrix) {
-        if (buffer.drawState().mode() != com.mojang.blaze3d.PrimitiveTopology.QUADS) {
+        if (buffer.drawState().primitiveTopology() != com.mojang.blaze3d.PrimitiveTopology.QUADS) {
             throw new IllegalStateException("Fast only supports quads");
         }
         var buff = buffer.vertexBuffer();

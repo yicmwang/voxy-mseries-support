@@ -102,12 +102,8 @@ public final class IrisGbufferInjector {
         if (!(pipeline instanceof net.irisshaders.iris.pipeline.IrisRenderingPipeline irisPipeline)) {
             return false;
         }
-        var programs = irisPipeline.getSodiumPrograms();
-        if (programs == null) {
-            return false;
-        }
-        net.irisshaders.iris.gl.framebuffer.GlFramebuffer framebuffer =
-                programs.getFramebuffer(DefaultTerrainRenderPasses.SOLID);
+        // P1: Iris sodium-program injection is GL-only and is dropped with Iris in P2.
+        net.irisshaders.iris.gl.framebuffer.GlFramebuffer framebuffer = null;
         if (framebuffer == null) {
             return false;
         }

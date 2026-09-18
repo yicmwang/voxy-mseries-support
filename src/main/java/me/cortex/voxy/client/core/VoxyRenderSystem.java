@@ -693,7 +693,7 @@ public class VoxyRenderSystem {
         var client = Minecraft.getInstance();
         var gameRenderer = client.gameRenderer;//tickCounter.getTickDelta(true);
 
-        float fov = gameRenderer.getFov(gameRenderer.mainCamera(), client.getDeltaTracker().getGameTimeDeltaPartialTick(true), true);
+        float fov = client.options.fov().get();
 
         projection.setPerspective(fov * 0.01745329238474369f,
                 (float) client.getWindow().getWidth() / (float)client.getWindow().getHeight(),

@@ -80,8 +80,7 @@ public class VoxyCommands {
         System.gc();
         VoxyCommon.createInstance();
 
-        var r = Minecraft.getInstance().levelRenderer;
-        if (r != null) r.allChanged();
+        // 26.2: LevelRenderer#allChanged no longer exists; Sodium owns chunk rebuilds.
         return 0;
     }
 

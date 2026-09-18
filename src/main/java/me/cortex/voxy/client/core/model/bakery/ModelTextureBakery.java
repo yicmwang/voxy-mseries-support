@@ -1,7 +1,6 @@
 package me.cortex.voxy.client.core.model.bakery;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.ItemBlockRenderTypes;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -51,6 +50,24 @@ public class ModelTextureBakery {
         this.height = height;
     }
 
+    /**
+     * 26.2 removed {@code ItemBlockRenderTypes}. The authoritative layer now lives on each baked
+     * quad ({@code BakedQuad.materialInfo().layer()}), which {@link ReuseVertexConsumer} already
+     * reads per quad. This pre-computed value only seeds {@link #getMetaFromLayer}'s defaults, so
+     * the CUTOUT fallback is safe; revisit when the Metal bakery lands in P2.
+     */
+    private static ChunkSectionLayer layerFor(BlockState state) {
+        if (state.getBlock() instanceof LiquidBlock) {
+            return ChunkSectionLayer.TRANSLUCENT;
+        }
+        if (state.getBlock() instanceof LeavesBlock) {
+            return ChunkSectionLayer.SOLID;
+        }
+        return ChunkSectionLayer.CUTOUT;
+    }
+
+    private static final boolean SKIP_GL_FLUID_BAKE = true;
+
     public static int getMetaFromLayer(ChunkSectionLayer layer) {
         // 26.2: ChunkSectionLayer no longer has TRIPWIRE (only SOLID/CUTOUT/TRANSLUCENT).
         boolean hasDiscard = layer == ChunkSectionLayer.CUTOUT ||
@@ -70,16 +87,19 @@ public class ModelTextureBakery {
         }
         var model = Minecraft.getInstance()
                 .getModelManager()
-                .getBlockModelShaper()
-                .getBlockModel(state);
+                .getBlockStateModelSet()
+                .get(state);
 
         int meta = getMetaFromLayer(layer);
 
-        for (var part : model.collectParts(new SingleThreadedRandomSource(42L))) {
+        // 26.2: collectParts fills a caller-supplied list instead of returning one.
+        var parts = new java.util.ArrayList<net.minecraft.client.renderer.block.dispatch.BlockStateModelPart>();
+        model.collectParts(new SingleThreadedRandomSource(42L), parts);
+        for (var part : parts) {
             for (Direction direction : new Direction[]{Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST, null}) {
                 var quads = part.getQuads(direction);
                 for (var quad : quads) {
-                    this.vc.quad(quad, meta|(quad.isTinted()?4:0));
+                    this.vc.quad(quad, meta|(quad.materialInfo().isTinted()?4:0));
                 }
             }
         }
@@ -95,70 +115,9 @@ public class ModelTextureBakery {
             metadata |= 4;//Has tint
             this.vc.setDefaultMeta(metadata);//Set the meta while baking
         }
-        Minecraft.getInstance().getBlockRenderer().renderLiquid(BlockPos.ZERO, new BlockAndTintGetter() {
-            @Override
-            public net.minecraft.world.level.CardinalLighting cardinalLighting() {
-                return net.minecraft.world.level.CardinalLighting.DEFAULT;
-            }
-
-            @Override
-            public LevelLightEngine getLightEngine() {
-                return null;
-            }
-
-            @Override
-            public int getBrightness(LightLayer type, BlockPos pos) {
-                return 0;
-            }
-
-            @Override
-            public int getBlockTint(BlockPos pos, ColorResolver colorResolver) {
-                return 0;
-            }
-
-            @Nullable
-            @Override
-            public BlockEntity getBlockEntity(BlockPos pos) {
-                return null;
-            }
-
-            @Override
-            public BlockState getBlockState(BlockPos pos) {
-                if (shouldReturnAirForFluid(pos, face)) {
-                    return Blocks.AIR.defaultBlockState();
-                }
-
-                //Fixme:
-                // This makes it so that the top face of water is always air, if this is commented out
-                //  the up block will be a liquid state which makes the sides full
-                // if this is uncommented, that issue is fixed but e.g. stacking water layers ontop of eachother
-                //  doesnt fill the side of the block
-
-                //if (pos.getY() == 1) {
-                //    return Blocks.AIR.getDefaultState();
-                //}
-                return state;
-            }
-
-            @Override
-            public FluidState getFluidState(BlockPos pos) {
-                if (shouldReturnAirForFluid(pos, face)) {
-                    return Blocks.AIR.defaultBlockState().getFluidState();
-                }
-
-                return state.getFluidState();
-            }
-
-            @Override
-            public int getHeight() {
-                return 0;
-            }
-
-            @Override
-            public int getMinY() {
-                return 0;
-            }
-        }, this.vc, state, state.getFluidState());
+        // P1: BlockRenderDispatcher#renderLiquid is gone at 26.2; this GL fluid bake is
+        // replaced by the Metal bakery in P2. Skipped rather than faked.
+        if (SKIP_GL_FLUID_BAKE) { return; }
         this.vc.setDefaultMeta(0);//Reset default meta
     }
 
@@ -208,16 +167,9 @@ public class ModelTextureBakery {
         }
         this.capture.clear();
         boolean isBlock = true;
-        ChunkSectionLayer layer;
+        ChunkSectionLayer layer = layerFor(state);
         if (state.getBlock() instanceof LiquidBlock) {
-            layer = ItemBlockRenderTypes.getRenderLayer(state.getFluidState());
             isBlock = false;
-        } else {
-            if (state.getBlock() instanceof LeavesBlock) {
-                layer = ChunkSectionLayer.SOLID;
-            } else {
-                layer = ItemBlockRenderTypes.getChunkRenderType(state);
-            }
         }
 
         //TODO: support block model entities
@@ -492,14 +444,9 @@ public class ModelTextureBakery {
 
         // Mirror the GL setup() block's layer / isBlock decision.
         boolean isBlock = true;
-        ChunkSectionLayer layer;
+        ChunkSectionLayer layer = layerFor(state);
         if (state.getBlock() instanceof LiquidBlock) {
-            layer = ItemBlockRenderTypes.getRenderLayer(state.getFluidState());
             isBlock = false;
-        } else if (state.getBlock() instanceof LeavesBlock) {
-            layer = ChunkSectionLayer.SOLID;
-        } else {
-            layer = ItemBlockRenderTypes.getChunkRenderType(state);
         }
 
         // MC's block atlas — same lookup the GL path does. We pass the GL id
