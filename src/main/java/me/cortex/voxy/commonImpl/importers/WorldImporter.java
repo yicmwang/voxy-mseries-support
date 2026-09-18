@@ -80,6 +80,11 @@ public class WorldImporter implements IDataImporter {
             }
 
             @Override
+            public void forEachInPalette(Consumer<Holder<Biome>> action) {
+                action.accept(defaultBiome);
+            }
+
+            @Override
             public void write(FriendlyByteBuf buf) {
 
             }
