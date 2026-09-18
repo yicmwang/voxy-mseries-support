@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core.model;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
@@ -90,7 +91,12 @@ public class ModelStore {
         this.modelColourBuffer.free();
         this.textures.free();
         this.atlasSampler.close();
-        glDeleteSamplers(this.blockSampler);
+        // blockSampler is a raw GL sampler name. The backend-agnostic frees above must still run on
+        // Metal (they release the MTLBuffers); only this one is GL-only, and calling it without a
+        // context aborts the JVM rather than throwing.
+        if (GlCompat.isGlBackend()) {
+            glDeleteSamplers(this.blockSampler);
+        }
     }
 
 

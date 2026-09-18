@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.model.bakery;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 
@@ -128,7 +130,7 @@ public class GlViewCapture {
     public void emitToStream(long destAddr) {
         // Make sure the FBO's draw calls have produced pixel data before we
         // sample the textures back to CPU.
-        glFinish();
+        GlCompat.finish();
 
         int totalW = this.width * 3;
         int totalH = this.height * 2;
@@ -163,12 +165,12 @@ public class GlViewCapture {
         try {
             glReadBuffer(GL_COLOR_ATTACHMENT0);
             org.lwjgl.opengl.GL11C.nglReadPixels(0, 0, totalW, totalH, GL_RGBA, GL_UNSIGNED_BYTE, this.colourScratch);
-            glFinish();
+            GlCompat.finish();
             org.lwjgl.opengl.GL11C.nglReadPixels(0, 0, totalW, totalH, GL_DEPTH_COMPONENT, GL_FLOAT, this.depthScratch);
-            glFinish();
+            GlCompat.finish();
             glReadBuffer(GL_COLOR_ATTACHMENT1);
             org.lwjgl.opengl.GL11C.nglReadPixels(0, 0, totalW, totalH, GL_RED_INTEGER, GL_UNSIGNED_INT, this.metaScratch);
-            glFinish();
+            GlCompat.finish();
         } finally {
             org.lwjgl.opengl.GL11C.glPixelStorei(org.lwjgl.opengl.GL11C.GL_PACK_ALIGNMENT, prevPackAlign);
             org.lwjgl.opengl.GL11C.glPixelStorei(org.lwjgl.opengl.GL11.GL_PACK_ROW_LENGTH, prevRowLen);

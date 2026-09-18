@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.util;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 
 import me.cortex.voxy.client.core.gpu.IGpuFence;
 import me.cortex.voxy.client.core.gpu.IGpuPersistentBuffer;
@@ -12,7 +14,6 @@ import java.util.ArrayList;
 import java.util.Deque;
 
 import static org.lwjgl.opengl.ARBMapBufferRange.GL_MAP_READ_BIT;
-import static org.lwjgl.opengl.GL11.glFinish;
 import static org.lwjgl.opengl.GL44.GL_MAP_COHERENT_BIT;
 
 //Special download stream which allows access to the download buffer directly
@@ -37,7 +38,7 @@ public class RawDownloadStream {
         if (allocation == AllocationArena.SIZE_LIMIT) {
             Logger.warn("Raw download stream full, preemptively committing, this could cause bad things to happen");
             //Hit the download limit, attempt to free
-            glFinish();
+            GlCompat.finish();
             UploadStream.flushBackendFences();
             this.tick();
             allocation = (int) this.allocationArena.alloc(size);
@@ -94,12 +95,12 @@ public class RawDownloadStream {
     }
 
     public void free() {
-        glFinish();
+        GlCompat.finish();
         this.tick();
         UploadStream.flushBackendFences();
         IGpuFence fence = RenderBackendFactory.get().createFence();
         while (!fence.signaled()) {
-            glFinish();
+            GlCompat.finish();
         }
         fence.free();
         this.tick();

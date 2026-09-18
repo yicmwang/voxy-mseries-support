@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 import com.mojang.blaze3d.opengl.GlConst;
 import com.mojang.blaze3d.opengl.GlStateManager;
 import me.cortex.voxy.client.TimingStatistics;
@@ -205,8 +207,8 @@ public class VoxyRenderSystem {
         try {
             //wait for opengl to be finished, this should hopefully ensure all memory allocations are free
             if (SAVE_GL_STATE) {
-                glFinish();
-                glFinish();
+                GlCompat.finish();
+                GlCompat.finish();
             }
 
             this.worldIn = world;
@@ -753,7 +755,7 @@ public class VoxyRenderSystem {
         UploadStream.INSTANCE.tick();
         //Done here as is allows less gl state resetup
         this.modelService.tick(100_000_000);
-        GL11.glFinish();
+        GlCompat.finish();
         return this.nodeManager.hasWork() || this.renderGen.getTaskCount()!=0 || !this.modelService.areQueuesEmpty();
     }
 

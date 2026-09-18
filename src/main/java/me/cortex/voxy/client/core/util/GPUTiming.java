@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.util;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 import it.unimi.dsi.fastutil.ints.IntArrayFIFOQueue;
 import it.unimi.dsi.fastutil.objects.ObjectArrayFIFOQueue;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -15,7 +17,6 @@ import java.util.function.Consumer;
 
 import static org.lwjgl.opengl.ARBTimerQuery.GL_TIMESTAMP;
 import static org.lwjgl.opengl.ARBTimerQuery.glQueryCounter;
-import static org.lwjgl.opengl.GL11.glFinish;
 import static org.lwjgl.opengl.GL11.glFlush;
 import static org.lwjgl.opengl.GL15.glDeleteQueries;
 import static org.lwjgl.opengl.GL15.glGenQueries;
@@ -118,11 +119,17 @@ public class GPUTiming {
         @Override
         public void free() {
             super.free0();
+            // Query names are GL objects; on a non-GL backend none were ever created, and
+            // glDeleteQueries without a context aborts the JVM. The queues are still drained so the
+            // pools do not hold references.
+            boolean gl = GlCompat.isGlBackend();
             while (!POOL.isEmpty()) {
-                glDeleteQueries(POOL.dequeueInt());
+                int query = POOL.dequeueInt();
+                if (gl) glDeleteQueries(query);
             }
             while (!INFLIGHT.isEmpty()) {
-                glDeleteQueries(INFLIGHT.dequeue().queries);
+                var inflight = INFLIGHT.dequeue();
+                if (gl) glDeleteQueries(inflight.queries);
             }
         }
     }
@@ -144,7 +151,7 @@ public class GPUTiming {
             int slot = this.index++;
             this.metadata[slot] = metadata;
             glQueryCounter(this.query, GL_TIMESTAMP);//This should be gpu side, so should be fast
-            glFinish();
+            GlCompat.finish();
             glGetQueryBufferObjectui64v(this.query, this.store.id, GL_QUERY_RESULT_NO_WAIT, slot*8L);
             glMemoryBarrier(-1);
         }

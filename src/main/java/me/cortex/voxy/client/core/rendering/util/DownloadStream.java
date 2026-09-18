@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.util;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.IGpuFence;
@@ -15,7 +17,6 @@ import java.util.Deque;
 import java.util.function.Consumer;
 
 import static me.cortex.voxy.common.util.AllocationArena.SIZE_LIMIT;
-import static org.lwjgl.opengl.GL11.glFinish;
 import static org.lwjgl.opengl.GL30C.GL_MAP_READ_BIT;
 import static org.lwjgl.opengl.GL42.GL_BUFFER_UPDATE_BARRIER_BIT;
 import static org.lwjgl.opengl.GL44.GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT;
@@ -75,7 +76,7 @@ public class DownloadStream {
                 this.commit();
                 int attempts = 10;
                 while (--attempts != 0 && this.caddr == SIZE_LIMIT) {
-                    glFinish();
+                    GlCompat.finish();
                     UploadStream.flushBackendFences();
                     this.tick();
                     this.caddr = this.allocationArena.alloc((int) size);
@@ -155,10 +156,10 @@ public class DownloadStream {
 
     //Synchonize force flushes everything
     public void waitDiscard() {
-        glFinish();
+        GlCompat.finish();
         UploadStream.flushBackendFences();
         var fence = RenderBackendFactory.get().createFence();
-        glFinish();
+        GlCompat.finish();
         while (!fence.signaled())
             Thread.onSpinWait();
         fence.free();
@@ -171,11 +172,11 @@ public class DownloadStream {
     }
 
     public void flushWaitClear() {
-        glFinish();
+        GlCompat.finish();
         this.tick();
         UploadStream.flushBackendFences();
         var fence = RenderBackendFactory.get().createFence();
-        glFinish();
+        GlCompat.finish();
         while (!fence.signaled())
             Thread.onSpinWait();
         fence.free();

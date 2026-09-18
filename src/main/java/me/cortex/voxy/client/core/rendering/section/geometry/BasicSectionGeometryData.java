@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.section.geometry;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 import me.cortex.voxy.client.core.gl.Capabilities;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
@@ -126,7 +128,7 @@ public class BasicSectionGeometryData implements IGeometryData {
 
         long gpuMemory = 0;
         if (Capabilities.INSTANCE.canQueryGpuMemory) {
-            glFinish();
+            GlCompat.finish();
             gpuMemory = Capabilities.INSTANCE.getFreeDedicatedGpuMemory();
         }
         if (this.geometryBuffer.isSparse()) {
@@ -135,9 +137,9 @@ public class BasicSectionGeometryData implements IGeometryData {
             glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
 
-        glFinish();
+        GlCompat.finish();
         this.geometryBuffer.free();
-        glFinish();
+        GlCompat.finish();
         if (Capabilities.INSTANCE.canQueryGpuMemory) {
             long releaseSize = (long) (this.geometryBuffer.size()*0.75);//if gpu memory usage drops by 75% of the expected value assume we freed it
             if (this.geometryBuffer.isSparse()) {//If we are using sparse buffers, use the commited size instead
@@ -150,7 +152,7 @@ public class BasicSectionGeometryData implements IGeometryData {
                 long TIMEOUT = 2500;
 
                 while (System.currentTimeMillis() - start > TIMEOUT) {//Wait up to 2.5 seconds for memory to release
-                    glFinish();
+                    GlCompat.finish();
                     if (Capabilities.INSTANCE.getFreeDedicatedGpuMemory() - gpuMemory > releaseSize) break;
                 }
                 if (Capabilities.INSTANCE.getFreeDedicatedGpuMemory() - gpuMemory <= releaseSize) {

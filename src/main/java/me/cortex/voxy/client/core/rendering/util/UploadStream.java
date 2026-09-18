@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core.rendering.util;
 
+import me.cortex.voxy.client.core.gpu.GlCompat;
+
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.IGpuFence;
@@ -14,7 +16,6 @@ import java.util.Deque;
 
 import static me.cortex.voxy.common.util.AllocationArena.SIZE_LIMIT;
 import static org.lwjgl.opengl.ARBMapBufferRange.*;
-import static org.lwjgl.opengl.GL11.glFinish;
 import static org.lwjgl.opengl.GL42C.GL_BUFFER_UPDATE_BARRIER_BIT;
 import static org.lwjgl.opengl.GL44.GL_MAP_COHERENT_BIT;
 
@@ -80,7 +81,7 @@ public class UploadStream {
                 Logger.error("Upload stream full, preemptively committing, this could cause bad things to happen");
                 int attempts = 10;
                 while (--attempts != 0 && this.caddr == SIZE_LIMIT) {
-                    glFinish();
+                    GlCompat.finish();
                     flushBackendFences();
                     this.tick(false);
                     this.caddr = this.allocationArena.alloc((int) size);
