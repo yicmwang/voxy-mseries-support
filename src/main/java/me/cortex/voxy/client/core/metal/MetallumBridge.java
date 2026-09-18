@@ -23,7 +23,7 @@ public final class MetallumBridge {
     private static Method mIsAvailable, mDeviceHandle, mCommandQueueHandle, mCommandBufferHandle,
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
             mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
-            mLogRenderPassCounters;
+            mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -41,6 +41,8 @@ public final class MetallumBridge {
             mCommandQueueHandle = interop.getMethod("commandQueueHandle");
             mCommandBufferHandle = interop.getMethod("currentCommandBufferHandle");
             mEndCurrentEncoder = interop.getMethod("endCurrentEncoder");
+            mEndCurrentEncoderAndReport = interop.getMethod("endCurrentEncoderAndReport");
+            mOpenEncoderHandle = interop.getMethod("openEncoderHandle");
             mRenderEncoderHandle = interop.getMethod("currentRenderEncoderHandle");
             mColorAttachment = interop.getMethod("currentColorAttachmentHandle");
             mDepthAttachment = interop.getMethod("currentDepthAttachmentHandle");
@@ -127,6 +129,40 @@ public final class MetallumBridge {
             mEndCurrentEncoder.invoke(null);
         } catch (Throwable t) {
             Logger.error("MetallumBridge.endCurrentEncoder failed", t);
+        }
+    }
+
+    /**
+     * Handle of the encoder Metallum currently has open (render, compute or blit), or {@code 0}.
+     * Diagnostics only — call {@link #endCurrentEncoder()} to actually close it.
+     */
+    public static long openEncoderHandle() {
+        resolve();
+        if (mOpenEncoderHandle == null) {
+            return 0L;
+        }
+        try {
+            Object v = mOpenEncoderHandle.invoke(null);
+            return v instanceof Long l ? l : 0L;
+        } catch (Throwable t) {
+            return 0L;
+        }
+    }
+
+    /**
+     * {@link #endCurrentEncoder()} reporting the handle it closed, or {@code 0} if none was open.
+     * Diagnostics only.
+     */
+    public static long endCurrentEncoderAndReport() {
+        resolve();
+        if (mEndCurrentEncoderAndReport == null) {
+            return 0L;
+        }
+        try {
+            Object v = mEndCurrentEncoderAndReport.invoke(null);
+            return v instanceof Long l ? l : 0L;
+        } catch (Throwable t) {
+            return 0L;
         }
     }
 

@@ -50,7 +50,14 @@ public class ModelBakerySubsystem {
         if (i != null) {
             int j = 0;
             if (i != null) {
-                int fbBinding = glGetInteger(GL_FRAMEBUFFER_BINDING);
+                // The save/restore pair exists only to stop the GL factory from re-binding the
+                // framebuffer a thousand times. On Metal there is no default-framebuffer binding to
+                // preserve, and issuing these calls with no GL context current aborts the JVM
+                // ("FATAL ERROR in native method: No context is current") -- it is not a catchable
+                // exception, so the calls have to be skipped rather than guarded by a try.
+                boolean isGlBackend = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                        == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
+                int fbBinding = isGlBackend ? glGetInteger(GL_FRAMEBUFFER_BINDING) : 0;
 
                 do {
                     this.factory.addEntry(i);
@@ -60,7 +67,9 @@ public class ModelBakerySubsystem {
                     i = this.blockIdQueue.poll();
                 } while (i != null);
 
-                glBindFramebuffer(GL_FRAMEBUFFER, fbBinding);//This is done here as stops needing to set then unset the fb in the thing 1000x
+                if (isGlBackend) {
+                    glBindFramebuffer(GL_FRAMEBUFFER, fbBinding);//This is done here as stops needing to set then unset the fb in the thing 1000x
+                }
             }
             this.blockIdCount.addAndGet(-j);
         }

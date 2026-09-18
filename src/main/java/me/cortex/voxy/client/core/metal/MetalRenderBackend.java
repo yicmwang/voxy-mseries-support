@@ -415,6 +415,7 @@ public class MetalRenderBackend implements RenderBackend {
         }
         MetalNative.mtlBlitEncoderCopyBuffer(this.activeBlitEncoder, srcHandle, srcOffset, dstHandle, dstOffset, size);
         this.activeBufferHasBlits = true;
+        this.closeBlitEncoderIfGuest();
     }
 
     /**
@@ -457,21 +458,67 @@ public class MetalRenderBackend implements RenderBackend {
                 0, 0, width, height,
                 dstBuf.getHandle(), dstOffset, bytesPerRow, bytesPerRow * height);
         this.activeBufferHasBlits = true;
+        this.closeBlitEncoderIfGuest();
+    }
+
+    /**
+     * Ends the batched blit encoder immediately when Voxy is a guest on Metallum's command buffer.
+     *
+     * <p>Metal permits one open encoder per command buffer, and the command buffer is shared: leaving
+     * a blit encoder open past the end of Voxy's work means Metallum's next render encoder — Sodium's
+     * terrain pass — trips {@code A command encoder is already encoding to this command buffer}. Voxy
+     * has no hook for "the host is about to draw", so the boundary has to be enforced from this side:
+     * a guest holds an encoder only while it is actively encoding into it.
+     *
+     * <p>Costs an encoder per copy instead of one per batch. The expensive half of the old batching
+     * is preserved — the copies still share the frame's command buffer rather than each getting a
+     * throwaway one — and the owner path keeps batching, since committing the buffer is a clean
+     * boundary that closes encoders anyway.
+     */
+    private void closeBlitEncoderIfGuest() {
+        if (!this.ownsActiveCommandBuffer) {
+            this.endActiveBlitEncoder();
+        } else {
+            logEncoderOp("closeBlitEncoderIfGuest SKIP (owner, keeping batch open)");
+        }
+    }
+
+    /**
+     * Whether Voxy must re-point its active command buffer at Metallum's current one.
+     *
+     * <p>A command buffer handle is only meaningful while its owner has not submitted it. Metallum
+     * submits its own frame in addition to serving Voxy's {@code flushFrame()}, so a handle Voxy
+     * cached can name a buffer that is already Committed — and encoding into that trips Metal's
+     * {@code _status < MTLCommandBufferStatusCommitted} assertion inside
+     * {@code setCurrentCommandEncoder:}, which arrives with no Java stack. Comparing against
+     * Metallum's live handle every time is what keeps the two in step.
+     *
+     * <p>Pure and package-private so the truth table is pinned by a test rather than rediscovered
+     * from a running game.
+     */
+    static boolean shouldAdoptMetallumBuffer(final long cachedBuffer, final long metallumBuffer) {
+        return metallumBuffer != 0L && cachedBuffer != metallumBuffer;
     }
 
     private void ensureActiveCommandBuffer() {
-        if (this.activeCommandBuffer == 0) {
-            // Under whole-frame Metal, encode into Metallum's frame buffer so our passes are
-            // ordered with Sodium's and share its depth attachment. We must not commit it.
-            long metallumBuffer = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
-            if (metallumBuffer != 0) {
+        if (this.ownsActiveCommandBuffer && this.activeCommandBuffer != 0L) {
+            return;
+        }
+        // Reaching here means Voxy has no uncommitted buffer of its own, so it is a guest again.
+        this.ownsActiveCommandBuffer = false;
+        long metallumBuffer = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
+        if (metallumBuffer != 0L) {
+            if (shouldAdoptMetallumBuffer(this.activeCommandBuffer, metallumBuffer)) {
+                // A blit batch cannot span a buffer change: its encoder belongs to the old buffer.
+                this.endActiveBlitEncoder();
                 this.activeCommandBuffer = metallumBuffer;
-                this.ownsActiveCommandBuffer = false;
-                return;
             }
+            return;
+        }
+        if (this.activeCommandBuffer == 0L) {
             this.activeCommandBuffer = MetalNative.mtlCommandQueueNewCommandBuffer(this.commandQueue);
             this.ownsActiveCommandBuffer = true;
-            if (this.activeCommandBuffer == 0) {
+            if (this.activeCommandBuffer == 0L) {
                 throw new RuntimeException("mtlCommandQueueNewCommandBuffer returned NULL");
             }
         }
@@ -486,14 +533,12 @@ public class MetalRenderBackend implements RenderBackend {
      * Temporary: log every encoder creation so the last line before a Metal assertion identifies
      * the offending site. Metal assertions carry no Java stack.
      */
-    static void logEncoderOp(String what) {
+    void logEncoderOp(String what) {
         Logger.info("[Metal-ENC] " + what
-                + " ownsActive=" + OWNED.get()
-                + " lastRenderEnc=" + LAST_RENDER_ENC.get());
+                + " ownsActive=" + this.ownsActiveCommandBuffer
+                + " blitEnc=0x" + Long.toHexString(this.activeBlitEncoder)
+                + " buf=0x" + Long.toHexString(this.activeCommandBuffer));
     }
-
-    private static final ThreadLocal<Boolean> OWNED = ThreadLocal.withInitial(() -> Boolean.FALSE);
-    private static final ThreadLocal<Long> LAST_RENDER_ENC = ThreadLocal.withInitial(() -> 0L);
 
     private void endForeignEncoderIfNeeded() {
         // Deliberately NOT gated on ownsActiveCommandBuffer: that flag is decided once, when the
@@ -501,11 +546,19 @@ public class MetalRenderBackend implements RenderBackend {
         // Voxy would then believe it owns the buffer and skip this, while Metallum meanwhile opened
         // a render encoder on the same buffer. Asking Metallum to close is a no-op when it has
         // nothing open, so just always ask.
-        MetallumBridge.endCurrentEncoder();
+        long openBefore = MetallumBridge.openEncoderHandle();
+        long closed = MetallumBridge.endCurrentEncoderAndReport();
+        long openAfter = MetallumBridge.openEncoderHandle();
+        logEncoderOp("endForeignEncoder openBefore=0x" + Long.toHexString(openBefore)
+                + " closed=0x" + Long.toHexString(closed)
+                + " openAfter=0x" + Long.toHexString(openAfter)
+                + " (buffers " + Long.toHexString(this.activeCommandBuffer)
+                + "/" + Long.toHexString(MetallumBridge.commandBuffer()) + ")");
     }
 
     private void endActiveBlitEncoder() {
         if (this.activeBlitEncoder != 0) {
+            logEncoderOp("endActiveBlitEncoder 0x" + Long.toHexString(this.activeBlitEncoder));
             MetalNative.mtlEncoderEndEncoding(this.activeBlitEncoder);
             MetalNative.mtlRelease(this.activeBlitEncoder);
             this.activeBlitEncoder = 0;

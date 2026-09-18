@@ -103,6 +103,11 @@ loom {
             if (System.getenv("VOXY_QUICKPLAY") != null) {
                 programArgs("--quickPlaySingleplayer", System.getenv("VOXY_QUICKPLAY"))
             }
+            // Encoder/buffer tracing for the foreign-renderer sharing work: Metal's "already
+            // encoding" assertions carry no Java stack, so attribution needs the trail.
+            if (System.getenv("VOXY_INTEROP_TRACE") != null) {
+                property("metallum.interopTrace", "true")
+            }
         }
     }
 }

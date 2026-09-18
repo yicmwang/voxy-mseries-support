@@ -33,6 +33,16 @@ class MetallumBridgeTest {
         assertDoesNotThrow(MetallumBridge::endCurrentEncoder);
     }
 
+    /**
+     * The reporting variants are diagnostics, but they sit on the hot path immediately before every
+     * encoder creation — a throw there would turn a logging aid into the crash.
+     */
+    @Test
+    void encoderReportingAccessorsDegradeToZero() {
+        assertEquals(0L, MetallumBridge.openEncoderHandle());
+        assertEquals(0L, MetallumBridge.endCurrentEncoderAndReport());
+    }
+
     @Test
     void midFrameSplitDegradesWhenMetallumAbsent() {
         assertFalse(MetallumBridge.supportsFlushFrame());
