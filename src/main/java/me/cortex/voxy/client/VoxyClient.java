@@ -148,12 +148,12 @@ public class VoxyClient implements ClientModInitializer {
             final long intervalNanos = parsedInterval * 1_000_000_000L;
             final long[] last = {System.nanoTime()};
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
-                if (client.level == null || client.getMainRenderTarget() == null) return;
+                if (client.level == null || client.gameRenderer.mainRenderTarget() == null) return;
                 long now = System.nanoTime();
                 if (now - last[0] < intervalNanos) return;
                 last[0] = now;
                 net.minecraft.client.Screenshot.grab(client.gameDirectory,
-                        client.getMainRenderTarget(), component -> {});
+                        client.gameRenderer.mainRenderTarget(), component -> {});
             });
             Logger.info("VOXY_AUTO_SCREENSHOT active: every " + parsedInterval + "s");
         }

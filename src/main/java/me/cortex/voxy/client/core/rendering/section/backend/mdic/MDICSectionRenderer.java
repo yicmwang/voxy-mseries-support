@@ -769,11 +769,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         var m = new java.util.LinkedHashMap<String, String>();
         net.minecraft.client.multiplayer.ClientLevel level = Minecraft.getInstance().level;
         if (level != null) {
-            m.put("NO_SHADE_FACE_TINT", Float.toString(level.getShade(Direction.UP, false)) + "f");
-            m.put("UP_FACE_TINT",       Float.toString(level.getShade(Direction.UP, true))  + "f");
-            m.put("DOWN_FACE_TINT",     Float.toString(level.getShade(Direction.DOWN, true))+ "f");
-            m.put("Z_AXIS_FACE_TINT",   Float.toString(level.getShade(Direction.NORTH, true))+ "f");
-            m.put("X_AXIS_FACE_TINT",   Float.toString(level.getShade(Direction.EAST, true)) + "f");
+            m.put("NO_SHADE_FACE_TINT", Float.toString(level.cardinalLighting().byFace(Direction.UP)) + "f");
+            m.put("UP_FACE_TINT",       Float.toString(level.cardinalLighting().byFace(Direction.UP))  + "f");
+            m.put("DOWN_FACE_TINT",     Float.toString(level.cardinalLighting().byFace(Direction.DOWN))+ "f");
+            m.put("Z_AXIS_FACE_TINT",   Float.toString(level.cardinalLighting().byFace(Direction.NORTH))+ "f");
+            m.put("X_AXIS_FACE_TINT",   Float.toString(level.cardinalLighting().byFace(Direction.EAST)) + "f");
         }
         if (taa != null) m.put("TAA_PATCH", "");
         return m;

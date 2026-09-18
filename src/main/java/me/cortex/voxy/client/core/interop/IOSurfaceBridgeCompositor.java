@@ -231,7 +231,7 @@ public final class IOSurfaceBridgeCompositor {
         glActiveTexture(prevActiveTex0);
 
         var mc = Minecraft.getInstance();
-        var mainRT = mc.getMainRenderTarget();
+        var mainRT = mc.gameRenderer.mainRenderTarget();
         int fbw = mainRT.width;
         int fbh = mainRT.height;
 

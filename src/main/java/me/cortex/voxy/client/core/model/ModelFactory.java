@@ -24,7 +24,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
-import net.minecraft.world.level.BlockAndTintGetter;
+import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.world.level.ColorResolver;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.biome.Biome;
@@ -849,8 +849,8 @@ public class ModelFactory {
     private static int captureColourConstant(BlockColor colorProvider, BlockState state, Biome biome) {
         var getter = new BlockAndTintGetter() {
             @Override
-            public float getShade(Direction direction, boolean shaded) {
-                return 0;
+            public net.minecraft.world.level.CardinalLighting cardinalLighting() {
+                return net.minecraft.world.level.CardinalLighting.DEFAULT;
             }
 
             @Override
@@ -904,8 +904,8 @@ public class ModelFactory {
         boolean[] biomeDependent = new boolean[1];
         var getter = new BlockAndTintGetter() {
             @Override
-            public float getShade(Direction direction, boolean shaded) {
-                return 0;
+            public net.minecraft.world.level.CardinalLighting cardinalLighting() {
+                return net.minecraft.world.level.CardinalLighting.DEFAULT;
             }
 
             @Override

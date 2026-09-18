@@ -6,7 +6,7 @@ import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.Identifier;
-import net.minecraft.world.level.BlockAndTintGetter;
+import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.world.level.ColorResolver;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.Blocks;
@@ -52,13 +52,12 @@ public class ModelTextureBakery {
     }
 
     public static int getMetaFromLayer(ChunkSectionLayer layer) {
+        // 26.2: ChunkSectionLayer no longer has TRIPWIRE (only SOLID/CUTOUT/TRANSLUCENT).
         boolean hasDiscard = layer == ChunkSectionLayer.CUTOUT ||
-                layer == ChunkSectionLayer.TRANSLUCENT||
-                layer == ChunkSectionLayer.TRIPWIRE;
+                layer == ChunkSectionLayer.TRANSLUCENT;
 
         boolean isMipped = layer == ChunkSectionLayer.SOLID ||
-                layer == ChunkSectionLayer.TRANSLUCENT ||
-                layer == ChunkSectionLayer.TRIPWIRE;
+                layer == ChunkSectionLayer.TRANSLUCENT;
 
         int meta = hasDiscard?1:0;
         meta |= true?2:0;
@@ -98,8 +97,8 @@ public class ModelTextureBakery {
         }
         Minecraft.getInstance().getBlockRenderer().renderLiquid(BlockPos.ZERO, new BlockAndTintGetter() {
             @Override
-            public float getShade(Direction direction, boolean shaded) {
-                return 0;
+            public net.minecraft.world.level.CardinalLighting cardinalLighting() {
+                return net.minecraft.world.level.CardinalLighting.DEFAULT;
             }
 
             @Override

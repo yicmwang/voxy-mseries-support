@@ -85,9 +85,9 @@ public class BudgetBufferRenderer {
         // Copy MC's sequential quad index buffer into it. MC's blaze3d gives
         // us the GL buffer handle directly; copy via GL 3.1's
         // glCopyBufferSubData (no DSA required — works on Apple GL 4.1).
-        var seq = RenderSystem.getSequentialBuffer(VertexFormat.Mode.QUADS);
+        var seq = RenderSystem.getSequentialBuffer(com.mojang.blaze3d.PrimitiveTopology.QUADS);
         int srcId = ((com.mojang.blaze3d.opengl.GlBuffer) seq.getBuffer(4096 * 3 * 2)).handle;
-        if (seq.type() != VertexFormat.IndexType.SHORT) {
+        if (seq.type() != com.mojang.blaze3d.IndexType.SHORT) {
             throw new IllegalStateException("Expected SHORT sequential quad indices");
         }
         glBindBuffer(GL_COPY_READ_BUFFER, srcId);
@@ -103,7 +103,7 @@ public class BudgetBufferRenderer {
     }
 
     public static void drawFast(MeshData buffer, GpuTexture tex, Matrix4f matrix) {
-        if (buffer.drawState().mode() != VertexFormat.Mode.QUADS) {
+        if (buffer.drawState().mode() != com.mojang.blaze3d.PrimitiveTopology.QUADS) {
             throw new IllegalStateException("Fast only supports quads");
         }
         var buff = buffer.vertexBuffer();

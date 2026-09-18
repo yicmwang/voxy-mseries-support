@@ -414,7 +414,7 @@ public class VoxyRenderSystem {
             // reallocated the IOSurface bridge to 16x16 (broken blit) — the
             // underwater strobe. MC's main RT is the authoritative frame size
             // (same source the compositor uses).
-            var rt = Minecraft.getInstance().getMainRenderTarget();
+            var rt = Minecraft.getInstance().gameRenderer.mainRenderTarget();
             if (rt != null && rt.width > 0 && rt.height > 0) {
                 if ((width != rt.width || height != rt.height) && !loggedViewportLeak) {
                     loggedViewportLeak = true;
