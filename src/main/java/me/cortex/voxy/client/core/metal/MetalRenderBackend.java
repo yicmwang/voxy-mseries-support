@@ -407,6 +407,7 @@ public class MetalRenderBackend implements RenderBackend {
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
             this.endForeignEncoderIfNeeded();
+            logEncoderOp("blit newBlitEncoder (active buffer)");
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -444,6 +445,7 @@ public class MetalRenderBackend implements RenderBackend {
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
             this.endForeignEncoderIfNeeded();
+            logEncoderOp("blit newBlitEncoder (active buffer)");
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -480,6 +482,19 @@ public class MetalRenderBackend implements RenderBackend {
      * typically open when Voxy wants a blit. Close it first; Metallum reopens lazily on its next
      * draw, with load actions that preserve whatever Voxy writes. No-op when Voxy owns the buffer.
      */
+    /**
+     * Temporary: log every encoder creation so the last line before a Metal assertion identifies
+     * the offending site. Metal assertions carry no Java stack.
+     */
+    static void logEncoderOp(String what) {
+        Logger.info("[Metal-ENC] " + what
+                + " ownsActive=" + OWNED.get()
+                + " lastRenderEnc=" + LAST_RENDER_ENC.get());
+    }
+
+    private static final ThreadLocal<Boolean> OWNED = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Long> LAST_RENDER_ENC = ThreadLocal.withInitial(() -> 0L);
+
     private void endForeignEncoderIfNeeded() {
         // Deliberately NOT gated on ownsActiveCommandBuffer: that flag is decided once, when the
         // active buffer is first created -- which can be before Metallum has a frame buffer at all.
@@ -587,13 +602,16 @@ public class MetalRenderBackend implements RenderBackend {
             // to this command buffer"), and closing Metallum's to open our own costs a pass split for
             // no reason. Borrowing also means Voxy's draws land in Metallum's pass directly, sharing
             // its depth. Falls back to owning an encoder when Metallum is absent.
+            logEncoderOp("beginRenderPass borrowRequest color=0x" + Long.toHexString(colorHandle));
             long shared = MetallumBridge.acquireRenderEncoder(
                     colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight());
+            logEncoderOp("beginRenderPass borrowResult=0x" + Long.toHexString(shared));
             if (shared != 0L) {
                 encoder = shared;
                 borrowed = true;
             } else {
                 this.endForeignEncoderIfNeeded();
+                logEncoderOp("beginRenderPass OWN newRenderEncoder");
                 encoder = MetalNative.mtlCommandBufferNewRenderEncoder(this.activeCommandBuffer, passDescHandle);
                 if (encoder == 0) {
                     throw new RuntimeException("mtlCommandBufferNewRenderEncoder returned NULL");
@@ -1051,6 +1069,7 @@ public class MetalRenderBackend implements RenderBackend {
         // Metallum may still have a render encoder open on this buffer, so close it first; Metallum
         // reopens lazily on its next draw with load actions that preserve what Voxy wrote.
         this.endForeignEncoderIfNeeded();
+        logEncoderOp("beginComputePass newComputeEncoder");
         long encoder = MetalNative.mtlCommandBufferNewComputeEncoder(this.activeCommandBuffer);
         if (encoder == 0) {
             throw new RuntimeException("mtlCommandBufferNewComputeEncoder returned NULL");
