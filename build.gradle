@@ -108,6 +108,11 @@ loom {
             if (System.getenv("VOXY_INTEROP_TRACE") != null) {
                 property("metallum.interopTrace", "true")
             }
+            // Automated capture runs are launched while someone is working in another
+            // window; a dev client that grabs focus on every launch makes that unusable.
+            if (System.getenv("VOXY_NO_FOCUS") != null) {
+                property("voxy.noFocusOnShow", "true")
+            }
         }
     }
 }

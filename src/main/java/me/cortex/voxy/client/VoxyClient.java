@@ -164,6 +164,79 @@ public class VoxyClient implements ClientModInitializer {
             Logger.info("VOXY_AUTO_SCREENSHOT active: every " + parsedInterval + "s");
         }
 
+        // VOXY_TEST_CAMERA="x,y,z,yaw,pitch": pin the player's position and facing, in flight,
+        // re-applied every tick so server corrections cannot drift the view.
+        //
+        // Position is what makes a capture comparable at all. Two frames of the same build — or of
+        // two builds — can only be diffed if the camera is identical, and the alternative (issuing
+        // /tp) is unreliable: Minecraft rewrites level.dat's allowCommands on save, so a world
+        // patched to allow cheats silently reverts and every command comes back
+        // "Unknown or incomplete command". Driving the entity directly sidesteps world settings
+        // entirely, and works on a server too.
+        String testCamera = System.getenv("VOXY_TEST_CAMERA");
+        if (testCamera != null && !testCamera.isBlank()) {
+            String[] parts = testCamera.split(",");
+            if (parts.length != 5) {
+                throw new IllegalStateException(
+                        "VOXY_TEST_CAMERA needs \"x,y,z,yaw,pitch\"; got: " + testCamera);
+            }
+            final double cx = Double.parseDouble(parts[0].trim());
+            final double cy = Double.parseDouble(parts[1].trim());
+            final double cz = Double.parseDouble(parts[2].trim());
+            final float cyaw = Float.parseFloat(parts[3].trim());
+            final float cpitch = Float.parseFloat(parts[4].trim());
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                if (client.player == null) return;
+                var p = client.player;
+                p.setPos(cx, cy, cz);
+                p.setYRot(cyaw);
+                p.setXRot(cpitch);
+                p.setDeltaMovement(0, 0, 0);
+                p.resetFallDistance();
+                var ab = p.getAbilities();
+                ab.mayfly = true;
+                ab.flying = true;
+            });
+            Logger.info("VOXY_TEST_CAMERA active: " + testCamera + " (flying, re-pinned each tick)");
+        }
+
+        // VOXY_JOIN_COMMAND="/time set noon; /weather clear; /tp 0 120 0 0 30":
+        // run slash-commands once a few seconds after joining a world, then stop.
+        //
+        // This is what makes a capture *comparable*. Comparing two builds — or two
+        // runs of one build — only means something if both rendered the same scene,
+        // and time of day, weather, position and facing are otherwise whatever the
+        // save happened to be left holding. Pairs with VOXY_AUTO_SCREENSHOT; needs
+        // allowCommands on the world (a test fixture, not a gameplay world).
+        String joinCommand = System.getenv("VOXY_JOIN_COMMAND");
+        if (joinCommand != null && !joinCommand.isBlank()) {
+            final int delayTicks;
+            try {
+                delayTicks = Math.max(20, Integer.parseInt(
+                        System.getenv().getOrDefault("VOXY_JOIN_COMMAND_DELAY", "60").trim()));
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("VOXY_JOIN_COMMAND_DELAY must be an integer", e);
+            }
+            final String[] commands = joinCommand.split(";");
+            final int[] ticks = {0};
+            final boolean[] done = {false};
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                if (done[0] || client.level == null || client.player == null
+                        || client.getConnection() == null) {
+                    return;
+                }
+                if (++ticks[0] < delayTicks) return;
+                done[0] = true;
+                for (String raw : commands) {
+                    String cmd = raw.trim();
+                    if (cmd.isEmpty()) continue;
+                    // sendCommand takes the body without the leading slash.
+                    client.getConnection().sendCommand(cmd.startsWith("/") ? cmd.substring(1) : cmd);
+                }
+                Logger.info("VOXY_JOIN_COMMAND ran after " + delayTicks + " ticks: " + joinCommand);
+            });
+        }
+
         FabricLoader.getInstance()
                 .getEntrypoints("frex_flawless_frames", Consumer.class)
                 .forEach(api -> ((Consumer<Function<String,Consumer<Boolean>>>)api).accept(name->active->{if (active) {
