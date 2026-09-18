@@ -118,6 +118,10 @@ if (!isInGHA) {
 
 dependencies {
     // To change the versions see the gradle.properties file
+    // Unit tests (pure logic; GPU paths are covered by the test* JavaExec smoke tasks)
+    testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
@@ -559,5 +563,13 @@ tasks.register('testVulkanClear', JavaExec) {
     def moltenVkIcd = file('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json')
     if (moltenVkIcd.exists()) {
         environment 'VK_ICD_FILENAMES', moltenVkIcd.absolutePath
+    }
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "failed", "skipped"
+        exceptionFormat "full"
     }
 }

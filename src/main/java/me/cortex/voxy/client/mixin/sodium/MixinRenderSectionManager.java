@@ -115,7 +115,7 @@ public class MixinRenderSectionManager {
             var tracker = ((AccessorChunkTracker)ChunkTrackerHolder.get(this.level)).getChunkStatus();
             //in theory the cache value could be wrong but is so soso unlikely and at worst means we either duplicate ingest a chunk
             // which... could be bad ;-; or we dont ingest atall which is ok!
-            long key = (((long) x) & 0xFFFFFFFFL) | ((((long) z) & 0xFFFFFFFFL) << 32);
+            long key = ChunkPos.pack(x, z);//26.2 renamed ChunkPos.asLong -> pack
             if (key != this.cachedChunkPos) {
                 this.cachedChunkPos = key;
                 this.cachedChunkStatus = tracker.getOrDefault(key, 0);
