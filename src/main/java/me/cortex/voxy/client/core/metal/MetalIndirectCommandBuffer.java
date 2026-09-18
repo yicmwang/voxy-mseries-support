@@ -21,6 +21,8 @@ import me.cortex.voxy.client.core.gpu.IGpuIndirectCommandBuffer;
 public final class MetalIndirectCommandBuffer implements IGpuIndirectCommandBuffer {
 
     private final int maxCommands;
+    private final boolean inheritBuffers;
+    private final boolean inheritPipelineState;
     private long handle;
 
     public MetalIndirectCommandBuffer(long device, int maxCommands) {
@@ -30,6 +32,8 @@ public final class MetalIndirectCommandBuffer implements IGpuIndirectCommandBuff
     public MetalIndirectCommandBuffer(long device, int maxCommands,
                                       boolean inheritBuffers, boolean inheritPipelineState) {
         this.maxCommands = maxCommands;
+        this.inheritBuffers = inheritBuffers;
+        this.inheritPipelineState = inheritPipelineState;
         // We currently only need indexed draws (MDIC's section quads). When
         // the prep / cull paths move to ICB-backed dispatches, OR additional
         // command-type bits in here.
@@ -103,6 +107,11 @@ public final class MetalIndirectCommandBuffer implements IGpuIndirectCommandBuff
     /** Set the vertex buffer used by the given ICB slot. */
     public void encodeSetVertexBuffer(int commandIndex, long bufferHandle, long offset, int atIndex) {
         checkIndex(commandIndex);
+        if (this.inheritBuffers) {
+            throw new IllegalStateException(
+                    "ICB was created with inheritBuffers=true, so per-command vertex buffers are "
+                    + "invalid. Construct it with inheritBuffers=false, or omit this call.");
+        }
         MetalNative.mtlIndirectRenderCommandSetVertexBuffer(
                 this.handle, commandIndex, bufferHandle, offset, atIndex);
     }
@@ -117,6 +126,16 @@ public final class MetalIndirectCommandBuffer implements IGpuIndirectCommandBuff
     /** Bake a PSO into the given ICB slot (only useful when the ICB was created without inheritPipelineState). */
     public void encodeSetPipelineState(int commandIndex, long psoHandle) {
         checkIndex(commandIndex);
+        if (this.inheritPipelineState) {
+            // Encoding a PSO into a command of an inheriting ICB is invalid, and Metal does not
+            // report it: the driver aborts (observed as SIGBUS in
+            // -[AGX...IndirectRenderCommand setRenderPipelineState:]), taking the whole process down.
+            // Fail loudly instead.
+            throw new IllegalStateException(
+                    "ICB was created with inheritPipelineState=true, so per-command pipeline state is "
+                    + "invalid. Construct it with inheritPipelineState=false, or omit this call. Note "
+                    + "RenderBackend.createIndirectCommandBuffer() defaults BOTH inherit flags to true.");
+        }
         MetalNative.mtlIndirectRenderCommandSetPipelineState(this.handle, commandIndex, psoHandle);
     }
 
