@@ -49,6 +49,16 @@ import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_BINDING;
 
 public class VoxyRenderSystem {
+    /**
+     * Saving and restoring MC's GL SSBO bindings is meaningless -- and, worse, fatal -- without a GL
+     * backend: under whole-frame Metal there is no context and glGetIntegeri aborts the JVM
+     * ("FATAL ERROR in native method: No context is current"). Nothing Voxy does on Metal touches GL
+     * state, so there is nothing to preserve.
+     */
+    private static final boolean SAVE_GL_STATE =
+            me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                    == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
+
     private final WorldEngine worldIn;
 
 
@@ -186,14 +196,18 @@ public class VoxyRenderSystem {
 
         //Fking HATE EVERYTHING AAAAAAAAAAAAAAAA
         int[] oldBufferBindings = new int[10];
-        for (int i = 0; i < oldBufferBindings.length; i++) {
-            oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
+        if (SAVE_GL_STATE) {
+            for (int i = 0; i < oldBufferBindings.length; i++) {
+                oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
+            }
         }
 
         try {
             //wait for opengl to be finished, this should hopefully ensure all memory allocations are free
-            glFinish();
-            glFinish();
+            if (SAVE_GL_STATE) {
+                glFinish();
+                glFinish();
+            }
 
             this.worldIn = world;
 
@@ -251,8 +265,10 @@ public class VoxyRenderSystem {
             throw e;
         }
 
-        for (int i = 0; i < oldBufferBindings.length; i++) {
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
+        if (SAVE_GL_STATE) {
+            for (int i = 0; i < oldBufferBindings.length; i++) {
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
+            }
         }
 
         for (int i = 0; i < 12; i++) {
@@ -551,8 +567,10 @@ public class VoxyRenderSystem {
 
         //TODO: optimize
         int[] oldBufferBindings = new int[10];
-        for (int i = 0; i < oldBufferBindings.length; i++) {
-            oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
+        if (SAVE_GL_STATE) {
+            for (int i = 0; i < oldBufferBindings.length; i++) {
+                oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
+            }
         }
 
 
@@ -628,8 +646,10 @@ public class VoxyRenderSystem {
 
             //TODO: should/needto actually restore all of these, not just clear them
             //Clear all the bindings
-            for (int i = 0; i < oldBufferBindings.length; i++) {
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
+            if (SAVE_GL_STATE) {
+                for (int i = 0; i < oldBufferBindings.length; i++) {
+                    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
+                }
             }
 
             //((SodiumShader) Iris.getPipelineManager().getPipelineNullable().getSodiumPrograms().getProgram(DefaultTerrainRenderPasses.CUTOUT).getInterface()).setupState(DefaultTerrainRenderPasses.CUTOUT, fogParameters);

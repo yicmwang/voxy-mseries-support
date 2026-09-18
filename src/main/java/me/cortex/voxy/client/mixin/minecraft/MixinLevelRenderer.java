@@ -9,19 +9,26 @@ import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.LevelRenderer;
-import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+/**
+ * Owns the Voxy renderer's lifetime, hung off {@link LevelRenderer}.
+ *
+ * <p>26.2 port. The old version shadowed a {@code level} field and hooked {@code setLevel} and
+ * {@code allChanged}; LevelRenderer has none of those any more (the field is gone, and
+ * {@code allChanged} was removed outright — see also VoxyCommands). It now reads the level from
+ * Minecraft and hooks {@code resetLevelRenderData}, which is the per-level reset and therefore the
+ * level-change/reload point this needs.
+ */
 @Mixin(LevelRenderer.class)
 public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
-    @Shadow private @Nullable ClientLevel level;
     @Unique private VoxyRenderSystem renderer;
 
     @Override
@@ -29,23 +36,16 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
         return this.renderer;
     }
 
-    @Inject(method = "allChanged()V", at = @At("RETURN"), order = 900)//We want to inject before sodium
-    private void reloadVoxyRenderer(CallbackInfo ci) {
+    @Inject(method = "resetLevelRenderData", at = @At("RETURN"), order = 900)//We want to inject before sodium
+    private void voxy$reloadRenderer(CallbackInfo ci) {
         this.shutdownRenderer();
-        if (this.level != null) {
+        if (Minecraft.getInstance().level != null) {
             this.createRenderer();
         }
     }
 
-    @Inject(method = "setLevel", at = @At("HEAD"))
-    private void voxy$captureSetWorld(ClientLevel world, CallbackInfo ci) {
-        if (this.level != world) {
-            this.shutdownRenderer();
-        }
-    }
-
     @Inject(method = "close", at = @At("HEAD"))
-    private void injectClose(CallbackInfo ci) {
+    private void voxy$injectClose(CallbackInfo ci) {
         this.shutdownRenderer();
     }
 
@@ -64,7 +64,8 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
             Logger.info("Not creating renderer due to disabled");
             return;
         }
-        if (this.level == null) {
+        ClientLevel level = Minecraft.getInstance().level;
+        if (level == null) {
             Logger.error("Not creating renderer due to null world");
             return;
         }
@@ -73,7 +74,7 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
             Logger.error("Not creating renderer due to null instance");
             return;
         }
-        WorldEngine world = WorldIdentifier.ofEngine(this.level);
+        WorldEngine world = WorldIdentifier.ofEngine(level);
         if (world == null) {
             Logger.error("Null world selected");
             return;

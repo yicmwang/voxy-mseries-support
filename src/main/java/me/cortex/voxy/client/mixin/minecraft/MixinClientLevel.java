@@ -29,7 +29,6 @@ public abstract class MixinClientLevel {
     @Unique
     private int bottomSectionY;
 
-    @Shadow @Final public LevelRenderer levelRenderer;
 
     @Shadow public abstract ClientChunkCache getChunkSource();
 
@@ -41,7 +40,7 @@ public abstract class MixinClientLevel {
             Holder<DimensionType> dimensionType,
             int loadDistance,
             int simulationDistance,
-            LevelRenderer worldRenderer,
+            net.minecraft.client.renderer.extract.LevelExtractor levelExtractor,
             boolean debugWorld,
             long seed,
             int seaLevel,

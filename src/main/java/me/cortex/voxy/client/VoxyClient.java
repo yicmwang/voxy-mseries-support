@@ -69,10 +69,9 @@ public class VoxyClient implements ClientModInitializer {
         if (systemSupported && backend.getType() != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
             if (forceMetal) {
                 Logger.info("[VOXY_FORCE_METAL] Voxy enabled on " + backend.getType()
-                        + " backend. Render output flows through the IOSurface bridge; "
-                        + "MDIC draws real LOD geometry with the Metal model atlas bakery. "
-                        + "Remaining M13 gaps: depth import (real HiZ + cull stub) and SSAO. "
-                        + "Set VOXY_BAKERY_OFF=1 for the hash-colour fallback.");
+                        + " backend. Under Metallum the LOD pass renders straight into the "
+                        + "frame's colour and depth attachments; there is no bridge and no "
+                        + "composite.");
             } else {
                 Logger.warn("[M9 TRANSITIONAL] Voxy disabled on " + backend.getType()
                         + " backend. Set VOXY_FORCE_METAL=1 to enable the Metal render path.");
@@ -82,8 +81,15 @@ public class VoxyClient implements ClientModInitializer {
 
         if (systemSupported) {
 
-            SharedIndexBuffer.INSTANCE.id();
-            BudgetBufferRenderer.init();
+            if (backend.getType() == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+                // Both of these are raw-GL startup: id() creates the GL index buffer and
+                // BudgetBufferRenderer compiles a GL program. Under whole-frame Metal there is no
+                // GL context at all, and glCreateShader does not fail gracefully -- LWJGL aborts
+                // the JVM ("FATAL ERROR in native method: No context is current"). The Metal paths
+                // allocate their own resources lazily, and MetalBudgetBufferRenderer is dormant.
+                SharedIndexBuffer.INSTANCE.id();
+                BudgetBufferRenderer.init();
+            }
 
             VoxyCommon.setInstanceFactory(VoxyClientInstance::new);
 

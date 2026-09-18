@@ -54,7 +54,42 @@ public class Capabilities {
     public final boolean hasBrokenDepthSampler;
 
     public Capabilities() {
-        var cap = GL.getCapabilities();
+        // Whole-frame Metal has NO GL context, and GL.getCapabilities() throws
+        // IllegalStateException ("No GLCapabilities instance set for the current thread").
+        // Nothing probed here is meaningful on that path: the Metal backend reports its own
+        // capabilities (RenderBackendFactory / RenderBackend), and every GL-specific consumer of
+        // this class is unreachable. Report a neutral set rather than killing client startup.
+        org.lwjgl.opengl.GLCapabilities cap = null;
+        try {
+            cap = GL.getCapabilities();
+        } catch (Throwable noGlContext) {
+            Logger.info("No GL context (whole-frame Metal): GL capabilities reported unavailable");
+        }
+        if (cap == null) {
+            this.sparseBuffer = false;
+            this.compute = false;
+            this.indirectCount = false;
+            this.indirectParameters = false;
+            this.repFragTest = false;
+            this.meshShaders = false;
+            this.canQueryGpuMemory = false;
+            this.INT64_t = false;
+            // Selects the non-subgroup prefix-sum shader. Safe, and the right choice when we
+            // cannot prove subgroup support.
+            this.subgroup = false;
+            // Buffer sizing reads this; Metal's SSBOs are large, so give it a generous bound
+            // rather than 0, which would size allocations to nothing.
+            this.ssboMaxSize = 1L << 30;
+            this.isMesa = false;
+            this.isIntel = false;
+            this.isNvidia = false;
+            this.isAmd = false;
+            this.totalDedicatedMemory = -1;
+            this.totalDynamicMemory = -1;
+            this.nvBarryCoords = false;
+            this.hasBrokenDepthSampler = false;
+            return;
+        }
         this.sparseBuffer = cap.GL_ARB_sparse_buffer;
         this.compute = cap.glDispatchComputeIndirect != 0;
         this.indirectCount = cap.glMultiDrawElementsIndirectCountARB != 0;
