@@ -562,6 +562,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     + " colorId=" + this.metallumColor.id()
                     + " depthId=" + this.metallumDepth.id()
                     + " useMetallumTarget=" + this.useMetallumTarget);
+            me.cortex.voxy.client.core.metal.MetallumBridge.logRenderPassCounters();
         }
         if (this.useMetallumTarget) {
             // Whole-frame Metal: draw straight into the frame's own attachments. LOAD on both,

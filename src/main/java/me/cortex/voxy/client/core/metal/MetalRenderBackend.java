@@ -481,9 +481,12 @@ public class MetalRenderBackend implements RenderBackend {
      * draw, with load actions that preserve whatever Voxy writes. No-op when Voxy owns the buffer.
      */
     private void endForeignEncoderIfNeeded() {
-        if (!this.ownsActiveCommandBuffer) {
-            MetallumBridge.endCurrentEncoder();
-        }
+        // Deliberately NOT gated on ownsActiveCommandBuffer: that flag is decided once, when the
+        // active buffer is first created -- which can be before Metallum has a frame buffer at all.
+        // Voxy would then believe it owns the buffer and skip this, while Metallum meanwhile opened
+        // a render encoder on the same buffer. Asking Metallum to close is a no-op when it has
+        // nothing open, so just always ask.
+        MetallumBridge.endCurrentEncoder();
     }
 
     private void endActiveBlitEncoder() {
@@ -1044,6 +1047,10 @@ public class MetalRenderBackend implements RenderBackend {
         // SSBOs) must be encoded before the compute encoder opens.
         this.endActiveBlitEncoder();
         this.ensureActiveCommandBuffer();
+        // One encoder at a time per command buffer. Voxy's compute prepasses run every frame while
+        // Metallum may still have a render encoder open on this buffer, so close it first; Metallum
+        // reopens lazily on its next draw with load actions that preserve what Voxy wrote.
+        this.endForeignEncoderIfNeeded();
         long encoder = MetalNative.mtlCommandBufferNewComputeEncoder(this.activeCommandBuffer);
         if (encoder == 0) {
             throw new RuntimeException("mtlCommandBufferNewComputeEncoder returned NULL");

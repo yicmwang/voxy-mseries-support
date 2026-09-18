@@ -22,7 +22,8 @@ public final class MetallumBridge {
 
     private static Method mIsAvailable, mDeviceHandle, mCommandQueueHandle, mCommandBufferHandle,
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
-            mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState;
+            mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
+            mLogRenderPassCounters;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -48,6 +49,7 @@ public final class MetallumBridge {
             mFlushFrame = interop.getMethod("flushFrame");
             mAcquireRenderEncoder = interop.getMethod("acquireRenderEncoder", long.class, long.class, int.class, int.class);
             mInvalidateRenderPassState = interop.getMethod("invalidateRenderPassState");
+            mLogRenderPassCounters = interop.getMethod("logRenderPassCounters");
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
             Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
@@ -190,6 +192,18 @@ public final class MetallumBridge {
             mInvalidateRenderPassState.invoke(null);
         } catch (Throwable t) {
             Logger.error("MetallumBridge.invalidateRenderPassState failed", t);
+        }
+    }
+
+    /** Temporary: dump Metallum's render-pass entry counters. */
+    public static void logRenderPassCounters() {
+        resolve();
+        if (mLogRenderPassCounters == null) {
+            return;
+        }
+        try {
+            mLogRenderPassCounters.invoke(null);
+        } catch (Throwable ignored) {
         }
     }
 
