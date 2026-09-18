@@ -22,7 +22,7 @@ public final class MetallumBridge {
 
     private static Method mIsAvailable, mDeviceHandle, mCommandQueueHandle, mCommandBufferHandle,
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
-            mViewportWidth, mViewportHeight;
+            mViewportWidth, mViewportHeight, mFlushFrame;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -45,6 +45,7 @@ public final class MetallumBridge {
             mDepthAttachment = interop.getMethod("currentDepthAttachmentHandle");
             mViewportWidth = interop.getMethod("currentViewportWidth");
             mViewportHeight = interop.getMethod("currentViewportHeight");
+            mFlushFrame = interop.getMethod("flushFrame");
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
             Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
@@ -123,6 +124,35 @@ public final class MetallumBridge {
         } catch (Throwable t) {
             Logger.error("MetallumBridge.endCurrentEncoder failed", t);
         }
+    }
+
+    /**
+     * Submits and waits on Metallum's current frame buffer so GPU-written data becomes CPU-visible,
+     * then continues the frame in a fresh buffer.
+     *
+     * <p>Voxy needs this mid-frame: its draw path reads the GPU-generated draw commands to push
+     * {@code baseInstance} (Metal's indirect path does not propagate it), and that read cannot be
+     * satisfied from a buffer that has not been committed. Without a mid-frame completion point Voxy
+     * cannot encode into Metallum's frame at all.
+     *
+     * <p>No-op when Metallum is absent or predates the hook.
+     */
+    public static void flushFrame() {
+        resolve();
+        if (mFlushFrame == null) {
+            return;
+        }
+        try {
+            mFlushFrame.invoke(null);
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.flushFrame failed", t);
+        }
+    }
+
+    /** True when Metallum exposes the mid-frame split (see {@link #flushFrame()}). */
+    public static boolean supportsFlushFrame() {
+        resolve();
+        return mFlushFrame != null;
     }
 
     private static long call(Method m) {

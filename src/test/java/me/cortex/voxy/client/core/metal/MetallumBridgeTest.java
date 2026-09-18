@@ -32,4 +32,10 @@ class MetallumBridgeTest {
     void endCurrentEncoderIsNoOpNotThrow() {
         assertDoesNotThrow(MetallumBridge::endCurrentEncoder);
     }
+
+    @Test
+    void midFrameSplitDegradesWhenMetallumAbsent() {
+        assertFalse(MetallumBridge.supportsFlushFrame());
+        assertDoesNotThrow(MetallumBridge::flushFrame);
+    }
 }

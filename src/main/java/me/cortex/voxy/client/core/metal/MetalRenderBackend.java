@@ -872,9 +872,18 @@ public class MetalRenderBackend implements RenderBackend {
         this.activeBufferHasBlits = false;
 
         if (!this.ownsActiveCommandBuffer) {
-            // Metallum owns this buffer and commits it once at end of frame. Drop our reference
-            // (not the buffer) so the next call picks up the frame's current buffer. Mid-frame
-            // readbacks cannot be satisfied from here — that is P3's fence work.
+            // Metallum owns the frame buffer. Split the frame here so everything encoded so far --
+            // including the compute prepasses that wrote drawCallBuffer -- is committed and
+            // complete, making it CPU-visible for the draw path's baseInstance read. The next
+            // ensureActiveCommandBuffer() picks up the fresh buffer Metallum opens afterwards.
+            //
+            // This costs a pipeline drain, which is what Voxy pays today when it owns its own
+            // frames; correctness first. If Metallum predates the hook we cannot satisfy the read,
+            // so drop our reference and let the caller see stale data rather than corrupting the
+            // frame by committing a buffer we do not own.
+            if (MetallumBridge.supportsFlushFrame()) {
+                MetallumBridge.flushFrame();
+            }
             this.activeCommandBuffer = 0;
             return;
         }

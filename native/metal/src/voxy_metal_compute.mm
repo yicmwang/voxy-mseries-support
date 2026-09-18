@@ -110,3 +110,4 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlComputeEncoderSetBytes(
         [encoder setBytes:(const void *)dataAddr length:(NSUInteger)size atIndex:(NSUInteger)index];
     }
 }
+

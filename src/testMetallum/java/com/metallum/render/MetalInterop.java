@@ -81,4 +81,11 @@ public final class MetalInterop {
 
     public static void endCurrentEncoder() {
     }
+
+    /** Records mid-frame splits so tests can assert Voxy's submit() reached Metallum. */
+    public static int flushFrameCalls;
+
+    public static void flushFrame() {
+        flushFrameCalls++;
+    }
 }

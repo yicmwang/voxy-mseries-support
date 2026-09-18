@@ -57,4 +57,17 @@ class MetallumBridgePresentTest {
     void endCurrentEncoderDoesNotThrow() {
         assertDoesNotThrow(MetallumBridge::endCurrentEncoder);
     }
+
+    @Test
+    void detectsAndForwardsTheMidFrameSplit() {
+        assertTrue(MetallumBridge.supportsFlushFrame(),
+                "the fake exposes flushFrame, so the bridge must find it");
+
+        int before = com.metallum.render.MetalInterop.flushFrameCalls;
+        MetallumBridge.flushFrame();
+
+        assertEquals(before + 1, com.metallum.render.MetalInterop.flushFrameCalls,
+                "flushFrame must reach Metallum — Voxy's submit() depends on it to make the "
+                        + "GPU-written draw commands CPU-visible mid-frame");
+    }
 }
