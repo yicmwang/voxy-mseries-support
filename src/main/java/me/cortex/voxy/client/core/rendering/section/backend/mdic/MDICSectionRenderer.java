@@ -1431,20 +1431,28 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     mvp, baseSectionPos, sPosX, sPosY, qx, qy, faceData, true);
             int inside = 0;
             float minW = Float.MAX_VALUE, maxZ = -Float.MAX_VALUE, minZ = Float.MAX_VALUE;
-            float maxExtent = 0;
+            float minNdcX = Float.MAX_VALUE, maxNdcX = -Float.MAX_VALUE;
+            float minNdcY = Float.MAX_VALUE, maxNdcY = -Float.MAX_VALUE;
             for (int k = 0; k < 4; k++) {
                 float x = c[k * 4], y = c[k * 4 + 1], z = c[k * 4 + 2], w = c[k * 4 + 3];
                 if (me.cortex.voxy.client.core.rendering.util.LodVertexMath
                         .insideClipVolume(x, y, z, w)) inside++;
                 minW = Math.min(minW, w);
-                minZ = Math.min(minZ, z / (w == 0 ? 1 : w));
-                maxZ = Math.max(maxZ, z / (w == 0 ? 1 : w));
-                maxExtent = Math.max(maxExtent, Math.abs(x / (w == 0 ? 1 : w) - c[0] / (c[3] == 0 ? 1 : c[3]))
-                        + Math.abs(y / (w == 0 ? 1 : w) - c[1] / (c[3] == 0 ? 1 : c[3])));
+                float iw = w == 0 ? 1 : 1 / w;
+                minZ = Math.min(minZ, z * iw);
+                maxZ = Math.max(maxZ, z * iw);
+                minNdcX = Math.min(minNdcX, x * iw);
+                maxNdcX = Math.max(maxNdcX, x * iw);
+                minNdcY = Math.min(minNdcY, y * iw);
+                maxNdcY = Math.max(maxNdcY, y * iw);
             }
+            // NDC y is reported as the shader produces it (y up); the viewport has a negative
+            // height, so it reaches the screen flipped.
             sb.append(String.format(java.util.Locale.ROOT,
-                    " [#%d model=%d face=%d faceData=%d inside=%d/4 minW=%.3f ndcZ=[%.3f,%.3f] extent=%.4f]",
-                    i, modelId, face, faceData, inside, minW, minZ, maxZ, maxExtent));
+                    " [#%d model=%d face=%d faceData=%d inside=%d/4 minW=%.3f ndcZ=[%.3f,%.3f] "
+                            + "ndcX=[%.3f,%.3f] ndcY=[%.3f,%.3f]]",
+                    i, modelId, face, faceData, inside, minW, minZ, maxZ,
+                    minNdcX, maxNdcX, minNdcY, maxNdcY));
         }
         Logger.info("[Metal-CORNERS] " + sb);
     }

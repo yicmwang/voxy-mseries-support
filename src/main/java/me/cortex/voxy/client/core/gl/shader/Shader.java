@@ -34,7 +34,14 @@ public class Shader extends TrackedObject implements me.cortex.voxy.client.core.
 
     public void free() {
         super.free0();
-        glDeleteProgram(this.id);
+        // Program 0 is never a valid GL name: it is the stub Builder.compile() returns on a
+        // non-OpenGL backend so the bootstrap does not touch the GL driver. Freeing the stub must
+        // not either -- there is no context to call into, and the abort it raises
+        // ("No context is current", SIGABRT) lands during world teardown rather than at the point
+        // the stub was created, so the stub contract has to hold on this side too.
+        if (this.id != 0) {
+            glDeleteProgram(this.id);
+        }
     }
 
 

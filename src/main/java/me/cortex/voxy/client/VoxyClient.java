@@ -164,6 +164,45 @@ public class VoxyClient implements ClientModInitializer {
             Logger.info("VOXY_AUTO_SCREENSHOT active: every " + parsedInterval + "s");
         }
 
+        // VOXY_DEV_TIME=<time>: pin the world clock a few seconds after joining, so screenshots are
+        // comparable. Debug-loop aid.
+        //
+        // Without this, brightness comparisons are meaningless: the day/night cycle runs at 20 real
+        // minutes per in-game day, so two runs an hour apart land at arbitrary times and "the LOD
+        // renders black" is indistinguishable from "it is night". A black frame with a bright hotbar
+        // is exactly the night signature, and that ambiguity cost a round of diagnosis.
+        //
+        // Accepts any /time set argument ("noon", "midnight", "day", or a tick count), and also
+        // clears the weather, which darkens the sky the same way.
+        String devTime = System.getenv("VOXY_DEV_TIME");
+        if (devTime != null && !devTime.isBlank()) {
+            final String timeArg = devTime.trim();
+            final int[] ticksUntilApply = {40};   // let the world finish loading first
+            final boolean[] applied = {false};
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                if (applied[0] || client.level == null) return;
+                if (ticksUntilApply[0]-- > 0) return;
+                var server = client.getSingleplayerServer();
+                if (server == null) return;
+                applied[0] = true;
+                try {
+                    var source = server.createCommandSourceStack();
+                    var commands = server.getCommands();
+                    for (String cmd : new String[] {
+                            "gamerule doDaylightCycle false",
+                            "gamerule doWeatherCycle false",
+                            "weather clear",
+                            "time set " + timeArg}) {
+                        commands.performPrefixedCommand(source, cmd);
+                    }
+                    Logger.info("VOXY_DEV_TIME active: pinned the world clock to '" + timeArg
+                            + "' with the daylight cycle off");
+                } catch (Throwable t) {
+                    Logger.error("VOXY_DEV_TIME failed to apply '" + timeArg + "'", t);
+                }
+            });
+        }
+
         // VOXY_FPS_LOG=<seconds>: log Minecraft's own frame rate.
         //
         // Voxy's frame-rate diagnostic (Metal-RING) only exists when Voxy's render system is
