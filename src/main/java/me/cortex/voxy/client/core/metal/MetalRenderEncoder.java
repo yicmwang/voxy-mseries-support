@@ -35,14 +35,24 @@ public final class MetalRenderEncoder implements RenderEncoder {
      * Metallum's pass state stale so Metallum rebinds before its next draw.
      */
     private final boolean borrowed;
+    /**
+     * True when this encoder came from beginDetachedRenderEncoder: Metallum tracks nothing about
+     * it, so Voxy must end it itself and no pass teardown may touch it.
+     */
+    private final boolean detached;
 
     MetalRenderEncoder(long encoderHandle) {
         this(encoderHandle, false);
     }
 
     MetalRenderEncoder(long encoderHandle, boolean borrowed) {
+        this(encoderHandle, borrowed, false);
+    }
+
+    MetalRenderEncoder(long encoderHandle, boolean borrowed, boolean detached) {
         this.encoderHandle = encoderHandle;
         this.borrowed = borrowed;
+        this.detached = detached;
     }
 
     @Override
@@ -278,10 +288,37 @@ public final class MetalRenderEncoder implements RenderEncoder {
                 this.encoderHandle, m.handle(), rangeBufHandle, rangeOffset);
     }
 
+    /**
+     * What {@link #close()} must do with the encoder, which depends entirely on who owns it.
+     *
+     * <p>Extracted so the rule can be unit-tested without a GPU: getting it wrong is what made
+     * Voxy's LOD render nothing. An encoder Metallum hands out through its shared-encoder path is
+     * tracked by Metallum, which may end it before the borrower is done with it; one Metallum knows
+     * nothing about must be ended by us, or its work is discarded when the command buffer commits.
+     */
+    enum CloseAction {
+        /** Detached: untracked by Metallum, so nothing else will ever end it. */
+        END_VIA_METALLUM,
+        /** Borrowed: Metallum keeps drawing on it; only mark its cached state stale. */
+        INVALIDATE_ONLY,
+        /** Voxy's own: end it and release our reference. */
+        END_AND_RELEASE
+    }
+
+    static CloseAction closeActionFor(final boolean detached, final boolean borrowed) {
+        if (detached) {
+            return CloseAction.END_VIA_METALLUM;
+        }
+        return borrowed ? CloseAction.INVALIDATE_ONLY : CloseAction.END_AND_RELEASE;
+    }
+
     @Override
     public void close() {
         if (this.encoderHandle == 0) return;
-        if (this.borrowed) {
+        if (this.detached) {
+            // Untracked by Metallum: nothing else will ever end it, so Voxy must.
+            MetallumBridge.endDetachedRenderEncoder(this.encoderHandle);
+        } else if (this.borrowed) {
             // Shared with Metallum: leave the encoder open and let Metallum rebind its own state.
             //
             // VOXY_END_BORROWED_ENCODER=1 -- experiment. "Borrowed" covers two different things:

@@ -25,7 +25,7 @@ public final class MetallumBridge {
             mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
             mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle,
             mHasPendingColorClear, mHasPendingDepthClear, mPendingColorClearCount,
-            mDrawProbeStyleTriangle;
+            mDrawProbeStyleTriangle, mBeginDetached, mEndDetached;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -60,6 +60,9 @@ public final class MetallumBridge {
             mPendingColorClearCount = interop.getMethod("pendingColorClearCount");
             mDrawProbeStyleTriangle = interop.getMethod("drawProbeStyleTriangle",
                     long.class, long.class, int.class, int.class, String.class);
+            mBeginDetached = interop.getMethod("beginDetachedRenderEncoder",
+                    long.class, long.class, int.class, int.class);
+            mEndDetached = interop.getMethod("endDetachedRenderEncoder", long.class);
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
             Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
@@ -297,6 +300,33 @@ public final class MetallumBridge {
         } catch (Throwable t) {
             Logger.error("MetallumBridge.drawProbeStyleTriangle failed", t);
             return false;
+        }
+    }
+
+    /**
+     * Open a render encoder Metallum does not track, so its pass and encoder teardown cannot end it
+     * early or clear into it. The caller owns it and must call {@link #endDetachedRenderEncoder}.
+     * Returns 0 when metallum is absent or lacks the API, and the caller should fall back.
+     */
+    public static long beginDetachedRenderEncoder(final long colorHandle, final long depthHandle,
+                                                  final int width, final int height) {
+        resolve();
+        if (mBeginDetached == null) return 0L;
+        try {
+            return (Long) mBeginDetached.invoke(null, colorHandle, depthHandle, width, height);
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.beginDetachedRenderEncoder failed", t);
+            return 0L;
+        }
+    }
+
+    public static void endDetachedRenderEncoder(final long encoderHandle) {
+        resolve();
+        if (mEndDetached == null) return;
+        try {
+            mEndDetached.invoke(null, encoderHandle);
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.endDetachedRenderEncoder failed", t);
         }
     }
 

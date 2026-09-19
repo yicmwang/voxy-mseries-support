@@ -710,17 +710,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if (lodNoDepth) {
                     Logger.info("[Metal-LODTEST] VOXY_LOD_NO_DEPTH active: opaque LOD depth test/write DISABLED");
                 }
-                // Reverse-Z (VOXY_LOD_REVERSE_Z=1): the frame's depth buffer is reverse-Z, so the
-                // compare must be GreaterEqual to match. Default here is LessEqual, which against a
-                // reverse-Z buffer rejects every fragment (sky reads 0, Voxy's depths are large
-                // positives) -- the LOD draws and contributes no pixels.
                 boolean reverseZ = MetalMvpUtil.REVERSE_Z_REMAP;
-                var opaqueDepth = lodNoDepth
-                        ? me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DISABLED
-                        : (reverseZ
-                            ? new me.cortex.voxy.client.core.gpu.PipelineState.DepthState(
-                                    true, true, me.cortex.voxy.client.core.gpu.PipelineState.CompareOp.GREATER_EQUAL)
-                            : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT);
+                var opaqueDepth = lodDepthState(reverseZ, lodNoDepth);
                 if (reverseZ && !reverseZLogged) {
                     reverseZLogged = true;
                     Logger.info("[Metal-LODTEST] VOXY_LOD_REVERSE_Z active: LOD depth compare = GreaterEqual");
@@ -1168,6 +1159,29 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     org.lwjgl.system.MemoryUtil.memGetInt(a + 16)));
         }
         me.cortex.voxy.common.Logger.info("[Metal-CMD " + tag + "] maxDrawCount=" + maxDrawCount + sb);
+    }
+
+    /**
+     * The depth state the LOD's opaque pass must use.
+     *
+     * <p>Extracted so it can be pinned by a unit test rather than only by running the game. This is
+     * the decision that was wrong: the frame's depth buffer is reverse-Z, and comparing LessEqual
+     * against it rejects every fragment -- over sky the buffer holds 0 (far) while a Voxy fragment's
+     * depth is a large positive number, so {@code fragDepth <= 0} is false everywhere. The LOD drew
+     * and contributed nothing, which no draw counter or command dump can show.
+     *
+     * @param reverseZFrame true when the render target's depth buffer is reverse-Z (Metallum's is)
+     * @param depthDisabled true for {@code VOXY_LOD_NO_DEPTH=1}, which forces the test off entirely
+     */
+    static me.cortex.voxy.client.core.gpu.PipelineState.DepthState lodDepthState(
+            final boolean reverseZFrame, final boolean depthDisabled) {
+        if (depthDisabled) {
+            return me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DISABLED;
+        }
+        return reverseZFrame
+                ? new me.cortex.voxy.client.core.gpu.PipelineState.DepthState(
+                        true, true, me.cortex.voxy.client.core.gpu.PipelineState.CompareOp.GREATER_EQUAL)
+                : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT;
     }
 
     /** Opt-in encoder test ({@code VOXY_LOD_TRIANGLE=1}); see {@link #drawDebugTriangle}. */

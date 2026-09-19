@@ -42,7 +42,13 @@ public final class MetalMvpUtil {
      * The pre-existing {@link #applyNdcRemap} maps to normal Z (near 0, far 1) and so cannot be
      * used for this.
      */
-    public static final boolean REVERSE_Z_REMAP = "1".equals(System.getenv("VOXY_LOD_REVERSE_Z"));
+    /**
+     * DEFAULT ON for non-GL backends. Metallum's frame is reverse-Z, so the GL convention is simply
+     * wrong here, not merely different -- there is no configuration in which LessEqual against a
+     * reverse-Z buffer renders correctly. Callers still gate on a non-GL backend, so GL is
+     * unaffected. {@code VOXY_LOD_REVERSE_Z=0} forces it off (useful for a controlled A/B).
+     */
+    public static final boolean REVERSE_Z_REMAP = !"0".equals(System.getenv("VOXY_LOD_REVERSE_Z"));
     private static boolean reverseZLogged = false;
 
     /**
