@@ -237,22 +237,6 @@ public final class MetalViewCapture {
         // (the second pass checks `(p & 0xFF000000) != 0`), so running it on
         // fullAlpha bakes only costs the per-cell average scan and only fills
         // genuinely empty texels.
-        // Snapshot TRUE coverage BEFORE dilating. Everything downstream that asks "did the model
-        // actually draw this pixel" -- getWrittenPixelCount, occludesFace, faceCoversFullBlock,
-        // fullyOpaque, needsAlphaDiscard, computeFaceTint -- must see this, not the dilated image.
-        // Dilation fills every empty texel in any cell that had one opaque pixel, so after it runs
-        // the alpha test answers "yes" for every pixel of every face, and every model reports as a
-        // full occluding cube: measured, Stone / Short Grass / Fern / Oak Leaves all came out
-        // writeCount=256/256 coversFull=true occludes=true. The visible consequence is that a solid
-        // block's face is culled wherever it points at a non-cube block, and since short grass,
-        // ferns and flowers sit ON the ground, the ground's top face under every plant disappears --
-        // a hole in the surface exactly where you look down, showing the terrain's dark interior.
-        // The dilation still feeds the atlas, which is what it was written for.
-        final boolean[] trulyDrawn = new boolean[(int) (this.totalW * this.totalH)];
-        for (int i = 0; i < trulyDrawn.length; i++) {
-            trulyDrawn[i] = (MemoryUtil.memGetInt(this.readbackBuffer + (long) i * 4L) & 0xFF000000) != 0;
-        }
-
         if (nonzeroAlphaPixels > 0) {
             GlViewCapture.DIAG_BAKE_DILATE_RUNS.incrementAndGet();
             int filled = dilateOpaqueIntoGaps();
@@ -300,20 +284,12 @@ public final class MetalViewCapture {
                     MemoryUtil.memPutInt(dstPx,     rgba);
                     // The second uvec2 component normally carries depth and
                     // stencil/tint metadata. Metal's single-attachment MVP
-                    // does not have those buffers yet, but model analysis
-                    // treats the low byte as "pixel was written". Mark pixels
-                    // with bit 7 so faces survive TextureUtils.WRITE_CHECK_STENCIL
-                    // while genuinely empty texels stay empty.
-                    //
-                    // Taken from the PRE-dilation coverage snapshot, not from
-                    // `rgba`: dilateOpaqueIntoGaps has already made every alpha
-                    // nonzero by this point, which set this bit on every pixel of
-                    // every face and is what made each model look like a full
-                    // occluding cube. See the snapshot's comment above.
-                    int srcX = faceX * cellW + lx;
-                    int srcY = faceY * cellH + ly;
-                    MemoryUtil.memPutInt(dstPx + 4,
-                            trulyDrawn[srcY * this.totalW + srcX] ? 0x80 : 0);
+                    // does not have those buffers yet, but SOLID model
+                    // analysis still treats the low byte as "pixel was
+                    // written". Mark opaque pixels with bit 7 so solid faces
+                    // survive TextureUtils.WRITE_CHECK_STENCIL while empty
+                    // cells remain empty.
+                    MemoryUtil.memPutInt(dstPx + 4, (rgba & 0xFF000000) != 0 ? 0x80 : 0);
                 }
             }
         }
