@@ -2,6 +2,7 @@ package me.cortex.voxy.client.core.rendering.util;
 
 import me.cortex.voxy.common.Logger;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 
 /**
  * Shared GL→Metal clip-space depth remap for raster passes that consume a
@@ -57,17 +58,22 @@ public final class MetalMvpUtil {
      * {@code z' = -0.5*z + 0.5*w}, {@code w' = w}. X/Y untouched. Mutates {@code mat} in place.
      */
     public static void applyReverseZRemap(Matrix4f mat) {
-        new Matrix4f(
-                1, 0, 0,     0,
-                0, 1, 0,     0,
-                0, 0, -0.5f, 0,
-                0, 0, 0.5f,  1).mul(mat, mat);
+        reverseZRemapOf(mat).get(mat);
         if (!reverseZLogged) {
             reverseZLogged = true;
             Logger.info("[Metal] VOXY_LOD_REVERSE_Z active: render MVP remapped to reverse-Z "
                     + "(near=1, far=0); depth compare must be GreaterEqual");
         }
     }
+    /** Non-mutating form of {@link #applyReverseZRemap}. */
+    public static Matrix4f reverseZRemapOf(Matrix4fc mat) {
+        return new Matrix4f(
+                1, 0, 0,     0,
+                0, 1, 0,     0,
+                0, 0, -0.5f, 0,
+                0, 0, 0.5f,  1).mul(mat, new Matrix4f());
+    }
+
     private static boolean logged = false;
 
     private MetalMvpUtil() {}

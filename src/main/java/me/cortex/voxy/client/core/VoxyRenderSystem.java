@@ -82,6 +82,9 @@ public class VoxyRenderSystem {
     /** Diagnostic frame counter for the Metal LOD-ring log in {@link #renderOpaque}. */
     private int metalRingDiagFrame;
 
+    /** Sampling counter for the {@code VOXY_VP_TRACE} projection dump. */
+    private static long baseProjTraceCount = 0;
+
     // Bakery warmup burst (2026-07-03, Metal branch only). Root cause of the
     // "gigantic untextured LOD blocks for minutes after world join": mesh
     // builds throw IdNotYetComputedException for any unbaked block (the
@@ -413,6 +416,51 @@ public class VoxyRenderSystem {
         }
 
         //cameraY += 100;
+        // VOXY_VP_TRACE=1: computeProjectionMat substitutes Voxy's near/far by composing
+        // `base . P(0.05, rd*16)^-1 . P(nearVoxy, 48000)`. That cancellation is only exact when
+        // `base` really is the GL-convention P(0.05, rd*16) it assumes -- for any other near or far
+        // the z row survives the composition scaled, which pushes every LOD vertex out of the clip
+        // volume while w and xy still look right. Print what `base` actually is, because the whole
+        // construction hinges on it and nothing else in the frame does.
+        if ("1".equals(System.getenv("VOXY_VP_TRACE")) && (baseProjTraceCount++ % 600) == 0) {
+            Matrix4fc base = matrices.projection();
+            // base = P(near, far) in some convention; recover (near, far) for each.
+            float glN = base.m23() / (base.m22() + 1.0f);
+            float glF = base.m23() / (base.m22() - 1.0f);
+            float rzN = base.m23() / base.m22();
+            float rzF = base.m23() / (base.m22() - 1.0f);
+            Logger.info(String.format(java.util.Locale.ROOT,
+                    "[Metal-BASEPROJ] m00=%.6f m11=%.6f m22=%.6f m23=%.6f m32=%.6f m33=%.6f "
+                            + "| ifGL near=%.5f far=%.3f | ifReverseZ near=%.5f far=%.3f",
+                    base.m00(), base.m11(), base.m22(), base.m23(), base.m32(), base.m33(),
+                    glN, glF, rzN, rzF));
+
+            float[] b = new float[16];
+            new Matrix4f(base).get(b);
+            float[] v = new float[16];
+            computeProjectionMat(matrices.projection()).get(v);
+            Logger.info(String.format(java.util.Locale.ROOT,
+                    "[Metal-BASEPROJ16] base=[%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | "
+                            + "%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]",
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11],
+                    b[12], b[13], b[14], b[15]));
+            Logger.info(String.format(java.util.Locale.ROOT,
+                    "[Metal-BASEPROJ16] voxyProj=[%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | "
+                            + "%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]",
+                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11],
+                    v[12], v[13], v[14], v[15]));
+            Logger.info(String.format(java.util.Locale.ROOT,
+                    "[Metal-BASEPROJ16] modelView=[%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | "
+                            + "%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]",
+                    matrices.modelView().m00(), matrices.modelView().m10(),
+                    matrices.modelView().m20(), matrices.modelView().m30(),
+                    matrices.modelView().m01(), matrices.modelView().m11(),
+                    matrices.modelView().m21(), matrices.modelView().m31(),
+                    matrices.modelView().m02(), matrices.modelView().m12(),
+                    matrices.modelView().m22(), matrices.modelView().m32(),
+                    matrices.modelView().m03(), matrices.modelView().m13(),
+                    matrices.modelView().m23(), matrices.modelView().m33()));
+        }
         var projection = computeProjectionMat(matrices.projection());//RenderSystem.getProjectionMatrix();
         //var projection = ShadowMatrices.createOrthoMatrix(160, -16*300, 16*300);
         //var projection = new Matrix4f(matrices.projection());
@@ -717,34 +765,24 @@ public class VoxyRenderSystem {
         }
     }
 
-    private static Matrix4f makeProjectionMatrix(float near, float far) {
-        //TODO: use the existing projection matrix use mulLocal by the inverse of the projection and then mulLocal our projection
-
-        var projection = new Matrix4f();
-        var client = Minecraft.getInstance();
-        var gameRenderer = client.gameRenderer;//tickCounter.getTickDelta(true);
-
-        float fov = client.options.fov().get();
-
-        projection.setPerspective(fov * 0.01745329238474369f,
-                (float) client.getWindow().getWidth() / (float)client.getWindow().getHeight(),
-                near, far);
-        return projection;
-    }
-
     //TODO: Make a reverse z buffer
     private static Matrix4f computeProjectionMat(Matrix4fc base) {
         //THis is a wild and insane problem to have
         // at short render distances the vanilla terrain doesnt end up covering the 16f near plane voxy uses
         // meaning that it explodes (due to near plane clipping).. _badly_ with the rastered culling being wrong in rare cases for the immediate
         // sections rendered after the vanilla render distance
-        float nearVoxy = (Minecraft.getInstance().options.renderDistance().get() * 16)<=32.0f?8f:16f;
-        nearVoxy = VoxyClient.disableSodiumChunkRender()?0.1f:nearVoxy;
+        float nearVoxy = me.cortex.voxy.client.core.rendering.util.LodProjection.nearVoxy(
+                Minecraft.getInstance().options.renderDistance().get(),
+                VoxyClient.disableSodiumChunkRender());
 
-        return base.mulLocal(
-                makeProjectionMatrix(0.05f, (Minecraft.getInstance().options.renderDistance().get() * 16f)).invert(),
-                new Matrix4f()
-        ).mulLocal(makeProjectionMatrix(nearVoxy, 16*3000));
+        // Built from the camera's own fov/aspect, NOT by cancelling vanilla's projection. The cancel
+        // (`base . P(0.05, rd*16)^-1 . P(nearVoxy, 48000)`) is exact only while `base` shares the
+        // GL depth convention it assumes. Under whole-frame Metal vanilla's matrix is reverse-Z with
+        // an infinite far plane, so the z rows do not cancel: the composition left the z row scaled
+        // by nearVoxy/0.05 = 320, and every LOD vertex landed outside Metal's z in [0, w] clip
+        // volume. x/y and w were untouched, so the frame looked plausible and every draw counter
+        // read healthy while no fragment ever reached the framebuffer.
+        return me.cortex.voxy.client.core.rendering.util.LodProjection.compute(base, nearVoxy, 16 * 3000);
     }
 
     private boolean frexStillHasWork() {
