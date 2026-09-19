@@ -395,7 +395,24 @@ void main() {
 #else
     float voxyBoundDepth = texelFetch(depthTex, ivec2(gl_FragCoord.xy), 0).r;
 #endif
+#ifdef VOXY_METAL_BOUND_COVERAGE
+    // Whole-frame Metal: MC's frame depth IS the mask, and the test is COVERAGE, not comparison.
+    //
+    // "All vanilla must always occlude all LOD" is not expressible as a depth comparison: the LOD
+    // approximates the very surface vanilla draws, so their depths agree to float precision and
+    // whichever wins is decided by rounding. Any comparison -- GreaterEqual, Greater, a bias --
+    // only shuffles which side wins the tie. Coverage decides it structurally instead: if MC wrote
+    // ANY depth at this pixel, vanilla drew here, so the LOD does not get to appear. That is
+    // exactly upstream's stencil semantics (initDepthStencil writes stencil 0 where MC drew and
+    // Voxy renders with stencil == 1), reached through depth rather than stencil because MC's main
+    // depth target is Depth32Float and has none.
+    //
+    // The frame is reverse-Z (near=1, far=0) and its clear is 0, so "MC drew here" is exactly
+    // "depth > 0". The small epsilon absorbs the clear's float representation.
+    if (voxyBoundDepth > 1e-6) {
+#else
     if (gl_FragCoord.z < voxyBoundDepth) {
+#endif
         #ifdef VOXY_BOUND_DEBUG
         // VOXY_BOUND_DEBUG=1 (Metal mask-verification aid): paint the
         // bound-discarded fragments solid red instead of discarding so a
