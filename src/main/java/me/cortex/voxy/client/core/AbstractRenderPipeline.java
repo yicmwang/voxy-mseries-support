@@ -132,6 +132,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
     private int diagCount;
+
+    /**
+     * Flip Voxy's viewport vertically so it matches MC's bottom-up framebuffer. MC
+     * compensates in its projection; Voxy's draws do not, so they rendered mirrored.
+     * {@code VOXY_LOD_FLIP_Y=0} opts out for a controlled A/B.
+     */
+    private static final boolean FLIP_Y = !"0".equals(System.getenv("VOXY_LOD_FLIP_Y"));
     /** Opt-in attachment-identity trace ({@code VOXY_ATTACH_TRACE=1}). */
     private static long attachTraceCount = 0;
 
@@ -688,7 +695,24 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             return;
         }
         try (var enc = backend.beginRenderPass(pass)) {
-            enc.setViewport(0, 0, fbw, fbh, 0.0f, 1.0f);
+            // Y orientation. Metal's setViewport maps NDC y=+1 to originY, i.e. the TOP of the
+            // target, which is the opposite of the GL-style bottom-up convention MC's framebuffer
+            // is written in. MC compensates inside its own projection, so its scene is correct --
+            // but every Voxy draw is NOT: the debug triangles take their position straight from
+            // gl_VertexID with no matrix at all, and the LOD's computeProjectionMat cancels MC's
+            // projection (base * inverse(base) * voxyProj), so neither inherits the compensation.
+            // Both therefore rendered vertically mirrored, which is visible in the triangle tests:
+            // an apex-up triangle drew apex-down, and a bottom-left right angle drew top-left.
+            // Measured by eye, not by bounding box -- a bbox is identical under a flip, which is
+            // why every orientation claim made from one was unfounded.
+            //
+            // A negative height with originY at the bottom edge flips the mapping, so the viewport
+            // corrects both paths at once. VOXY_LOD_FLIP_Y=0 restores the unflipped viewport.
+            if (FLIP_Y) {
+                enc.setViewport(0, fbh, fbw, -fbh, 0.0f, 1.0f);
+            } else {
+                enc.setViewport(0, 0, fbw, fbh, 0.0f, 1.0f);
+            }
             // M12 close — invoke MDIC's Metal-aware draws in the same order
             // GL runPipeline uses (opaque → temporal → translucent). Iris is
             // GL-gated upstream so on non-GL the section renderer is always
