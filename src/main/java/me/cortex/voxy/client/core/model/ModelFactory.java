@@ -75,6 +75,14 @@ public class ModelFactory {
      */
     private static final boolean BAKE_DUMP = "1".equals(System.getenv("VOXY_BAKE_DUMP"));
     private static final java.util.Set<String> BAKE_DUMP_SEEN = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /**
+     * Optional comma-separated block-name filter for the dump, e.g.
+     * {@code VOXY_BAKE_ONLY="Short Grass,Oak Leaves,Dirt"}. Without it the dump takes the first 32
+     * distinct names, which is arbitrary with respect to which block is actually misbehaving.
+     */
+    private static final java.util.Set<String> BAKE_DUMP_ONLY = System.getenv("VOXY_BAKE_ONLY") == null
+            ? java.util.Set.of()
+            : java.util.Set.of(System.getenv("VOXY_BAKE_ONLY").split("\\s*,\\s*"));
 
 
     public static final int MODEL_TEXTURE_SIZE = 16;
@@ -490,7 +498,22 @@ public class ModelFactory {
         ChunkSectionLayer blockRenderLayer = layerFor(blockState);
 
 
-        int checkMode = blockRenderLayer==ChunkSectionLayer.SOLID?TextureUtils.WRITE_CHECK_STENCIL:TextureUtils.WRITE_CHECK_ALPHA;
+        // Which channel says "the bake drew this pixel".
+        //
+        // On the Metal path the answer is always the marker byte, whatever the layer: the bake writes
+        // no depth or stencil, so the low byte of the metadata word is filled with a synthetic marker
+        // taken from PRE-dilation coverage (BakeCoverage). Reading the colour alpha instead would read
+        // the DILATED tile, which reports every texel of every non-empty cell as written — a 4-quad
+        // plant then occludes like a stone cube and the mesher culls real faces off its neighbours,
+        // which is a hole in the terrain exactly where a solid block meets a plant. Measured on the
+        // cull counters: 534,811 faces culled by a non-cube neighbour before the marker came from
+        // pre-dilation data.
+        //
+        // GL bakes real depth/stencil per pixel, so its existing per-layer split stands unchanged.
+        int checkMode = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL
+                ? TextureUtils.WRITE_CHECK_STENCIL
+                : (blockRenderLayer==ChunkSectionLayer.SOLID?TextureUtils.WRITE_CHECK_STENCIL:TextureUtils.WRITE_CHECK_ALPHA);
 
 
 
@@ -700,18 +723,6 @@ public class ModelFactory {
 
             faceModelData |= ((!faceCoversFullBlock)&&blockRenderLayer != ChunkSectionLayer.TRANSLUCENT)?1<<23:0;//Alpha discard override, translucency doesnt have alpha discard
 
-            if (BAKE_DUMP && face == 0 && BAKE_DUMP_SEEN.size() < 24
-                    && BAKE_DUMP_SEEN.add(blockState.getBlock().getName().getString() + "/" + blockRenderLayer)) {
-                me.cortex.voxy.common.Logger.info(String.format(
-                        "[Metal-BAKE-META] %s layer=%s checkMode=%d  offset=%.3f  writeCount=%d/%d  "
-                                + "faceSize=[%d,%d,%d,%d]  coversFull=%s  occludes=%s  canBeOccluded=%s  "
-                                + "needsAlphaDiscard=%s",
-                        blockState.getBlock().getName().getString(), blockRenderLayer, checkMode,
-                        offset, writeCount, MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE,
-                        faceSize[0], faceSize[1], faceSize[2], faceSize[3],
-                        faceCoversFullBlock, occludesFace, canBeOccluded, needsAlphaDiscard));
-            }
-
             //Bits 24,25 are tint metadata
             if (colourProvider!=null) {//We have a tint
                 int tintState = TextureUtils.computeFaceTint(textureData[face], checkMode);
@@ -723,6 +734,15 @@ public class ModelFactory {
             }
 
             MemoryUtil.memPutInt(faceUploadPtr, faceModelData);
+        }
+
+        if (BAKE_DUMP
+                && (BAKE_DUMP_ONLY.isEmpty()
+                        ? BAKE_DUMP_SEEN.size() < 32
+                        : BAKE_DUMP_ONLY.contains(blockState.getBlock().getName().getString()))
+                && BAKE_DUMP_SEEN.add(blockState.getBlock().getName().getString())) {
+            dumpBakeFaces(blockState, blockRenderLayer, checkMode, sizes, textureData,
+                    needsDoubleSidedQuads, fullyOpaque);
         }
 
         metadata |= fullyOpaque?(1L<<(48+6)):0;
@@ -1009,6 +1029,67 @@ public class ModelFactory {
             }
         }
         return biomeDependent[0];
+    }
+
+    /**
+     * Per-face table of everything the mesher will later decide from, for one block state.
+     *
+     * <p>Replaces a dump that printed only face 0 and only when face 0 existed. Both of those were
+     * traps: whether a face exists at all is one of the things under test (a plant's up/down cells
+     * are edge-on in an orthographic bake and should come out empty), and the interesting face for
+     * "a solid block's face got culled" is the neighbour's face, not the block's own. Printing all
+     * six, present or not, makes the table readable without knowing the answer in advance.
+     */
+    private static void dumpBakeFaces(BlockState blockState, ChunkSectionLayer layer, int checkMode,
+                                      float[] sizes, ColourDepthTextureData[] textureData,
+                                      boolean needsDoubleSidedQuads, boolean fullyOpaque) {
+        var sb = new StringBuilder();
+        sb.append(String.format("[Metal-BAKE-META] %s layer=%s checkMode=%d doubleSided=%s fullyOpaque=%s",
+                blockState.getBlock().getName().getString(), layer, checkMode,
+                needsDoubleSidedQuads, fullyOpaque));
+        for (var dir : Direction.values()) {
+            int face = dir.ordinal();
+            var data = textureData[dir.get3DDataValue()];
+            float offset = sizes[face];
+            if (offset < -0.1) {
+                sb.append(String.format("%n    %-5s EMPTY (no pixel written -> face does not exist)", dir));
+                continue;
+            }
+            int writeCount = TextureUtils.getWrittenPixelCount(data, checkMode);
+            int[] b = TextureUtils.computeBounds(data, checkMode);
+            boolean coversFull = b[0] == 0 && b[2] == 0
+                    && b[1] == (MODEL_TEXTURE_SIZE - 1) && b[3] == (MODEL_TEXTURE_SIZE - 1);
+            boolean occludes = layer != ChunkSectionLayer.TRANSLUCENT && offset < 0.1
+                    && ((float) writeCount) / (MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE) > 0.9;
+            boolean canBeOccluded = offset < 0.3;
+            int area = (b[1] - b[0] + 1) * (b[3] - b[2] + 1);
+            boolean needsDiscard = layer != ChunkSectionLayer.TRANSLUCENT
+                    && (layer != ChunkSectionLayer.SOLID || ((float) writeCount) / area < 0.9);
+            sb.append(String.format(
+                    "%n    %-5s offset=%.3f written=%3d/256 bounds=[%2d,%2d,%2d,%2d] coversFull=%-5s "
+                            + "occludes=%-5s canBeOccluded=%-5s needsDiscard=%-5s selfLit=%s",
+                    dir, offset, writeCount, b[0], b[1], b[2], b[3], coversFull, occludes,
+                    canBeOccluded, needsDiscard, (offset > 0.01)));
+        }
+        me.cortex.voxy.common.Logger.info(sb.toString());
+
+        if ("1".equals(System.getenv("VOXY_BAKE_MAP"))) {
+            for (var dir : Direction.values()) {
+                if (sizes[dir.ordinal()] < -0.1) continue;
+                var data = textureData[dir.get3DDataValue()];
+                var map = new StringBuilder();
+                map.append(String.format("[Metal-BAKE-MAP] %s %s",
+                        blockState.getBlock().getName().getString(), dir));
+                for (int y = MODEL_TEXTURE_SIZE - 1; y >= 0; y--) {
+                    map.append(String.format("%n    "));
+                    for (int x = 0; x < MODEL_TEXTURE_SIZE; x++) {
+                        int i = x + y * MODEL_TEXTURE_SIZE;
+                        map.append(TextureUtils.wasPixelWrittenPublic(data, checkMode, i) ? '#' : '.');
+                    }
+                }
+                me.cortex.voxy.common.Logger.info(map.toString());
+            }
+        }
     }
 
     private static float[] computeModelDepth(ColourDepthTextureData[] textures, int checkMode) {

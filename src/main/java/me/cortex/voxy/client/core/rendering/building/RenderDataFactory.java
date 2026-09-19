@@ -415,9 +415,45 @@ public class RenderDataFactory {
     public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_FACES = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_DARK = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * Why faces were culled, split by whether the neighbour that culled them was entitled to.
+     *
+     * <p>"The black splotches are missing surface faces" is a claim about culling, and a screenshot
+     * cannot ask which cull dropped a face: the camera moves between runs (the test world's camera
+     * read 83,-187 in one run and 246,-235 in the next), so frames from two builds are not
+     * comparable at all. These four counters are per-mesh and camera-free, so a rate can be compared
+     * across builds and the offending cull named.
+     *
+     * <p>{@code OCCLUDES_FULL} is a neighbour that reports occluding <i>and</i> is a fully opaque
+     * cube -- culling against that is correct. {@code OCCLUDES_PARTIAL} is a neighbour that reports
+     * occluding but is NOT a fully opaque cube: that is the signature of a model whose per-face
+     * coverage claims more than its shape does, and every face it culls is a hole in a neighbour.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CULL_OCCLUDES_FULL = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CULL_OCCLUDES_PARTIAL = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CULL_SAME = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CULL_FULLY_OPAQUE = new java.util.concurrent.atomic.AtomicLong();
+
     private static void auditFace(long lightBits) {
         DIAG_ALL_FACES.incrementAndGet();
         if (lightBits == 0) DIAG_ALL_DARK.incrementAndGet();
+    }
+
+    /**
+     * Attribute one culled face to the rule that culled it. A face can satisfy both the same-model and
+     * the occlusion rule; the occlusion split is the one that matters, so a face culled by both is
+     * counted only in the occlusion buckets.
+     */
+    private static void tallyCull(boolean sameCull, boolean occludesCull, long neighbourMeta) {
+        if (occludesCull) {
+            if (ModelQueries.isFullyOpaque(neighbourMeta)) {
+                DIAG_CULL_OCCLUDES_FULL.incrementAndGet();
+            } else {
+                DIAG_CULL_OCCLUDES_PARTIAL.incrementAndGet();
+            }
+        } else if (sameCull) {
+            DIAG_CULL_SAME.incrementAndGet();
+        }
     }
 
     private static void meshNonOpaqueFace(int face, long quad, long meta, long neighborQuad, long neighborMeta, Mesher mesher) {
@@ -494,9 +530,12 @@ public class RenderDataFactory {
                         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
                             long neighbor = this.sectionData[iB + 1];
                             boolean culls = false;
-                            culls |= ((selfModel^nextModel)&(0xFFFFL<<26))==0&&ModelQueries.cullsSame(neighbor);
-                            culls |= ModelQueries.faceOccludes(neighbor, (axis << 1) | (1 - facingForward));
+                            boolean sameCull = ((selfModel^nextModel)&(0xFFFFL<<26))==0&&ModelQueries.cullsSame(neighbor);
+                            culls |= sameCull;
+                            boolean occludesCull = ModelQueries.faceOccludes(neighbor, (axis << 1) | (1 - facingForward));
+                            culls |= occludesCull;
                             if (culls) {
+                                tallyCull(sameCull, occludesCull, neighbor);
                                 this.blockMesher.skip(1);
                                 continue;
                             }
@@ -555,6 +594,7 @@ public class RenderDataFactory {
                             int cid = this.modelMan.getModelId(nib);
                             long meta = this.modelMan.getModelMetadataFromClientId(cid);
                             if (ModelQueries.isFullyOpaque(meta)) {//Dont mesh this face
+                                DIAG_CULL_FULLY_OPAQUE.incrementAndGet();
                                 this.blockMesher.skip(1);
                                 continue;
                             }
@@ -563,9 +603,12 @@ public class RenderDataFactory {
                             //TODO:FIXME, when non opaque geometry is added
                             if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
                                 boolean culls = false;
-                                culls |= cid==((A>>26)&0xFFFF)&&ModelQueries.cullsSame(meta);
-                                culls |= ModelQueries.faceOccludes(meta, (axis << 1) | (1 - side));
+                                boolean sameCull = cid==((A>>26)&0xFFFF)&&ModelQueries.cullsSame(meta);
+                                culls |= sameCull;
+                                boolean occludesCull = ModelQueries.faceOccludes(meta, (axis << 1) | (1 - side));
+                                culls |= occludesCull;
                                 if (culls) {
+                                    tallyCull(sameCull, occludesCull, meta);
                                     this.blockMesher.skip(1);
                                     continue;
                                 }

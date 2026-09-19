@@ -855,6 +855,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                         me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get(),
                         100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_DARK.get()
                                 / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get())));
+                Logger.info(String.format(
+                        "[Metal-CULL  f=%d] byOccludes_fullCube=%d  byOccludes_NONcube=%d  bySameModel=%d  byFullyOpaque=%d",
+                        this.metalFrame,
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_OCCLUDES_FULL.get(),
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_OCCLUDES_PARTIAL.get(),
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_SAME.get(),
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_FULLY_OPAQUE.get()));
             }
             if (me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get() > 0) {
                 Logger.info(String.format(

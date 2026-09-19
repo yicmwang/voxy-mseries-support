@@ -612,6 +612,35 @@ public class MetalRenderBackend implements RenderBackend {
         this.submit();
     }
 
+    /**
+     * Block until every command buffer committed to this queue before this call has completed.
+     *
+     * <p>Needed because {@link #submit()} does <b>not</b> imply that. Under whole-frame Metal it
+     * takes the guest branch: {@code MetallumBridge.flushFrame()} → {@code MetalCommandEncoder.submit()},
+     * which commits with a completion block and then waits only for the submit
+     * {@code MAX_SUBMITS_IN_FLIGHT} (= 3) earlier — never for the commit it just made — and clears
+     * {@code activeCommandBuffer}, leaving nothing to wait on. The owned branch, by contrast, really
+     * does call {@code mtlCommandBufferWaitUntilCompleted}. So "submit() waited for the GPU" is true
+     * only when Voxy owns its own command buffer, and any CPU readback of GPU-written memory needs
+     * this instead.
+     *
+     * <p>Metal executes command buffers on a queue in commit order, and {@link #newCommandBuffer()}
+     * allocates on the same queue — which is Metallum's own when Metallum is present
+     * ({@code MetalRenderBackend}'s constructor takes it from {@code MetallumBridge.commandQueue()}).
+     * A fresh empty buffer committed here therefore cannot complete before a borrowed frame buffer
+     * that was committed earlier, so waiting on it waits on our work too.
+     */
+    @Override
+    public void waitForGpuIdle() {
+        long cmdBuffer = this.newCommandBuffer();
+        if (cmdBuffer == 0L) {
+            throw new RuntimeException("mtlCommandQueueNewCommandBuffer returned NULL");
+        }
+        MetalNative.mtlCommandBufferCommit(cmdBuffer);
+        MetalNative.mtlCommandBufferWaitUntilCompleted(cmdBuffer);
+        MetalNative.mtlRelease(cmdBuffer);
+    }
+
     // --- Metal-specific accessors ---
 
     public long getDevice() {

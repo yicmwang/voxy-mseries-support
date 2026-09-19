@@ -20,6 +20,14 @@ public final class ReuseVertexConsumer implements VertexConsumer {
     public boolean anyShaded;
     public boolean anyDarkendTex;
 
+    /**
+     * Model-space bounding box of everything submitted since the last {@link #reset()}. The Metal
+     * bake is an orthographic projection down one axis per face cell, so a model whose extent along
+     * an axis is zero contributes nothing to that cell -- this is what distinguishes "the plant's
+     * up/down cell is legitimately empty" from "the bake filled it anyway".
+     */
+    public float minX, minY, minZ, maxX, maxY, maxZ;
+
     public ReuseVertexConsumer() {
         this.reset();
     }
@@ -37,6 +45,12 @@ public final class ReuseVertexConsumer implements VertexConsumer {
         MemoryUtil.memPutFloat(this.ptr, x);
         MemoryUtil.memPutFloat(this.ptr + 4, y);
         MemoryUtil.memPutFloat(this.ptr + 8, z);
+        if (x < this.minX) this.minX = x;
+        if (y < this.minY) this.minY = y;
+        if (z < this.minZ) this.minZ = z;
+        if (x > this.maxX) this.maxX = x;
+        if (y > this.maxY) this.maxY = y;
+        if (z > this.maxZ) this.maxZ = z;
         return this;
     }
 
@@ -115,6 +129,8 @@ public final class ReuseVertexConsumer implements VertexConsumer {
         this.anyDarkendTex = false;
         this.defaultMeta = 0;//RESET THE DEFAULT META
         this.count = 0;
+        this.minX = this.minY = this.minZ = Float.MAX_VALUE;
+        this.maxX = this.maxY = this.maxZ = -Float.MAX_VALUE;
         this.ptr = this.buffer.address - VERTEX_FORMAT_SIZE;//the thing is first time this gets incremented by FORMAT_STRIDE
         return this;
     }

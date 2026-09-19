@@ -28,8 +28,16 @@ public class TextureUtils {
     public static final int WRITE_CHECK_DEPTH = 2;
     public static final int WRITE_CHECK_ALPHA = 3;
 
-    private static boolean wasPixelWritten(ColourDepthTextureData data, int mode, int index) {
-        if (mode == WRITE_CHECK_STENCIL) {
+    /**
+     * Public view of the "was this texel written by the bake" test, for diagnostics that need to
+     * print a per-pixel coverage map (see {@code ModelFactory.dumpBakeFaces}). The private form
+     * stays the one the metadata computation uses so both answer the identical question.
+     */
+    public static boolean wasPixelWrittenPublic(ColourDepthTextureData data, int mode, int index) {
+        return wasPixelWritten(data, mode, index);
+    }
+
+    private static boolean wasPixelWritten(ColourDepthTextureData data, int mode, int index) {        if (mode == WRITE_CHECK_STENCIL) {
             return (data.depth()[index] & 0xFF) != 0;
         } else if (mode == WRITE_CHECK_DEPTH) {
             return (data.depth()[index] >>> 8) != ((1 << 24) - 1);

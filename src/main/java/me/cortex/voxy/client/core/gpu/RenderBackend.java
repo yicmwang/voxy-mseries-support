@@ -144,6 +144,19 @@ public interface RenderBackend {
     void submit();
 
     /**
+     * Block until every command buffer committed before this call has completed on the GPU.
+     *
+     * <p>Distinct from {@link #submit()}, which only <i>enqueues</i>. A CPU readback of
+     * GPU-written memory needs this one: on Metal {@code submit()} can hand the frame to another
+     * renderer and return while the work is still in flight, so a readback that assumes submit()
+     * implies completion reads undefined memory. Default is a no-op — OpenGL's {@code glReadPixels}
+     * is already ordered against prior commands, and the GL bakery path
+     * ({@code GlViewCapture}) does not use this.
+     */
+    default void waitForGpuIdle() {
+    }
+
+    /**
      * Compile and link a graphics pipeline state object from the supplied
      * shader sources. Backends pick whichever representation they need —
      * Metal consumes MSL via mtlDeviceNewLibraryWithSource, Vulkan consumes
