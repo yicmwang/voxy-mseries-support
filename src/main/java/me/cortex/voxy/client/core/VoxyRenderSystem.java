@@ -558,12 +558,6 @@ public class VoxyRenderSystem {
             // Metal path — skip all the GL state save/restore and drive the pipeline's Metal render.
             // The compositing mixin runs separately at renderLevel RETURN.
             this.pipeline.preSetup(viewport);
-            // Blit MC's frame depth into the buffer quads.frag's coverage test reads, so that
-            // wherever vanilla drew anything the LOD does not get to appear. Must run BEFORE
-            // runPipeline so the LOD pass samples this frame's copy. The masks's AABB rasterization
-            // is gone -- see MDICSectionRenderer's define block.
-            this.chunkBoundRenderer.renderMetal(viewport,
-                    me.cortex.voxy.client.core.gpu.RenderBackendFactory.get());
             // No chunk-bound mask pass here any more. Voxy draws into MC's own depth attachment, so
             // the depth test occludes LOD against real terrain per pixel with no help; the mask that
             // used to run here was a chunk-AABB approximation of exactly that, and was the source of

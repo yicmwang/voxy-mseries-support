@@ -182,6 +182,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
+        // Vanilla render distance, in blocks. cmdgen.comp culls LOD sections that lie WHOLLY inside
+        // this box, so Voxy never draws where vanilla owns the pixels. That gives vanilla-occludes-LOD
+        // by construction -- no mask, no depth blit, no full-screen readback, and nothing that has to
+        // win a depth comparison. Baked at pipeline creation, so an RD change needs the pipeline
+        // rebuilt (Voxy's config reload path already does this).
+        // VOXY_LOD_CULL_RD=0 omits the define and restores the unculled behaviour for an A/B.
+        if (!"0".equals(System.getenv("VOXY_LOD_CULL_RD"))) {
+            m.put("VOXY_LOD_CULL_RD_BLOCKS",
+                    Integer.toString(Minecraft.getInstance().options.renderDistance().get() * 16));
+        }
         m.put("TRANSLUCENT_WRITE_BASE", "1024");
         m.put("TEMPORAL_OFFSET", Integer.toString(TEMPORAL_OFFSET));
         m.put("TRANSLUCENT_DISTANCE_BUFFER_BINDING", "7");
@@ -380,31 +390,21 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // TRANSLUCENT are not yet. LOD can therefore still land where water or cutout foliage
                 // will draw. That is an ordering problem and belongs fixed as one.
                 // VOXY_NO_DEPTH_BOUND=0 restores the old mask path for an A/B.
-                // COVERAGE mask, not a depth comparison. "All vanilla must always occlude all LOD"
-                // is not expressible as a comparison -- the LOD approximates the very surface vanilla
-                // draws, so their depths agree to float precision and the tie is decided by rounding.
-                // GreaterEqual, Greater, a bias: each only shuffles which side wins the tie.
-                //
-                // Instead the test is whether MC wrote ANY depth at this pixel. If it did, vanilla
-                // drew here and the LOD does not get to appear. That is upstream's stencil semantics
-                // (initDepthStencil writes stencil 0 where MC drew; Voxy renders with stencil == 1)
-                // reached through depth, because MC's main depth target is Depth32Float with no
-                // stencil. The source is MC's own frame depth attachment -- see
-                // ChunkBoundRenderer.exportBoundMaskMetal, and quads.frag's
-                // VOXY_METAL_BOUND_COVERAGE for the test itself.
-                //
-                // VOXY_NO_DEPTH_BOUND=1 restores the no-mask behaviour for an A/B.
-                boolean noDepthBound = "1".equals(System.getenv("VOXY_NO_DEPTH_BOUND"));
-                boolean boundDebug = !noDepthBound && "1".equals(System.getenv("VOXY_BOUND_DEBUG"));
-                if (noDepthBound) {
+                if (!"0".equals(System.getenv("VOXY_NO_DEPTH_BOUND"))) {
                     opaqueDefines.put("VOXY_NO_DEPTH_BOUND", "");
                     translucentDefines.put("VOXY_NO_DEPTH_BOUND", "");
-                } else {
-                    opaqueDefines.put("VOXY_METAL_BOUND_SSBO", "");
-                    translucentDefines.put("VOXY_METAL_BOUND_SSBO", "");
-                    opaqueDefines.put("VOXY_METAL_BOUND_COVERAGE", "");
-                    translucentDefines.put("VOXY_METAL_BOUND_COVERAGE", "");
                 }
+                // With the mask gone, vanilla and the LOD are compared purely by depth -- and since
+                // the LOD approximates the surface vanilla draws, their depths agree to float
+                // precision where they overlap and they z-fight. Bias the LOD behind so vanilla
+                // always wins ties. See quads3.vert's VOXY_LOD_DEPTH_BIAS for the sign, which is a
+                // property of the reverse-Z frame rather than a free choice.
+                String lodBias = System.getenv("VOXY_LOD_DEPTH_BIAS");
+                if (lodBias == null || lodBias.isBlank()) lodBias = "1e-5";
+                opaqueDefines.put("VOXY_LOD_DEPTH_BIAS", lodBias + "f");
+                translucentDefines.put("VOXY_LOD_DEPTH_BIAS", lodBias + "f");
+                boolean noDepthBound = true;
+                boolean boundDebug = false;
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
                 // VOXY_LOD_FORCE_MAGENTA=1 -- bisection switch (see quads.frag). Solid magenta
                 // emitted before every discard/early-out, so the frame shows whether LOD geometry

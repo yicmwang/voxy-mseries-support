@@ -139,23 +139,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * {@code VOXY_LOD_FLIP_Y=0} opts out for a controlled A/B.
      */
     private static final boolean FLIP_Y = !"0".equals(System.getenv("VOXY_LOD_FLIP_Y"));
-
-    /**
-     * MC's frame depth attachment as an {@code IGpuTexture} — the per-pixel record of where vanilla
-     * terrain actually drew.
-     *
-     * <p>This is what quads.frag's coverage test reads. It is available for free: Voxy's hook is
-     * Sodium's CUTOUT pass, by which point SOLID and CUTOUT_MIPPED have already drawn into this same
-     * attachment. Note the depth format mismatch is not an issue here because the value is never
-     * SAMPLED as depth — ChunkBoundRenderer blits it into a plain float buffer, which is format-blind.
-     */
-    public me.cortex.voxy.client.core.metal.MetallumAttachmentTexture frameDepth() {
-        if (this.metallumDepth == null) {
-            this.metallumDepth = me.cortex.voxy.client.core.metal.MetallumAttachmentTexture.depth();
-        }
-        this.metallumDepth.refresh();
-        return this.metallumDepth;
-    }
     /** Opt-in attachment-identity trace ({@code VOXY_ATTACH_TRACE=1}). */
     private static long attachTraceCount = 0;
 

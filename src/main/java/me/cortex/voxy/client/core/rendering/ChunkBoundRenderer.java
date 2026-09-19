@@ -299,14 +299,42 @@ public class ChunkBoundRenderer {
      */
     public void renderMetal(Viewport<?> viewport, RenderBackend backend) {
         if (viewport.width <= 0 || viewport.height <= 0) return; // mirrors runPipelineMetal's guard
-        // No AABB rasterization any more, and no add/rem queues: the mask is MC's own frame depth,
-        // which is already exactly "where vanilla drew" with no approximation and nothing to keep in
-        // sync with Sodium's section lifecycle. See exportBoundMaskMetal, and
-        // quads.frag's VOXY_METAL_BOUND_COVERAGE for why the test is coverage rather than a
-        // comparison. chunk2idx, the queues, rasterPipeline, chunkPosBuffer, uniformBuffer and
-        // boundDepthPass are consequently unused; left for one revision so the box path can be
-        // restored cheaply for an A/B.
-        exportBoundMaskMetal(viewport, backend, this.pipeline);
+        if (!this.remQueue.isEmpty()) {
+            boolean wasEmpty = this.chunk2idx.isEmpty();
+            this.remQueue.forEach(this::_remPos);
+            this.remQueue.clear();
+            if (!wasEmpty) UploadStream.INSTANCE.commit();
+        }
+        // Round 23: drain the ADD queue BEFORE the mask draw, not after.
+        // Adds are enqueued during Sodium's setupTerrain (section upload),
+        // which runs earlier in the same frame — draining after the draw
+        // meant every freshly built section was rendered by Sodium for >=1
+        // frame while ABSENT from the mask, so the SOLID-head LOD depth
+        // inject stomped its pixels (real-terrain flicker during camera
+        // movement; the dominant underwater x-ray trigger).
+        if (!this.addQueue.isEmpty()) {
+            this.addQueue.forEach(this::_addPos);
+            this.addQueue.clear();
+            UploadStream.INSTANCE.commit();
+        }
+
+        this.uploadSceneUniform(viewport, true);
+
+        int count = this.chunk2idx.size();
+        try (RenderEncoder encoder = backend.beginRenderPass(boundDepthPass(viewport))) {
+            if (count > 0) {
+                encoder.setPipeline(this.rasterPipeline);
+                encoder.setViewport(0, 0, viewport.width, viewport.height, 0, 1);
+                encoder.setBuffer(SCENE_UNIFORM_BINDING, this.uniformBuffer, 0);
+                encoder.setBuffer(CHUNK_POS_BINDING, this.chunkPosBuffer, 0);
+                encoder.bindIndexBuffer(SharedIndexBuffer.INSTANCE_BB_SHORT.getBuffer(),
+                        RenderEncoder.INDEX_TYPE_UINT16, 0);
+                encoder.drawIndexed(RenderEncoder.PRIMITIVE_TRIANGLES,
+                        6 * 2 * 3 * 32, (count + 31) / 32, 0, 0, 0);
+            }
+        }
+
+        exportBoundMaskMetal(viewport, backend);
     }
 
     /**
@@ -320,7 +348,7 @@ public class ChunkBoundRenderer {
         try (RenderEncoder ignored = RenderBackendFactory.get().beginRenderPass(boundDepthPass(viewport))) {
             // no draws — the CLEAR load action does the fill
         }
-        exportBoundMaskMetal(viewport, RenderBackendFactory.get(), this.pipeline);
+        exportBoundMaskMetal(viewport, RenderBackendFactory.get());
     }
 
     /**
@@ -336,8 +364,7 @@ public class ChunkBoundRenderer {
      * LOD pass, so the LOD fragments read this frame's mask. Layout: uint
      * width + 12 pad bytes, floats at offset 16.
      */
-    private static void exportBoundMaskMetal(Viewport<?> viewport, RenderBackend backend,
-                                             AbstractRenderPipeline pipeline) {
+    private static void exportBoundMaskMetal(Viewport<?> viewport, RenderBackend backend) {
         if (!(backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mrb)) {
             return;
         }
@@ -353,12 +380,8 @@ public class ChunkBoundRenderer {
                     ((me.cortex.voxy.client.core.metal.MetalBuffer) buf).getContentsPtr(),
                     viewport.width);
         }
-        // MC's frame depth, not a rasterized chunk AABB. Per-pixel, and already populated because
-        // Voxy's hook is Sodium's CUTOUT pass -- SOLID and CUTOUT_MIPPED have drawn by then. It is
-        // blitted into a plain buffer rather than sampled directly because a depth texture read
-        // through the texture2d<float> declaration SPIRV-Cross emits for sampler2D returns zeros on
-        // Metal (rounds 18/20).
-        mrb.copyTextureToBuffer(pipeline.frameDepth(), buf, viewport.width, viewport.height, 16);
+        mrb.copyTextureToBuffer(viewport.depthBoundingBuffer.getDepthTex(), buf,
+                viewport.width, viewport.height, 16);
     }
 
     private static RenderPassDesc boundDepthPass(Viewport<?> viewport) {

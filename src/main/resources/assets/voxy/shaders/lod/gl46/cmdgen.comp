@@ -84,6 +84,27 @@ void main() {
 
         uint ptr = extractQuadStart(meta);
         ivec3 relative = ipos-(baseSectionPos>>detail);
+#ifdef VOXY_LOD_CULL_RD_BLOCKS
+        // Drop sections that lie wholly inside the vanilla render-distance box.
+        //
+        // Vanilla owns every pixel in there, so the LOD does not get to draw at all -- which makes
+        // "vanilla occludes LOD" true by construction instead of something a depth comparison has to
+        // win. The LOD approximates the very surface vanilla draws, so their depths agree to float
+        // precision and any comparison (GreaterEqual, Greater, a bias) only shuffles which side wins
+        // the tie. Not drawing is not a tie.
+        //
+        // `detail` is this section's LOD level, so it spans (32 << detail) blocks and `relative` is
+        // in those units. The cull radius is one short of the box in those units, so a section is
+        // dropped only when its FAR edge is still inside the box -- culling on the near edge
+        // instead would leave a gap of missing LOD just outside the vanilla render distance.
+        {
+            float secSize = float(32u << detail);
+            int cullRadius = max(int(floor(float(VOXY_LOD_CULL_RD_BLOCKS) / secSize)) - 1, 0);
+            if (all(lessThanEqual(abs(relative), ivec3(cullRadius)))) {
+                return;
+            }
+        }
+#endif
         uint drawId = gl_GlobalInvocationID.x;
 
         positionBuffer[drawId] = extractRawPos(meta);

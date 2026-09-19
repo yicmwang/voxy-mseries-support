@@ -124,6 +124,26 @@ void main() {
     gl_Position.z -= (VOXY_WATER_DEPTH_BIAS) * gl_Position.w;
 #endif
 
+#ifdef VOXY_LOD_DEPTH_BIAS
+    // Whole-frame Metal: push ALL LOD geometry behind, so vanilla terrain always
+    // wins where the two coincide.
+    //
+    // The LOD approximates the same surface vanilla draws, so once both share a
+    // projection (see VoxyRenderSystem.computeProjectionMat) their depths agree
+    // to float precision and the depth test has no basis to prefer either --
+    // they z-fight. A NEGATIVE z offset is "behind" here, because the frame is
+    // reverse-Z (near=1, far=0): NDC depth is z/w, so subtracting b*w yields
+    // depth - b, and smaller is farther. The same expression in GL's [−1,1]
+    // convention would move the geometry NEARER -- the sign is a property of the
+    // frame, which is why VOXY_WATER_DEPTH_BIAS above reads as "toward the
+    // camera" only on the GL backend.
+    //
+    // Scaled by w, so it is a roughly constant NDC-depth offset. Deliberately
+    // small: it is here to settle ties and near-coincident surfaces, not to hide
+    // a coarse LOD whose geometry is genuinely above the true surface.
+    gl_Position.z -= (VOXY_LOD_DEPTH_BIAS) * gl_Position.w;
+#endif
+
     #ifndef USE_NV_BARRY
     uv = getCornerUV(quad, cornerId);
     #endif
