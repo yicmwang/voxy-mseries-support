@@ -848,6 +848,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                         100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get()
                                 / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH.get())));
             }
+            if (me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get() > 0) {
+                Logger.info(String.format(
+                        "[Metal-LITAUD f=%d] meshedFaces=%d  zeroLight=%.2f%%   <- camera-independent; compare THIS across builds",
+                        this.metalFrame,
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get(),
+                        100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_DARK.get()
+                                / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get())));
+            }
             if (me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get() > 0) {
                 Logger.info(String.format(
                         "[Metal-NDARK f=%d] darkNeigh lightFromAir=%d  lightFromSolid=%d",

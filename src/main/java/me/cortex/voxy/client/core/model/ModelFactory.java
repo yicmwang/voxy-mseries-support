@@ -62,6 +62,7 @@ import static org.lwjgl.opengl.GL11.*;
 //TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic lod selection... doing 8x8 textures might be perfectly ok!!!
 // this _quarters_ the memory requirements for the texture atlas!!! WHICH IS HUGE saving
 public class ModelFactory {
+
     public static final int MODEL_TEXTURE_SIZE = 16;
     public static final int LAYERS = Integer.numberOfTrailingZeros(MODEL_TEXTURE_SIZE);
 
@@ -646,6 +647,16 @@ public class ModelFactory {
             metadata |= canBeOccluded?4:0;
 
             //Face uses its own lighting if its not flat against the adjacent block & isnt traslucent
+            //
+            // NOTE for the black-splotch work: on Metal `offset` is always 0, because the Metal
+            // capture writes no real depth bits (see the fluid note above) and computeModelDepth
+            // therefore returns 0 for every face. This condition then never fires -- measured
+            // selfLit = 0 over millions of meshed faces with the real bakery -- so no face in the
+            // world uses its own cell's light. That is a real divergence from the intent, and the
+            // black patches are cutout geometry (grass/flowers/leaves/crops, the models that are
+            // mostly inset faces), so it was the leading suspect. It is NOT the cause: substituting
+            // the block's shape for the missing depth (`|| !occludesFace`) was tried and measured
+            // no better -- cut_dark 16-26% against 12.5-20.3% unchanged. Left at upstream.
             metadata |= (offset > 0.01 || blockRenderLayer == ChunkSectionLayer.TRANSLUCENT)?0b1000:0;
 
 

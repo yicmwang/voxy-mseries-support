@@ -400,6 +400,26 @@ public class RenderDataFactory {
     public static final java.util.concurrent.atomic.AtomicLong DIAG_NEIGH_DARK_FROM_AIR = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_NEIGH_DARK_FROM_SOLID = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * Every meshed face and how many of them carry light 0, across BOTH the opaque and the
+     * non-opaque path.
+     *
+     * <p>This exists because the earlier instrument was wrong. Comparing screenshots was the only
+     * measure available, and a screenshot measures one camera's view of a world that is still
+     * streaming in: the same build produced 38-76% dark in one run and 12.5-20.3% in the next, a
+     * spread several times larger than any effect being tested. Two candidate fixes were called
+     * regressions against that noise, and both calls were wrong. A face-level ratio over the whole
+     * meshed world is the same question asked of every face instead of one frame's pixels, so it
+     * does not move when the camera or the stream-in order does.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_FACES = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_DARK = new java.util.concurrent.atomic.AtomicLong();
+
+    private static void auditFace(long lightBits) {
+        DIAG_ALL_FACES.incrementAndGet();
+        if (lightBits == 0) DIAG_ALL_DARK.incrementAndGet();
+    }
+
     private static void meshNonOpaqueFace(int face, long quad, long meta, long neighborQuad, long neighborMeta, Mesher mesher) {
         if (shouldMeshNonOpaqueBlockFace(face, quad, meta, neighborQuad, neighborMeta)) {
             final boolean self = ModelQueries.faceUsesSelfLighting(meta, face);
@@ -420,6 +440,7 @@ public class RenderDataFactory {
                     }
                 }
             }
+            auditFace(light);
             mesher.putNext((long) (face&1) |
                     (quad&~LM) | light);
         } else {
@@ -481,6 +502,7 @@ public class RenderDataFactory {
                             }
                         }
 
+                        auditFace(nextModel&LM);
                         this.blockMesher.putNext(((long) facingForward) |//Facing
                                 (selfModel&~LM) |
                                 (nextModel&LM)//Apply lighting
