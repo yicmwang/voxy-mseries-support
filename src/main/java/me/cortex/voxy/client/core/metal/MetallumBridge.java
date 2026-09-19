@@ -25,10 +25,25 @@ public final class MetallumBridge {
             mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
             mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle,
             mHasPendingColorClear, mHasPendingDepthClear, mPendingColorClearCount,
-            mDrawProbeStyleTriangle, mBeginDetached, mEndDetached;
+            mDrawProbeStyleTriangle;
     private static boolean resolved;
 
     private MetallumBridge() {
+    }
+
+    /**
+     * A method that is nice to have but must not disable the bridge. Diagnostics land here: a
+     * mismatch in one of them previously threw out of {@link #resolve()}, which made metallum look
+     * absent and sent Voxy down its standalone path.
+     */
+    private static Method optional(final Class<?> interop, final String name, final Class<?>... params) {
+        try {
+            return interop.getMethod(name, params);
+        } catch (Throwable t) {
+            Logger.warn("MetallumBridge: optional interop method '" + name + "' unavailable ("
+                    + t.getClass().getSimpleName() + "); that diagnostic is disabled");
+            return null;
+        }
     }
 
     private static synchronized void resolve() {
@@ -54,19 +69,22 @@ public final class MetallumBridge {
             mFlushFrame = interop.getMethod("flushFrame");
             mAcquireRenderEncoder = interop.getMethod("acquireRenderEncoder", long.class, long.class, int.class, int.class);
             mInvalidateRenderPassState = interop.getMethod("invalidateRenderPassState");
-            mLogRenderPassCounters = interop.getMethod("logRenderPassCounters");
-            mHasPendingColorClear = interop.getMethod("hasPendingColorClear", long.class);
-            mHasPendingDepthClear = interop.getMethod("hasPendingDepthClear", long.class);
-            mPendingColorClearCount = interop.getMethod("pendingColorClearCount");
-            mDrawProbeStyleTriangle = interop.getMethod("drawProbeStyleTriangle",
+            mLogRenderPassCounters = optional(interop, "logRenderPassCounters");
+            mHasPendingColorClear = optional(interop, "hasPendingColorClear", long.class);
+            mHasPendingDepthClear = optional(interop, "hasPendingDepthClear", long.class);
+            mPendingColorClearCount = optional(interop, "pendingColorClearCount");
+            mDrawProbeStyleTriangle = optional(interop, "drawProbeStyleTriangle",
                     long.class, long.class, int.class, int.class, String.class);
-            mBeginDetached = interop.getMethod("beginDetachedRenderEncoder",
-                    long.class, long.class, int.class, int.class);
-            mEndDetached = interop.getMethod("endDetachedRenderEncoder", long.class);
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
-            Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
-                    + "); Voxy will own its own Metal device");
+            // Name the method. A bare "interop not present" is indistinguishable from metallum
+            // genuinely being absent, and it silently changes Voxy's whole rendering path -- it
+            // renders standalone instead of into Metallum's frame. That cost three invalid
+            // measurement runs before anyone looked at the log line.
+            Logger.error("Metallum interop resolution FAILED (" + t.getClass().getSimpleName() + ": "
+                    + t.getMessage() + "); Voxy will own its own Metal device and will NOT draw into "
+                    + "Metallum's frame. This is a Voxy/metallum version mismatch, not an absent mod.",
+                    t);
         }
     }
 
@@ -300,33 +318,6 @@ public final class MetallumBridge {
         } catch (Throwable t) {
             Logger.error("MetallumBridge.drawProbeStyleTriangle failed", t);
             return false;
-        }
-    }
-
-    /**
-     * Open a render encoder Metallum does not track, so its pass and encoder teardown cannot end it
-     * early or clear into it. The caller owns it and must call {@link #endDetachedRenderEncoder}.
-     * Returns 0 when metallum is absent or lacks the API, and the caller should fall back.
-     */
-    public static long beginDetachedRenderEncoder(final long colorHandle, final long depthHandle,
-                                                  final int width, final int height) {
-        resolve();
-        if (mBeginDetached == null) return 0L;
-        try {
-            return (Long) mBeginDetached.invoke(null, colorHandle, depthHandle, width, height);
-        } catch (Throwable t) {
-            Logger.error("MetallumBridge.beginDetachedRenderEncoder failed", t);
-            return 0L;
-        }
-    }
-
-    public static void endDetachedRenderEncoder(final long encoderHandle) {
-        resolve();
-        if (mEndDetached == null) return;
-        try {
-            mEndDetached.invoke(null, encoderHandle);
-        } catch (Throwable t) {
-            Logger.error("MetallumBridge.endDetachedRenderEncoder failed", t);
         }
     }
 
