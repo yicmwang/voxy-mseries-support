@@ -530,10 +530,21 @@ public class MetalRenderBackend implements RenderBackend {
      * draw, with load actions that preserve whatever Voxy writes. No-op when Voxy owns the buffer.
      */
     /**
-     * Temporary: log every encoder creation so the last line before a Metal assertion identifies
-     * the offending site. Metal assertions carry no Java stack.
+     * Encoder tracing, off unless {@code -Dvoxy.encTrace=true} (or {@code VOXY_ENC_TRACE=1}).
+     *
+     * <p>This instrumentation is what located the three encoder-lifecycle bugs — Metal's "already
+     * encoding" assertions carry no Java stack, so the trail was the only way in. It earned its
+     * place, but it must not run by default: left on it emitted **428,118 lines / 82 MB in four
+     * minutes** (~1,800 lines/second of string building plus log I/O on the render thread), which
+     * silently inflates every performance number measured while it was on.
      */
+    static final boolean ENC_TRACE = Boolean.getBoolean("voxy.encTrace")
+            || "1".equals(System.getenv("VOXY_ENC_TRACE"));
+
     void logEncoderOp(String what) {
+        if (!ENC_TRACE) {
+            return;
+        }
         Logger.info("[Metal-ENC] " + what
                 + " ownsActive=" + this.ownsActiveCommandBuffer
                 + " blitEnc=0x" + Long.toHexString(this.activeBlitEncoder)
@@ -546,6 +557,12 @@ public class MetalRenderBackend implements RenderBackend {
         // Voxy would then believe it owns the buffer and skip this, while Metallum meanwhile opened
         // a render encoder on the same buffer. Asking Metallum to close is a no-op when it has
         // nothing open, so just always ask.
+        if (!ENC_TRACE) {
+            // Fast path: the reporting accessors are three reflective invocations, and this runs
+            // ~150k times per session -- too expensive to keep for a log line that is off.
+            MetallumBridge.endCurrentEncoder();
+            return;
+        }
         long openBefore = MetallumBridge.openEncoderHandle();
         long closed = MetallumBridge.endCurrentEncoderAndReport();
         long openAfter = MetallumBridge.openEncoderHandle();
@@ -558,7 +575,9 @@ public class MetalRenderBackend implements RenderBackend {
 
     private void endActiveBlitEncoder() {
         if (this.activeBlitEncoder != 0) {
-            logEncoderOp("endActiveBlitEncoder 0x" + Long.toHexString(this.activeBlitEncoder));
+            if (ENC_TRACE) {
+                logEncoderOp("endActiveBlitEncoder 0x" + Long.toHexString(this.activeBlitEncoder));
+            }
             MetalNative.mtlEncoderEndEncoding(this.activeBlitEncoder);
             MetalNative.mtlRelease(this.activeBlitEncoder);
             this.activeBlitEncoder = 0;
@@ -655,16 +674,22 @@ public class MetalRenderBackend implements RenderBackend {
             // to this command buffer"), and closing Metallum's to open our own costs a pass split for
             // no reason. Borrowing also means Voxy's draws land in Metallum's pass directly, sharing
             // its depth. Falls back to owning an encoder when Metallum is absent.
-            logEncoderOp("beginRenderPass borrowRequest color=0x" + Long.toHexString(colorHandle));
+            if (ENC_TRACE) {
+                logEncoderOp("beginRenderPass borrowRequest color=0x" + Long.toHexString(colorHandle));
+            }
             long shared = MetallumBridge.acquireRenderEncoder(
                     colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight());
-            logEncoderOp("beginRenderPass borrowResult=0x" + Long.toHexString(shared));
+            if (ENC_TRACE) {
+                logEncoderOp("beginRenderPass borrowResult=0x" + Long.toHexString(shared));
+            }
             if (shared != 0L) {
                 encoder = shared;
                 borrowed = true;
             } else {
                 this.endForeignEncoderIfNeeded();
-                logEncoderOp("beginRenderPass OWN newRenderEncoder");
+                if (ENC_TRACE) {
+                    logEncoderOp("beginRenderPass OWN newRenderEncoder");
+                }
                 encoder = MetalNative.mtlCommandBufferNewRenderEncoder(this.activeCommandBuffer, passDescHandle);
                 if (encoder == 0) {
                     throw new RuntimeException("mtlCommandBufferNewRenderEncoder returned NULL");

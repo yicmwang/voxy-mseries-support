@@ -164,6 +164,30 @@ public class VoxyClient implements ClientModInitializer {
             Logger.info("VOXY_AUTO_SCREENSHOT active: every " + parsedInterval + "s");
         }
 
+        // VOXY_FPS_LOG=<seconds>: log Minecraft's own frame rate.
+        //
+        // Voxy's frame-rate diagnostic (Metal-RING) only exists when Voxy's render system is
+        // running, so it cannot measure the vanilla-only baseline of an A/B -- which is exactly the
+        // measurement that decides whether a slowdown belongs to Voxy or to what it renders into.
+        // This reads MC's own counter, so it reports either way.
+        String fpsLog = System.getenv("VOXY_FPS_LOG");
+        if (fpsLog != null && !fpsLog.isBlank()) {
+            final long periodNanos;
+            try {
+                periodNanos = Math.max(1, Long.parseLong(fpsLog.trim())) * 1_000_000_000L;
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("VOXY_FPS_LOG must be an integer number of seconds", e);
+            }
+            final long[] last = {System.nanoTime()};
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                long now = System.nanoTime();
+                if (now - last[0] < periodNanos) return;
+                last[0] = now;
+                Logger.info("[FPS] " + client.getFps()
+                        + (client.level == null ? "  (no world)" : "  chunks=" + client.level.getChunkSource().getLoadedChunksCount()));
+            });
+        }
+
         // VOXY_TEST_CAMERA="x,y,z,yaw,pitch": pin the player's position and facing, in flight,
         // re-applied every tick so server corrections cannot drift the view.
         //
