@@ -797,10 +797,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return m;
     }
 
-    private void uploadUniformBuffer(MDICViewport viewport) {
-        long ptr = UploadStream.INSTANCE.upload(this.uniform, 0, 1024);
-        long base = ptr;
-
+    /**
+     * The exact matrix uploaded as {@code SceneUniform.MVP} — camera-relative, plus whichever
+     * clip-space depth remap this backend needs. Kept as its own method so the geometry trace can
+     * feed {@link me.cortex.voxy.client.core.rendering.util.LodVertexMath} the same matrix the
+     * shader gets, rather than a reconstruction that could differ from it.
+     */
+    private Matrix4f lodMvp(MDICViewport viewport) {
         var mat = new Matrix4f(viewport.MVP);
         mat.translate(-viewport.innerTranslation.x, -viewport.innerTranslation.y, -viewport.innerTranslation.z);
         // Experiment (2026-05-26, VOXY_LOD_METAL_NDC=1): GL→Metal NDC-z remap.
@@ -816,6 +819,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // with quads.frag's gl_FragCoord.z.
             MetalMvpUtil.applyReverseZRemap(mat);
         }
+        return mat;
+    }
+
+    private void uploadUniformBuffer(MDICViewport viewport) {
+        long ptr = UploadStream.INSTANCE.upload(this.uniform, 0, 1024);
+        long base = ptr;
+
+        var mat = this.lodMvp(viewport);
         // VOXY_VP_TRACE=1: the VP actually uploaded, plus the same matrix WITHOUT the reverse-Z
         // remap for comparison. The LOD's quads are positioned entirely by this matrix, so a
         // degenerate one collapses every vertex to a point: no fragments, no error, and every
@@ -1324,7 +1335,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * or point somewhere unrelated to the camera, every quad lands off-screen: no fragments, no
      * error, and every counter still healthy.
      */
-    private static void traceGeometry(MDICViewport viewport, long indirectOffset, int maxDrawCount) {
+    private void traceGeometry(MDICViewport viewport, long indirectOffset, int maxDrawCount,
+                               me.cortex.voxy.client.core.metal.MetalBuffer geo) {
         if (!GEOM_TRACE || (geomTraceCount++ % 600) != 1) return;
         if (!(viewport.drawCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer cmds)) return;
         if (!(viewport.positionScratchBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer pos)) return;
@@ -1341,18 +1353,109 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             long pa = pp + (long) baseInstance * 8L;
             long u0 = org.lwjgl.system.MemoryUtil.memGetInt(pa) & 0xFFFFFFFFL;
             long u1 = org.lwjgl.system.MemoryUtil.memGetInt(pa + 4) & 0xFFFFFFFFL;
+            // The quad metadata the vertex shader actually reads: quadData[gl_VertexID>>2],
+            // where gl_VertexID includes baseVertex. Decoded per quad_format.glsl:
+            // face = bit 3, size = bits 4..6 (+1), modelId = bits 6..31 | (bits 14..45 << 6).
+            int baseVertex = org.lwjgl.system.MemoryUtil.memGetInt(a + 12);
+            long quadIdx = Integer.toUnsignedLong(baseVertex) >> 2;
+            long q0 = -1, q1 = -1;
+            int face = -1, sizeX = -1, modelId = -1;
+            if (geo != null) {
+                long gp = geo.getContentsPtr();
+                if (gp != 0) {
+                    long qa = gp + quadIdx * 8L;
+                    q0 = org.lwjgl.system.MemoryUtil.memGetInt(qa) & 0xFFFFFFFFL;
+                    q1 = org.lwjgl.system.MemoryUtil.memGetInt(qa + 4) & 0xFFFFFFFFL;
+                    face   = (int) ((q0 >>> 3) & 1L);
+                    sizeX  = (int) ((q0 >>> 4) & 7L) + 1;
+                    modelId = (int) (((q0 >>> 6) & 0x3FFFFFFL) | (((q0 >>> 14) | (q1 << 18)) << 6));
+                }
+            }
             sb.append(String.format(java.util.Locale.ROOT,
-                    " [#%d idxCount=%d baseInstance=%d pos=[%d,%d] asInts=[%d,%d]]",
-                    i, indexCount, baseInstance, u0, u1, (int) u0, (int) u1));
+                    " [#%d idx=%d bi=%d sPos=[%d,%d] baseVtx=%d quadIdx=%d quad=[%d,%d] face=%d sizeX=%d modelId=%d]",
+                    i, indexCount, baseInstance, u0, u1, baseVertex, quadIdx, q0, q1, face, sizeX, modelId));
         }
         Logger.info("[Metal-GEOM] " + sb);
+        traceCorners(viewport, indirectOffset, Math.min(Math.max(maxDrawCount, 0), 4));
+    }
+
+    /**
+     * The decisive half of the geometry trace: run the SAME transform the vertex shader runs
+     * ({@link me.cortex.voxy.client.core.rendering.util.LodVertexMath}) over the same inputs and
+     * report where the four corners land in clip space.
+     *
+     * <p>This separates the two remaining explanations, which every existing diagnostic renders
+     * identically: the quads are geometrically fine and something downstream eats them (in which
+     * case the corners are inside the clip volume with non-zero area), or the quads have always
+     * been landing outside it or collapsed (in which case no pipeline state could ever have made
+     * them visible, and the fault is in the matrix or the decoders).
+     */
+    private void traceCorners(MDICViewport viewport, long indirectOffset, int n) {
+        if (n <= 0) return;
+        if (!(viewport.drawCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer cmds)) return;
+        if (!(viewport.positionScratchBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer pos)) return;
+        if (!(this.geometryManager.getGeometryBuffer()
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer geo)) return;
+        if (!(this.modelStore.getModelBuffer()
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer models)) return;
+        long cp = cmds.getContentsPtr();
+        long pp = pos.getContentsPtr();
+        long gp = geo.getContentsPtr();
+        long mp = models.getContentsPtr();
+        if (cp == 0 || pp == 0 || gp == 0 || mp == 0) return;
+
+        float[] mvp = new float[16];
+        this.lodMvp(viewport).get(mvp);
+        int[] baseSectionPos = {viewport.section.x, viewport.section.y, viewport.section.z};
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            long a = cp + indirectOffset + (long) i * 20L;
+            int baseInstance = org.lwjgl.system.MemoryUtil.memGetInt(a + 16);
+            int baseVertex = org.lwjgl.system.MemoryUtil.memGetInt(a + 12);
+            long pa = pp + (long) baseInstance * 8L;
+            int sPosX = org.lwjgl.system.MemoryUtil.memGetInt(pa);
+            int sPosY = org.lwjgl.system.MemoryUtil.memGetInt(pa + 4);
+            long qa = gp + (Integer.toUnsignedLong(baseVertex) >> 2) * 8L;
+            int qx = org.lwjgl.system.MemoryUtil.memGetInt(qa);
+            int qy = org.lwjgl.system.MemoryUtil.memGetInt(qa + 4);
+
+            int modelId = me.cortex.voxy.client.core.rendering.util.LodVertexMath.stateId(qx, qy);
+            int face = me.cortex.voxy.client.core.rendering.util.LodVertexMath.face(qx, qy);
+            // BlockModel = { uint faceData[6]; ... } at MODEL_SIZE bytes per entry.
+            int faceData = (modelId < (1 << 16) && face < 6)
+                    ? org.lwjgl.system.MemoryUtil.memGetInt(mp + (long) modelId * 64L + face * 4L)
+                    : -1;
+
+            float[] c = me.cortex.voxy.client.core.rendering.util.LodVertexMath.corners(
+                    mvp, baseSectionPos, sPosX, sPosY, qx, qy, faceData, true);
+            int inside = 0;
+            float minW = Float.MAX_VALUE, maxZ = -Float.MAX_VALUE, minZ = Float.MAX_VALUE;
+            float maxExtent = 0;
+            for (int k = 0; k < 4; k++) {
+                float x = c[k * 4], y = c[k * 4 + 1], z = c[k * 4 + 2], w = c[k * 4 + 3];
+                if (me.cortex.voxy.client.core.rendering.util.LodVertexMath
+                        .insideClipVolume(x, y, z, w)) inside++;
+                minW = Math.min(minW, w);
+                minZ = Math.min(minZ, z / (w == 0 ? 1 : w));
+                maxZ = Math.max(maxZ, z / (w == 0 ? 1 : w));
+                maxExtent = Math.max(maxExtent, Math.abs(x / (w == 0 ? 1 : w) - c[0] / (c[3] == 0 ? 1 : c[3]))
+                        + Math.abs(y / (w == 0 ? 1 : w) - c[1] / (c[3] == 0 ? 1 : c[3])));
+            }
+            sb.append(String.format(java.util.Locale.ROOT,
+                    " [#%d model=%d face=%d faceData=%d inside=%d/4 minW=%.3f ndcZ=[%.3f,%.3f] extent=%.4f]",
+                    i, modelId, face, faceData, inside, minW, minZ, maxZ, maxExtent));
+        }
+        Logger.info("[Metal-CORNERS] " + sb);
     }
 
     private void renderTerrainMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,
                                     me.cortex.voxy.client.core.gpu.IGpuPipeline pipeline,
                                     MDICViewport viewport, long indirectOffset, int maxDrawCount) {
         traceCommands("off=" + indirectOffset, viewport, indirectOffset, maxDrawCount);
-        traceGeometry(viewport, indirectOffset, maxDrawCount);
+        var gb = this.geometryManager.getGeometryBuffer();
+        traceGeometry(viewport, indirectOffset, maxDrawCount,
+                gb instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb ? mb : null);
         encoder.setPipeline(pipeline);
         // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
         // SSBO post-chunk-3 SceneUniform flip.

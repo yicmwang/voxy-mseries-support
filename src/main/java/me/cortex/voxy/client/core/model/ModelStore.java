@@ -100,6 +100,15 @@ public class ModelStore {
     }
 
 
+    /**
+     * The {@code modelData[]} SSBO the shaders read. Exposed so a diagnostic can decode
+     * {@code modelData[stateId(quad)].faceData[face]} on the CPU and check it against what the
+     * vertex shader would compute from the same entry.
+     */
+    public IGpuBuffer getModelBuffer() {
+        return this.modelBuffer;
+    }
+
     public void bind(int modelBindingIndex, int colourBindingIndex, int textureBindingIndex) {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, modelBindingIndex, this.modelBuffer.id());
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, colourBindingIndex, this.modelColourBuffer.id());
