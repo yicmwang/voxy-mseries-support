@@ -993,7 +993,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             return;
         }
         int maxDrawCount = Math.min((int)(this.geometryManager.getSectionCount()*4.4+128), 400_000);
+        int rawCount = rawOpaqueCount(viewport, OPAQUE_DRAW_COUNT_OFFSET);
         maxDrawCount = metalDrawCount(viewport, OPAQUE_DRAW_COUNT_OFFSET, maxDrawCount);
+        lodDrawDiag(this.geometryManager.getSectionCount(), rawCount, maxDrawCount);
         if (maxDrawCount == 0) return;
         this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
     }
@@ -1061,6 +1063,32 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * bound to the real count. No-op on GL (drawCountCallBuffer is not a
      * MetalBuffer there).
      */
+    /**
+     * Diagnostics for "Voxy builds geometry but nothing appears". The render list being non-empty
+     * (Metal-FLICKER) says nothing about whether any draw is ISSUED: renderOpaqueMetal returns early
+     * when this count reads 0, so a healthy-looking render list and zero draws are entirely
+     * compatible. Logs the raw value read from the GPU-written count buffer alongside the bound.
+     */
+    private static long LOD_DIAG_FRAME = 0;
+    private static void lodDrawDiag(int sectionCount, int rawOpaque, int maxDrawCount) {
+        if ((LOD_DIAG_FRAME++ % 600) != 1) return;
+        me.cortex.voxy.common.Logger.info(String.format(
+                "[Metal-LODDRAW f=%d] sections=%d  rawOpaqueCount=%d  maxDrawCount=%d  %s",
+                LOD_DIAG_FRAME, sectionCount, rawOpaque, maxDrawCount,
+                maxDrawCount == 0 ? "<-- NO DRAWS ISSUED" : "drawing"));
+    }
+
+    /** Raw (unclamped) value at the opaque draw-count offset, or -1 if unreadable. */
+    private static int rawOpaqueCount(MDICViewport viewport, long countOffset) {
+        if (viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
+            long p = mb.getContentsPtr();
+            if (p != 0) {
+                return MemoryUtil.memGetInt(p + countOffset);
+            }
+        }
+        return -1;
+    }
+
     private static int metalDrawCount(MDICViewport viewport, long countOffset, int upperBound) {
         if (viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
             long p = mb.getContentsPtr();
