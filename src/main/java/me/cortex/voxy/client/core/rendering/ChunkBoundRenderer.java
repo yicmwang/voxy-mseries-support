@@ -344,7 +344,21 @@ public class ChunkBoundRenderer {
         try (RenderEncoder encoder = backend.beginRenderPass(boundDepthPass(viewport))) {
             if (count > 0) {
                 encoder.setPipeline(this.rasterPipeline);
-                encoder.setViewport(0, 0, viewport.width, viewport.height, 0, 1);
+                // Same Y orientation as the LOD pass that SAMPLES this mask -- not a free choice.
+                // quads.frag indexes it with
+                // `boundDepths[gl_FragCoord.y * boundWidth + uint(gl_FragCoord.x)]`, so a row here
+                // means the same screen row there only if both passes were rasterized with the same
+                // viewport height sign. This pass used to hardcode the unflipped form while
+                // AbstractRenderPipeline's LOD pass flips, which mirrored the mask vertically:
+                // fragments in the lower screen read rows from the upper screen, so the LOD was
+                // discarded where the chunk volume is NOT and drew over vanilla where it IS -- and
+                // both wrong regions slid across the viewport as the chunk volume's screen footprint
+                // moved with the camera.
+                if (AbstractRenderPipeline.viewportFlipY()) {
+                    encoder.setViewport(0, viewport.height, viewport.width, -viewport.height, 0, 1);
+                } else {
+                    encoder.setViewport(0, 0, viewport.width, viewport.height, 0, 1);
+                }
                 encoder.setBuffer(SCENE_UNIFORM_BINDING, this.uniformBuffer, 0);
                 encoder.setBuffer(CHUNK_POS_BINDING, this.chunkPosBuffer, 0);
                 encoder.bindIndexBuffer(SharedIndexBuffer.INSTANCE_BB_SHORT.getBuffer(),

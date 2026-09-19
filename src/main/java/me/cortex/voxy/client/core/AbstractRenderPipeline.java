@@ -139,6 +139,21 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * {@code VOXY_LOD_FLIP_Y=0} opts out for a controlled A/B.
      */
     private static final boolean FLIP_Y = !"0".equals(System.getenv("VOXY_LOD_FLIP_Y"));
+
+    /**
+     * The Y orientation Voxy's Metal draws use, for passes that must MATCH it rather than choose.
+     *
+     * <p>Exposed because the chunk-bound mask is consumed by screen position: quads.frag indexes it
+     * with {@code gl_FragCoord.y}, so a row written by the mask pass means the same screen row read
+     * by the LOD pass only if both were rasterized with the same viewport height sign. The mask
+     * hardcoded the unflipped form and was therefore sampled mirrored — the LOD vanished where the
+     * chunk volume is not and drew over vanilla where it is, with both wrong regions tracking the
+     * chunk volume's screen footprint. Anything else that renders into a texture a Voxy pass samples
+     * by {@code gl_FragCoord} has the same obligation.
+     */
+    public static boolean viewportFlipY() {
+        return FLIP_Y;
+    }
     /** Opt-in attachment-identity trace ({@code VOXY_ATTACH_TRACE=1}). */
     private static long attachTraceCount = 0;
 
