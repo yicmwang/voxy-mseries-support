@@ -62,6 +62,20 @@ import static org.lwjgl.opengl.GL11.*;
 //TODO: NOTE!!! is it worth even uploading as a 16x16 texture, since automatic lod selection... doing 8x8 textures might be perfectly ok!!!
 // this _quarters_ the memory requirements for the texture atlas!!! WHICH IS HUGE saving
 public class ModelFactory {
+    /**
+     * Dump the face metadata the bake actually produced, for the first few block states.
+     *
+     * <p>Exists because the Metal bake writes no depth or metadata attachment (see
+     * MetalViewCapture's class Javadoc: the second uvec2 component is zero), and every decision
+     * below -- occludesFace, faceCoversFullBlock, fullyOpaque, needsAlphaDiscard, computeFaceTint --
+     * is computed from {@code wasPixelWritten}, which for SOLID blocks tests the DEPTH byte. If that
+     * byte is zero for every pixel then every one of those decisions is being made about an empty
+     * face, and the mesher is culling on garbage. This prints what was decided so that is a
+     * measurement rather than an inference. {@code VOXY_BAKE_DUMP=1}.
+     */
+    private static final boolean BAKE_DUMP = "1".equals(System.getenv("VOXY_BAKE_DUMP"));
+    private static final java.util.Set<String> BAKE_DUMP_SEEN = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
 
     public static final int MODEL_TEXTURE_SIZE = 16;
     public static final int LAYERS = Integer.numberOfTrailingZeros(MODEL_TEXTURE_SIZE);
@@ -685,6 +699,18 @@ public class ModelFactory {
             faceModelData |= needsAlphaDiscard?1<<22:0;
 
             faceModelData |= ((!faceCoversFullBlock)&&blockRenderLayer != ChunkSectionLayer.TRANSLUCENT)?1<<23:0;//Alpha discard override, translucency doesnt have alpha discard
+
+            if (BAKE_DUMP && face == 0 && BAKE_DUMP_SEEN.size() < 24
+                    && BAKE_DUMP_SEEN.add(blockState.getBlock().getName().getString() + "/" + blockRenderLayer)) {
+                me.cortex.voxy.common.Logger.info(String.format(
+                        "[Metal-BAKE-META] %s layer=%s checkMode=%d  offset=%.3f  writeCount=%d/%d  "
+                                + "faceSize=[%d,%d,%d,%d]  coversFull=%s  occludes=%s  canBeOccluded=%s  "
+                                + "needsAlphaDiscard=%s",
+                        blockState.getBlock().getName().getString(), blockRenderLayer, checkMode,
+                        offset, writeCount, MODEL_TEXTURE_SIZE * MODEL_TEXTURE_SIZE,
+                        faceSize[0], faceSize[1], faceSize[2], faceSize[3],
+                        faceCoversFullBlock, occludesFace, canBeOccluded, needsAlphaDiscard));
+            }
 
             //Bits 24,25 are tint metadata
             if (colourProvider!=null) {//We have a tint

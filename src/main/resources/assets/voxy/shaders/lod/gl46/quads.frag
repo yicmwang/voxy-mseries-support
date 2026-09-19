@@ -172,9 +172,16 @@ void main() {
     // particular voxels lost their light". Pure black in red+green means the voxel was baked
     // with BOTH nibbles zero, and not that geometry is missing: a missing quad draws nothing at
     // all and shows whatever is behind it.
+    // Blue is a CONSTANT 0.5 on every fragment this shader emits. That is the whole point: it
+    // separates "a fragment was drawn and its light is zero" from "no fragment was drawn here at
+    // all and we are looking at whatever is behind". An earlier version of this readout inferred
+    // "the black is drawn geometry with light 0" from the fact that non-black pixels varied --
+    // which is invalid, because that only proves the readout works where it drew. The user, looking
+    // at the real frame, could see through the black into the void, i.e. no fragment at all.
+    // With blue pinned, b == 128 is a drawn fragment and anything else is not.
     outColour = vec4(float((interData.w >> 24) & 0xFu) / 15.0,
                      float((interData.w >> 28) & 0xFu) / 15.0,
-                     (interData.x & 1u) != 0u ? 0.8 : 0.2,
+                     0.5,
                      1.0);
     return;
 #endif
