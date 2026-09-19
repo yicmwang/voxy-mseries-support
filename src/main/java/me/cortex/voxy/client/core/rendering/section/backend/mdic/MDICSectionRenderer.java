@@ -816,6 +816,23 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // with quads.frag's gl_FragCoord.z.
             MetalMvpUtil.applyReverseZRemap(mat);
         }
+        // VOXY_VP_TRACE=1: the VP actually uploaded, plus the same matrix WITHOUT the reverse-Z
+        // remap for comparison. The LOD's quads are positioned entirely by this matrix, so a
+        // degenerate one collapses every vertex to a point: no fragments, no error, and every
+        // counter reading healthy -- which is the signature this whole investigation has had.
+        if ("1".equals(System.getenv("VOXY_VP_TRACE")) && (vpTraceCount++ % 600) == 1) {
+            var unremapped = new Matrix4f(viewport.MVP);
+            unremapped.translate(-viewport.innerTranslation.x, -viewport.innerTranslation.y,
+                    -viewport.innerTranslation.z);
+            Logger.info(String.format(java.util.Locale.ROOT,
+                    "[Metal-VP] remap=%s | m00=%.6f m11=%.6f m22=%.6f m23=%.6f m32=%.6f m33=%.6f "
+                            + "| t=(%.2f,%.2f,%.2f) | det=%.6e | withoutRemap m00=%.6f m11=%.6f m22=%.6f",
+                    MetalMvpUtil.REVERSE_Z_REMAP,
+                    mat.m00(), mat.m11(), mat.m22(), mat.m23(), mat.m32(), mat.m33(),
+                    mat.m30(), mat.m31(), mat.m32(),
+                    mat.determinant(),
+                    unremapped.m00(), unremapped.m11(), unremapped.m22()));
+        }
         mat.getToAddress(ptr); ptr += 4*4*4;
 
         viewport.section.getToAddress(ptr); ptr += 4*3;
@@ -1098,6 +1115,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * compatible. Logs the raw value read from the GPU-written count buffer alongside the bound.
      */
     private static boolean reverseZLogged = false;
+    private static long vpTraceCount = 0;
     private static long LOD_DIAG_FRAME = 0;
     private static void lodDrawDiag(int sectionCount, int rawOpaque, int maxDrawCount) {
         if ((LOD_DIAG_FRAME++ % 600) != 1) return;
@@ -1292,10 +1310,49 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         encoder.draw(me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES, 0, 3, 1, 0);
     }
 
+    /** Opt-in geometry dump ({@code VOXY_GEOM_TRACE=1}). */
+    private static final boolean GEOM_TRACE = "1".equals(System.getenv("VOXY_GEOM_TRACE"));
+    private static long geomTraceCount = 0;
+
+    /**
+     * Dump the two per-quad inputs the vertex shader positions geometry with:
+     * {@code positionBuffer[baseInstance]} (the section/quad base point) and {@code quadData[...]}.
+     *
+     * <p>Every other layer has been cleared by bisection -- encoder, pipeline, rasterizer, target,
+     * viewport, bindings, indirect draw and the scene uniform's VP all measured sound, and the LOD
+     * draws only when the vertex shader is made to ignore THESE. So if the base points are garbage
+     * or point somewhere unrelated to the camera, every quad lands off-screen: no fragments, no
+     * error, and every counter still healthy.
+     */
+    private static void traceGeometry(MDICViewport viewport, long indirectOffset, int maxDrawCount) {
+        if (!GEOM_TRACE || (geomTraceCount++ % 600) != 1) return;
+        if (!(viewport.drawCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer cmds)) return;
+        if (!(viewport.positionScratchBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer pos)) return;
+        long cp = cmds.getContentsPtr();
+        long pp = pos.getContentsPtr();
+        if (cp == 0 || pp == 0) return;
+        StringBuilder sb = new StringBuilder();
+        int n = Math.min(Math.max(maxDrawCount, 0), 4);
+        for (int i = 0; i < n; i++) {
+            long a = cp + indirectOffset + (long) i * 20L;
+            int baseInstance = org.lwjgl.system.MemoryUtil.memGetInt(a + 16);
+            int indexCount = org.lwjgl.system.MemoryUtil.memGetInt(a);
+            // positionBuffer is uvec2 per entry.
+            long pa = pp + (long) baseInstance * 8L;
+            long u0 = org.lwjgl.system.MemoryUtil.memGetInt(pa) & 0xFFFFFFFFL;
+            long u1 = org.lwjgl.system.MemoryUtil.memGetInt(pa + 4) & 0xFFFFFFFFL;
+            sb.append(String.format(java.util.Locale.ROOT,
+                    " [#%d idxCount=%d baseInstance=%d pos=[%d,%d] asInts=[%d,%d]]",
+                    i, indexCount, baseInstance, u0, u1, (int) u0, (int) u1));
+        }
+        Logger.info("[Metal-GEOM] " + sb);
+    }
+
     private void renderTerrainMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,
                                     me.cortex.voxy.client.core.gpu.IGpuPipeline pipeline,
                                     MDICViewport viewport, long indirectOffset, int maxDrawCount) {
         traceCommands("off=" + indirectOffset, viewport, indirectOffset, maxDrawCount);
+        traceGeometry(viewport, indirectOffset, maxDrawCount);
         encoder.setPipeline(pipeline);
         // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
         // SSBO post-chunk-3 SceneUniform flip.
