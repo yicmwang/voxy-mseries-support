@@ -38,6 +38,9 @@ public class MixinRenderSectionManager {
     @Inject(method = "<init>", at = @At("TAIL"))
     private void voxy$resetChunkTracker(ClientLevel level, int renderDistance, SortBehavior sortBehavior, CallbackInfo ci) {
         this.bottomSectionY = this.level.getMinY()>>4;
+        // Sodium rebuilds its section manager on a level or render-distance change and its built
+        // set starts over with it. Without this the mask keeps sections from the previous world.
+        me.cortex.voxy.client.core.rendering.BuiltSectionMask.reset();
     }
 
     @Inject(method = "onChunkRemoved", at = @At("HEAD"))

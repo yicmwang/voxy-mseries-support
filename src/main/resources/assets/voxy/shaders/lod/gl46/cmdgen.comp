@@ -3,6 +3,19 @@
 
 layout(local_size_x = 128) in;
 
+#ifdef VOXY_LOD_BUILT_MASK
+// Header: side (chunk columns per axis), then the camera's chunk column, then a pad. Bits follow,
+// one per column, row-major in (z, x), indexed relative to the camera's column. Filled by
+// BuiltSectionMask.update from Sodium's built-section set.
+layout(binding = BUILT_MASK_BINDING, std430) readonly restrict buffer BuiltMaskBuffer {
+    uint builtMaskSide;
+    int builtMaskCamX;
+    int builtMaskCamZ;
+    uint _builtMaskPad;
+    uint builtMaskBits[];
+};
+#endif
+
 #define DRAW_BUFFER_BINDING 1
 #define DRAW_COUNT_BUFFER_BINDING 2
 #define SECTION_METADATA_BUFFER_BINDING 3
@@ -84,24 +97,32 @@ void main() {
 
         uint ptr = extractQuadStart(meta);
         ivec3 relative = ipos-(baseSectionPos>>detail);
-#ifdef VOXY_LOD_CULL_RD_BLOCKS
-        // Drop sections that lie wholly inside the vanilla render-distance box.
+#ifdef VOXY_LOD_BUILT_MASK
+        // Cull exactly where vanilla has geometry, by asking Sodium rather than guessing.
         //
-        // Vanilla owns every pixel in there, so the LOD does not get to draw at all -- which makes
-        // "vanilla occludes LOD" true by construction instead of something a depth comparison has to
-        // win. The LOD approximates the very surface vanilla draws, so their depths agree to float
-        // precision and any comparison (GreaterEqual, Greater, a bias) only shuffles which side wins
-        // the tie. Not drawing is not a tie.
+        // The alternative -- culling by the render-distance BOX -- is a proxy for "where vanilla
+        // drew", and it is wrong in both directions: it culls LOD over chunks Sodium has not built
+        // yet, which leaves holes at the seam, and it keeps LOD over chunks vanilla did build,
+        // which z-fights. BuiltSectionMask carries the real set, so this is a membership test
+        // instead of arithmetic.
         //
-        // `detail` is this section's LOD level, so it spans (32 << detail) blocks and `relative` is
-        // in those units. The cull radius is one short of the box in those units, so a section is
-        // dropped only when its FAR edge is still inside the box -- culling on the near edge
-        // instead would leave a gap of missing LOD just outside the vanilla render distance.
+        // The query is the node's CENTRE column. That is exact for the fine LOD levels that exist
+        // near the camera (a level-0 node spans 2x2 chunks); coarse nodes only exist far away,
+        // where the centre falls outside the square and they are simply never culled.
+        //
+        // A node at level `detail` spans (32 << detail) blocks, i.e. (2 << detail) 16-block
+        // sections per axis, so its origin section is ipos << (detail+1) and its centre is one
+        // half-node further in.
         {
-            float secSize = float(32u << detail);
-            int cullRadius = max(int(floor(float(VOXY_LOD_CULL_RD_BLOCKS) / secSize)) - 1, 0);
-            if (all(lessThanEqual(abs(relative), ivec3(cullRadius)))) {
-                return;
+            ivec3 centre = (ipos << (detail + 1)) + ivec3(1 << detail);
+            int dx = centre.x - builtMaskCamX;
+            int dz = centre.z - builtMaskCamZ;
+            int sd = int(builtMaskSide);
+            if (dx >= 0 && dz >= 0 && dx < sd && dz < sd) {
+                uint bit = uint(dz * sd + dx);
+                if ((builtMaskBits[bit >> 5] & (1u << (bit & 31u))) != 0u) {
+                    return;
+                }
             }
         }
 #endif

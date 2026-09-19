@@ -56,6 +56,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static final int TRANSLUCENT_OFFSET = 400_000;//in draw calls
     private static final int TEMPORAL_OFFSET = 500_000;//in draw calls
     private static final int STATISTICS_BUFFER_BINDING = 8;
+    /** cmdgen binding for the built-section mask. 0-7 are the draw/metadata table, 8 is statistics. */
+    private static final int BUILT_MASK_BINDING = 9;
     /**
      * Terrain shaders. Two paths:
      *   - Iris-patched (legacy {@link Shader.Builder}, GL-only by definition since
@@ -89,6 +91,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     // RenderEncoder.
 
     private final me.cortex.voxy.client.core.gpu.RenderBackend backend = RenderBackendFactory.get();
+
+    /** Sodium's built-section set, packed for cmdgen's cull. See BuiltSectionMask. */
+    private final me.cortex.voxy.client.core.rendering.BuiltSectionMask builtSectionMask =
+            new me.cortex.voxy.client.core.rendering.BuiltSectionMask();
 
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline commandGenPipeline = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
@@ -182,15 +188,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
-        // Vanilla render distance, in blocks. cmdgen.comp culls LOD sections that lie WHOLLY inside
-        // this box, so Voxy never draws where vanilla owns the pixels. That gives vanilla-occludes-LOD
-        // by construction -- no mask, no depth blit, no full-screen readback, and nothing that has to
-        // win a depth comparison. Baked at pipeline creation, so an RD change needs the pipeline
-        // rebuilt (Voxy's config reload path already does this).
-        // VOXY_LOD_CULL_RD=0 omits the define and restores the unculled behaviour for an A/B.
-        if (!"0".equals(System.getenv("VOXY_LOD_CULL_RD"))) {
-            m.put("VOXY_LOD_CULL_RD_BLOCKS",
-                    Integer.toString(Minecraft.getInstance().options.renderDistance().get() * 16));
+        // Cull LOD exactly where vanilla has geometry, using Sodium's built-section set rather
+        // than a render-distance box. The box is a proxy for "where vanilla drew" and is wrong in
+        // both directions -- it culls over chunks Sodium has not built (holes at the seam) and
+        // keeps LOD over chunks it did build (z-fighting). BuiltSectionMask carries the real set.
+        // VOXY_LOD_BUILT_MASK=0 omits the define for an A/B.
+        if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+            m.put("VOXY_LOD_BUILT_MASK", "");
+            m.put("BUILT_MASK_BINDING", Integer.toString(BUILT_MASK_BINDING));
         }
         m.put("TRANSLUCENT_WRITE_BASE", "1024");
         m.put("TEMPORAL_OFFSET", Integer.toString(TEMPORAL_OFFSET));
@@ -1694,6 +1699,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 this.statisticsBuffer.zero();
             }
             try (var encoder = this.backend.beginComputePass()) {
+                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+                    this.builtSectionMask.update(viewport, this.backend);
+                    if (this.builtSectionMask.buffer() != null) {
+                        encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
+                    }
+                }
                 encoder.setPipeline(this.commandGenPipeline);
                 encoder.setBuffer(0, this.uniform, 0);
                 encoder.setBuffer(1, viewport.drawCallBuffer, 0);
