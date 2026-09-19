@@ -555,23 +555,16 @@ public class VoxyRenderSystem {
                     }
                 });
             }
-            // Metal path — skip all the GL state save/restore. Drive the
-            // chunk-bound depth mask + the pipeline's Metal render. The
-            // compositing mixin runs separately at renderLevel RETURN.
+            // Metal path — skip all the GL state save/restore and drive the pipeline's Metal render.
+            // The compositing mixin runs separately at renderLevel RETURN.
             this.pipeline.preSetup(viewport);
-            // M13 chunk 3 — mirror the GL chunk-bound gate below (~:430):
-            // rasterize the loaded-chunk AABB depth mask into
-            // viewport.depthBoundingBuffer so quads.frag's depth-bound test
-            // discards LOD fragments inside MC's loaded-chunk volume (the
-            // LOD↔terrain ring fix + second line of defense for underwater
-            // X-ray). Must run BEFORE runPipeline so the LOD pass samples
-            // this frame's mask.
-            if ((!VoxyClient.disableSodiumChunkRender()) && !IrisUtil.irisShadowActive()) {
-                this.chunkBoundRenderer.renderMetal(viewport,
-                        me.cortex.voxy.client.core.gpu.RenderBackendFactory.get());
-            } else {
-                this.chunkBoundRenderer.clearMetal(viewport);
-            }
+            // No chunk-bound mask pass here any more. Voxy draws into MC's own depth attachment, so
+            // the depth test occludes LOD against real terrain per pixel with no help; the mask that
+            // used to run here was a chunk-AABB approximation of exactly that, and was the source of
+            // the rectangles and the mirrored-discard artifacts. See MDICSectionRenderer's define
+            // block for why the AABB mask could not have been fixed by choosing sections better, and
+            // for the one real gap this leaves (CUTOUT/TRANSLUCENT are not in MC's depth yet when
+            // Voxy draws).
             this.pipeline.runPipeline(viewport, 0, viewport.width, viewport.height);
 
             // M13 chunk 2 follow-up: drive the per-frame dynamic-runtime

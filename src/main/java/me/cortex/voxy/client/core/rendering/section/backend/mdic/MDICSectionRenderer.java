@@ -359,34 +359,33 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if (gbufferDebug) translucentDefines.put("VOXY_VX_GBUFFER_DEBUG", "");
             }
             if (this.backend.getType() != BackendType.OPENGL) {
-                // M13 chunk 3: the chunk-bound depth mask now renders on Metal
-                // (ChunkBoundRenderer.renderMetal → viewport.depthBoundingBuffer,
-                // bound at texture slot 2 in renderTerrainMetal), so the
-                // per-fragment depth-bound test is ON by default.
-                // VOXY_NO_DEPTH_BOUND=1 is the kill switch restoring the old
-                // skip-the-sample behaviour; VOXY_BOUND_DEBUG=1 tints
-                // bound-discarded fragments red instead of discarding
-                // (mask-verification aid, opaque + translucent).
-                boolean noDepthBound = "1".equals(System.getenv("VOXY_NO_DEPTH_BOUND"));
-                boolean boundDebug = !noDepthBound && "1".equals(System.getenv("VOXY_BOUND_DEBUG"));
-                if (noDepthBound) {
+                // NO depth-bound mask on the whole-frame Metal path. Voxy renders straight into MC's
+                // own depth attachment, so the ordinary depth test already IS the occlusion, per
+                // pixel, for free -- there is nothing for a mask to add. This is the Metal-native
+                // equivalent of what upstream does with `initDepthStencil` (full-screen blit of MC's
+                // depth + `glStencilFunc(GL_EQUAL, 1)` so Voxy draws only where MC has not); the
+                // stencil half has no Metal analogue because MC's main depth target is
+                // Depth32Float with no stencil, and the depth half is already in the buffer Voxy
+                // draws into.
+                //
+                // What replaced it here was a chunk-AABB mask rasterized into a depth buffer and
+                // read through an SSBO. That is chunk-granular by construction: a 16^3 box hides LOD
+                // for the section's whole volume, including the empty air inside it, which showed as
+                // sky-coloured rectangles ringing every vanilla chunk. Three attempts to fix it by
+                // choosing which sections entered the mask could not have worked, because the box
+                // was the problem, not its membership.
+                //
+                // The residual gap this leaves is COVERAGE, not granularity: the hook is Sodium's
+                // CUTOUT pass, so SOLID and CUTOUT_MIPPED are in the depth buffer but CUTOUT and
+                // TRANSLUCENT are not yet. LOD can therefore still land where water or cutout foliage
+                // will draw. That is an ordering problem and belongs fixed as one.
+                // VOXY_NO_DEPTH_BOUND=0 restores the old mask path for an A/B.
+                if (!"0".equals(System.getenv("VOXY_NO_DEPTH_BOUND"))) {
                     opaqueDefines.put("VOXY_NO_DEPTH_BOUND", "");
                     translucentDefines.put("VOXY_NO_DEPTH_BOUND", "");
-                } else {
-                    // Round 20: the bound test reads the mask from a plain
-                    // buffer (binding 6), not from the depthTex sampler —
-                    // depth-format textures sampled via texture2d<float>
-                    // silently read zeros on Metal, which left the mask
-                    // INERT since M13 chunk 3 (exposed by the Iris gbuffer
-                    // inject writing real depth: LODs stomped pack terrain).
-                    // ChunkBoundRenderer.exportBoundMaskMetal feeds it.
-                    opaqueDefines.put("VOXY_METAL_BOUND_SSBO", "");
-                    translucentDefines.put("VOXY_METAL_BOUND_SSBO", "");
                 }
-                if (boundDebug) {
-                    opaqueDefines.put("VOXY_BOUND_DEBUG", "");
-                    translucentDefines.put("VOXY_BOUND_DEBUG", "");
-                }
+                boolean noDepthBound = true;
+                boolean boundDebug = false;
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
                 // VOXY_LOD_FORCE_MAGENTA=1 -- bisection switch (see quads.frag). Solid magenta
                 // emitted before every discard/early-out, so the frame shows whether LOD geometry

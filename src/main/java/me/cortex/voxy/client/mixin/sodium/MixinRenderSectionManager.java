@@ -38,36 +38,6 @@ public class MixinRenderSectionManager {
     @Inject(method = "<init>", at = @At("TAIL"))
     private void voxy$resetChunkTracker(ClientLevel level, int renderDistance, SortBehavior sortBehavior, CallbackInfo ci) {
         this.bottomSectionY = this.level.getMinY()>>4;
-        // Sodium rebuilds its RenderSectionManager on a level change or a render-distance change, and
-        // the built-section set starts over with it. Without this the mirror keeps sections from the
-        // previous world, and the next ChunkBoundRenderer to seed from it would mask-discard LODs
-        // over chunks that no longer exist.
-        me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorReset();
-    }
-
-    /**
-     * Drop a section from the chunk-bound depth mask when Sodium unloads it.
-     *
-     * <p>Additions deliberately do NOT come from here. {@code onSectionAdded} fires when a chunk
-     * loads, for every section of its column including plain air, and a mask over air hides distant
-     * LOD that has nothing in front of it — the mask is a volume test, so an empty section is not a
-     * no-op. That mistake cost a run: the LOD's distant ring vanished behind 16³ boxes containing
-     * nothing. Sections enter the mask from the mesh upload instead, in
-     * {@link MixinRenderRegionManager}, which is the point at which a section actually acquires
-     * geometry.
-     *
-     * <p>Removal is guarded on membership: this fires for every section of an unloading chunk,
-     * including ones that were never built and so were never in the mask, and an unguarded removal
-     * would log a warning for each.
-     */
-    @Inject(method = "onSectionRemoved", at = @At("TAIL"))
-    private void voxy$boundMaskRemove(int x, int y, int z, CallbackInfo ci) {
-        long pos = me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.packSectionPos(x, y, z);
-        me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorRemove(pos);
-        VoxyRenderSystem vrs = IGetVoxyRenderSystem.getNullable();
-        if (vrs != null && vrs.chunkBoundRenderer.hasSection(pos)) {
-            vrs.chunkBoundRenderer.removeSection(pos);
-        }
     }
 
     @Inject(method = "onChunkRemoved", at = @At("HEAD"))
