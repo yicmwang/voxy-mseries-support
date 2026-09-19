@@ -249,6 +249,9 @@ public class VoxyClient implements ClientModInitializer {
                         applied[0] = true;
                         // Spectator: no gravity, no collision, and the LOD ring still follows the eye.
                         commands.performPrefixedCommand(source, "gamemode spectator");
+                        // The periodic re-tp prints "Teleported ..." over the middle of the frame, which
+                        // covers the very pixels under test in every screenshot. Silence it.
+                        commands.performPrefixedCommand(source, "gamerule sendCommandFeedback false");
                         commands.performPrefixedCommand(source, "tp @s " + tpArgs);
                         Logger.info("VOXY_DEV_CAM active: pinned the camera to " + tpArgs);
                         return;
