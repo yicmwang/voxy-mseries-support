@@ -1192,7 +1192,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     /** The P0 probe's MSL pipeline, drawn through an encoder made directly from the command buffer. */
     private static final boolean DEBUG_TRIANGLE_PROBE =
             "probe".equals(DEBUG_TRIANGLE_MODE) || "both".equals(DEBUG_TRIANGLE_MODE);
+    /**
+     * Draw the debug triangle through the TERRAIN pipeline instead of the debug one. Combined
+     * with VOXY_LOD_FORCE_VERTEX=1 (which makes the vertex shader emit a fixed clip-space
+     * triangle, needing no inputs) this separates two explanations that look identical:
+     * the terrain pipeline itself is broken, versus its bindings/vertex data being broken.
+     * Draws => the pipeline and this encoder are fine and the fault is the LOD's inputs.
+     */
+    private static final boolean DEBUG_TRIANGLE_TERRAIN = "terrain".equals(DEBUG_TRIANGLE_MODE);
     private static int probeTriLogged;
+    private static int terrainTriLogged;
     private me.cortex.voxy.client.core.gpu.IGpuPipeline debugTrianglePipeline;
 
     private static final String DEBUG_TRI_VERT = """
@@ -1252,6 +1261,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             if (!DEBUG_TRIANGLE) {
                 return;   // "both": fall through and also draw with Voxy's own pipeline
             }
+        }
+        if (DEBUG_TRIANGLE_TERRAIN) {
+            if (this.terrainPipeline == null) return;
+            encoder.setPipeline(this.terrainPipeline);
+            encoder.draw(me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES, 0, 3, 1, 0);
+            if (terrainTriLogged++ == 0) {
+                Logger.info("[Metal-LODTEST] VOXY_LOD_TRIANGLE=terrain: debug triangle drawn through the TERRAIN pipeline");
+            }
+            return;
         }
         if (!DEBUG_TRIANGLE) {
             return;
