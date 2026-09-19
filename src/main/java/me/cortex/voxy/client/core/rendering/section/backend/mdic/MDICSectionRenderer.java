@@ -384,6 +384,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     opaqueDefines.put("VOXY_NO_DEPTH_BOUND", "");
                     translucentDefines.put("VOXY_NO_DEPTH_BOUND", "");
                 }
+                // With the mask gone, vanilla and the LOD are compared purely by depth -- and since
+                // the LOD approximates the surface vanilla draws, their depths agree to float
+                // precision where they overlap and they z-fight. Bias the LOD behind so vanilla
+                // always wins ties. See quads3.vert's VOXY_LOD_DEPTH_BIAS for the sign, which is a
+                // property of the reverse-Z frame rather than a free choice.
+                String lodBias = System.getenv("VOXY_LOD_DEPTH_BIAS");
+                if (lodBias == null || lodBias.isBlank()) lodBias = "1e-5";
+                opaqueDefines.put("VOXY_LOD_DEPTH_BIAS", lodBias + "f");
+                translucentDefines.put("VOXY_LOD_DEPTH_BIAS", lodBias + "f");
                 boolean noDepthBound = true;
                 boolean boundDebug = false;
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
