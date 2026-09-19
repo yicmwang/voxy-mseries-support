@@ -3,71 +3,49 @@ package me.cortex.voxy.client.core.metal;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
- * Pins who is responsible for ending a render encoder. This is the rule whose absence made Voxy's
- * LOD render zero pixels.
+ * Pins who is responsible for ending a render encoder.
  *
- * <p>The bisection that found it: a magenta triangle drawn through Voxy's encoder at the LOD pass
- * produced 0.00% of the frame, while the same triangle drawn through an encoder created directly
- * from the command buffer and ended immediately produced 17.13%. Same point in the frame, same
- * depth state, same pipeline shape -- only the encoder differed. Corroborating it, forcing Voxy to
- * end its borrowed encoder tripped {@code endEncoding has already been called}, i.e. the encoder had
- * died before Voxy drew on it.
+ * <p>Voxy draws into Metallum's frame, so an encoder can come from one of two places, and each has
+ * exactly one owner:
  *
- * <p>A GPU-free unit test cannot prove pixels appear, but it can hold still the ownership rule that
- * decides whether an encoder is ever ended by the party that owns it. That rule is one branch, and
- * it is the branch that was wrong.
+ * <ul>
+ *   <li><b>Borrowed</b> -- Metallum's encoder, which it keeps drawing on after Voxy is done. Ending
+ *       it here would break Metallum's remaining draws, so only its cached state is invalidated.</li>
+ *   <li><b>Voxy's own</b> -- created from the pass descriptor. Voxy ends it and releases it.</li>
+ * </ul>
+ *
+ * <p>The rule is extracted because the LOD pass getting it wrong is expensive and silent. A third
+ * option was tried and removed: an encoder Metallum could not see at all ("detached"), so that no
+ * pass teardown could touch it. That is not a supported arrangement -- Metallum cannot know an
+ * encoder is open, so it will happily open a second one on the same command buffer, which asserts
+ * with "A command encoder is already encoding to this command buffer". Borrowing badly is worse
+ * than not borrowing; the supported answer is to own the encoder and end it promptly, which is what
+ * every other Voxy pass already does.
  */
 class RenderEncoderCloseActionTest {
 
     @Test
-    void detachedEncodersAreEndedByUsViaMetallum() {
-        // A detached encoder is untracked: no pass teardown will touch it, so if we do not end it,
-        // its contents are discarded when the command buffer commits. Ending it through Metallum
-        // also drops the wrapper it holds, keeping the ObjC lifetime balanced.
-        assertEquals(MetalRenderEncoder.CloseAction.END_VIA_METALLUM,
-                MetalRenderEncoder.closeActionFor(true, false));
-    }
-
-    @Test
     void borrowedEncodersAreOnlyInvalidated() {
-        // Metallum still owns the pass and keeps drawing on this encoder after we are done; ending
-        // it here would break Metallum's remaining draws.
+        // Metallum still owns the pass and keeps drawing on this encoder after we are done.
         assertEquals(MetalRenderEncoder.CloseAction.INVALIDATE_ONLY,
-                MetalRenderEncoder.closeActionFor(false, true));
+                MetalRenderEncoder.closeActionFor(true));
     }
 
     @Test
     void ownedEncodersAreEndedAndReleased() {
-        // Voxy created it on its own command buffer, so Voxy ends it.
+        // Voxy created it, so Voxy ends it. This is the path every working Voxy pass takes.
         assertEquals(MetalRenderEncoder.CloseAction.END_AND_RELEASE,
-                MetalRenderEncoder.closeActionFor(false, false));
+                MetalRenderEncoder.closeActionFor(false));
     }
 
     @Test
-    void detachedWinsOverBorrowed() {
-        // The two flags should never both be set, but if a future edit sets both the detached
-        // reading is the safe one: an encoder Metallum does not know about must not be left open on
-        // the assumption that Metallum will close it.
-        assertEquals(MetalRenderEncoder.CloseAction.END_VIA_METALLUM,
-                MetalRenderEncoder.closeActionFor(true, true));
-    }
-
-    @Test
-    void everyEncodingSourceHasExactlyOneOwner() {
-        // The property that matters: for each way an encoder can be obtained there is exactly one
-        // party responsible for ending it, and it is never "nobody" -- which is the state that made
-        // the LOD invisible.
-        for (boolean detached : new boolean[]{true, false}) {
-            for (boolean borrowed : new boolean[]{true, false}) {
-                MetalRenderEncoder.CloseAction action = MetalRenderEncoder.closeActionFor(detached, borrowed);
-                assertEquals(detached ? MetalRenderEncoder.CloseAction.END_VIA_METALLUM
-                                : (borrowed ? MetalRenderEncoder.CloseAction.INVALIDATE_ONLY
-                                            : MetalRenderEncoder.CloseAction.END_AND_RELEASE),
-                        action,
-                        "detached=" + detached + " borrowed=" + borrowed);
-            }
-        }
+    void theTwoSourcesNeverShareAnOwner() {
+        // The property that matters: whichever way an encoder was obtained, exactly one party ends
+        // it and it is never "nobody".
+        assertNotEquals(MetalRenderEncoder.closeActionFor(true), MetalRenderEncoder.closeActionFor(false),
+                "a borrowed and an owned encoder must not have the same close behaviour");
     }
 }

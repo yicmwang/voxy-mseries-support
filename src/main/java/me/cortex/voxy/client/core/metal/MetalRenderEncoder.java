@@ -35,24 +35,13 @@ public final class MetalRenderEncoder implements RenderEncoder {
      * Metallum's pass state stale so Metallum rebinds before its next draw.
      */
     private final boolean borrowed;
-    /**
-     * True when this encoder came from beginDetachedRenderEncoder: Metallum tracks nothing about
-     * it, so Voxy must end it itself and no pass teardown may touch it.
-     */
-    private final boolean detached;
-
     MetalRenderEncoder(long encoderHandle) {
         this(encoderHandle, false);
     }
 
     MetalRenderEncoder(long encoderHandle, boolean borrowed) {
-        this(encoderHandle, borrowed, false);
-    }
-
-    MetalRenderEncoder(long encoderHandle, boolean borrowed, boolean detached) {
         this.encoderHandle = encoderHandle;
         this.borrowed = borrowed;
-        this.detached = detached;
     }
 
     @Override
@@ -297,28 +286,20 @@ public final class MetalRenderEncoder implements RenderEncoder {
      * nothing about must be ended by us, or its work is discarded when the command buffer commits.
      */
     enum CloseAction {
-        /** Detached: untracked by Metallum, so nothing else will ever end it. */
-        END_VIA_METALLUM,
         /** Borrowed: Metallum keeps drawing on it; only mark its cached state stale. */
         INVALIDATE_ONLY,
         /** Voxy's own: end it and release our reference. */
         END_AND_RELEASE
     }
 
-    static CloseAction closeActionFor(final boolean detached, final boolean borrowed) {
-        if (detached) {
-            return CloseAction.END_VIA_METALLUM;
-        }
+    static CloseAction closeActionFor(final boolean borrowed) {
         return borrowed ? CloseAction.INVALIDATE_ONLY : CloseAction.END_AND_RELEASE;
     }
 
     @Override
     public void close() {
         if (this.encoderHandle == 0) return;
-        if (this.detached) {
-            // Untracked by Metallum: nothing else will ever end it, so Voxy must.
-            MetallumBridge.endDetachedRenderEncoder(this.encoderHandle);
-        } else if (this.borrowed) {
+        if (this.borrowed) {
             // Shared with Metallum: leave the encoder open and let Metallum rebind its own state.
             //
             // VOXY_END_BORROWED_ENCODER=1 -- experiment. "Borrowed" covers two different things:

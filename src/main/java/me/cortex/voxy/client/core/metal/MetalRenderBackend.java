@@ -542,7 +542,8 @@ public class MetalRenderBackend implements RenderBackend {
     private static long passTraceCount = 0;
 
     /** Prefer a Metallum-untracked encoder for Voxy's passes; {@code VOXY_LOD_DETACHED_ENCODER=0} opts out. */
-    static final boolean DETACHED_ENCODER = !"0".equals(System.getenv("VOXY_LOD_DETACHED_ENCODER"));
+    /** Borrow Metallum's encoder instead of owning one; {@code VOXY_LOD_BORROW_ENCODER=1} for A/B. */
+    static final boolean BORROW_ENCODER = "1".equals(System.getenv("VOXY_LOD_BORROW_ENCODER"));
 
     static final boolean ENC_TRACE = Boolean.getBoolean("voxy.encTrace")
             || "1".equals(System.getenv("VOXY_ENC_TRACE"));
@@ -644,9 +645,8 @@ public class MetalRenderBackend implements RenderBackend {
         if (passDescHandle == 0) {
             throw new RuntimeException("mtlNewRenderPassDescriptor returned NULL");
         }
-        long encoder = 0L;
+        long encoder;
         boolean borrowed = false;
-        boolean detached = false;
         try {
             long colorHandle = 0L;
             long depthHandle = 0L;
@@ -737,38 +737,32 @@ public class MetalRenderBackend implements RenderBackend {
             if (ENC_TRACE) {
                 logEncoderOp("beginRenderPass borrowRequest color=0x" + Long.toHexString(colorHandle));
             }
-            // Prefer a DETACHED encoder: one Metallum tracks nothing about, so its pass and encoder
-            // teardown cannot end it early or clear into it, and Voxy ends it itself.
+            // Use Voxy's OWN encoder, created from the pass descriptor -- Metal's supported
+            // pattern for sequential encoders on one command buffer. Do NOT borrow Metallum's.
             //
-            // Why not the shared one: acquireRenderEncoder registers the encoder as Metallum's
-            // currentEncoder but leaves currentRenderPass pointing at whatever pass ran last, so the
-            // frame's teardown -- submitRenderPass() via presentTextureToDrawable, and
-            // materializePendingClear() through renderCommandEncoder -- can act on the wrong pass and
-            // issue a clear into this encoder or end it. Bisected with VOXY_LOD_TRIANGLE: a magenta
-            // triangle drawn through the shared encoder at Voxy's LOD pass produced 0.00%, while the
-            // same triangle drawn through an encoder created directly from the command buffer -- the
-            // P0 probe's pattern, which this now exposes as an API -- produced 17.13%.
-            // VOXY_LOD_DETACHED_ENCODER=0 restores the shared-encoder path for A/B.
-            if (DETACHED_ENCODER) {
-                long detachedHandle = MetallumBridge.beginDetachedRenderEncoder(
-                        colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight());
-                if (ENC_TRACE) {
-                    logEncoderOp("beginRenderPass detachedResult=0x" + Long.toHexString(detachedHandle));
-                }
-                if (detachedHandle != 0L) {
-                    encoder = detachedHandle;
-                    detached = true;
-                }
-            }
-            long shared = encoder != 0L ? 0L : MetallumBridge.acquireRenderEncoder(
-                    colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight());
-            if (ENC_TRACE && !detached) {
+            // The borrow path registers its encoder as Metallum's currentEncoder but leaves
+            // currentRenderPass pointing at whatever pass ran last, so the frame's teardown
+            // (presentTextureToDrawable -> flushPendingClear -> submitRenderPass ->
+            // materializePendingClear) can act on the wrong pass and end the borrowed encoder early
+            // or clear into it. Bisected with VOXY_LOD_TRIANGLE: a magenta triangle through the
+            // borrowed encoder produced 0.00%, through a directly-created one 17.13%.
+            //
+            // This is also why every other Voxy pass already works: the chunk-bound pass, the depth
+            // export and the bakery all own their encoders and end them. Only the LOD pass borrowed.
+            // A detached-encoder variant was tried and reverted: an encoder Metallum cannot see lets
+            // it open a second one on the same command buffer, which asserts ("A command encoder is
+            // already encoding to this command buffer"). Borrowing badly is worse than not
+            // borrowing.
+            // VOXY_LOD_BORROW_ENCODER=1 restores the borrow path for a controlled A/B.
+            long shared = BORROW_ENCODER ? MetallumBridge.acquireRenderEncoder(
+                    colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight()) : 0L;
+            if (ENC_TRACE) {
                 logEncoderOp("beginRenderPass borrowResult=0x" + Long.toHexString(shared));
             }
-            if (encoder == 0L && shared != 0L) {
+            if (shared != 0L) {
                 encoder = shared;
                 borrowed = true;
-            } else if (encoder == 0L) {
+            } else {
                 this.endForeignEncoderIfNeeded();
                 if (ENC_TRACE) {
                     logEncoderOp("beginRenderPass OWN newRenderEncoder");
@@ -796,7 +790,7 @@ public class MetalRenderBackend implements RenderBackend {
             MetalNative.mtlRelease(passDescHandle);
         }
 
-        MetalRenderEncoder result = new MetalRenderEncoder(encoder, borrowed, detached);
+        MetalRenderEncoder result = new MetalRenderEncoder(encoder, borrowed);
         this.lastRenderEncoder = result;
         return result;
     }
