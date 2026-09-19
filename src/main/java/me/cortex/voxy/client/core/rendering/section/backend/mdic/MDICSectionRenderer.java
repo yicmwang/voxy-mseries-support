@@ -1101,9 +1101,41 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return upperBound;
     }
 
+    /** Opt-in command dump ({@code VOXY_CMD_TRACE=1}). */
+    static final boolean CMD_TRACE = "1".equals(System.getenv("VOXY_CMD_TRACE"));
+    private static long cmdTraceCount = 0;
+
+    /**
+     * The LOD pass issues ~869 indirect draws per frame and contributes ZERO pixels (frames are
+     * pixel-identical with Voxy enabled and with {@code VOXY_FORCE_METAL=0}). The draw COUNT being
+     * non-zero only says how many commands were written, not that any of them rasterize: a command
+     * whose indexCount is 0 is a no-op. Dump the first few so "empty commands" and "valid commands
+     * that get clipped or written somewhere invisible" are distinguishable.
+     */
+    private static void traceCommands(String tag, MDICViewport viewport, long indirectOffset, int maxDrawCount) {
+        if (!CMD_TRACE || (cmdTraceCount++ % 600) != 1) return;
+        if (!(viewport.drawCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) return;
+        long p = mb.getContentsPtr();
+        if (p == 0) return;
+        int n = Math.min(Math.max(maxDrawCount, 0), 4);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            long a = p + indirectOffset + (long) i * 20L;
+            sb.append(String.format(java.util.Locale.ROOT,
+                    " [#%d indexCount=%d instanceCount=%d firstIndex=%d baseVertex=%d baseInstance=%d]",
+                    i, org.lwjgl.system.MemoryUtil.memGetInt(a),
+                    org.lwjgl.system.MemoryUtil.memGetInt(a + 4),
+                    org.lwjgl.system.MemoryUtil.memGetInt(a + 8),
+                    org.lwjgl.system.MemoryUtil.memGetInt(a + 12),
+                    org.lwjgl.system.MemoryUtil.memGetInt(a + 16)));
+        }
+        me.cortex.voxy.common.Logger.info("[Metal-CMD " + tag + "] maxDrawCount=" + maxDrawCount + sb);
+    }
+
     private void renderTerrainMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,
                                     me.cortex.voxy.client.core.gpu.IGpuPipeline pipeline,
                                     MDICViewport viewport, long indirectOffset, int maxDrawCount) {
+        traceCommands("off=" + indirectOffset, viewport, indirectOffset, maxDrawCount);
         encoder.setPipeline(pipeline);
         // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
         // SSBO post-chunk-3 SceneUniform flip.

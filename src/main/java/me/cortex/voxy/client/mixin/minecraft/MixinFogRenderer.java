@@ -34,11 +34,39 @@ public class MixinFogRenderer {
         FogData data = cir.getReturnValue();
         if (data == null) return;
 
+        // Diagnostic (VOXY_FOG_TRACE=1): the fog-disable above was observed NOT to take effect --
+        // frames captured with Voxy enabled were pixel-identical to frames captured with Voxy
+        // disabled (VOXY_FORCE_METAL=0), and with Voxy disabled this mixin returns early, so the
+        // fog must have been active in both. Either this injection never runs, or it runs and
+        // vanilla ignores the fields it writes. Log both the incoming values and whether we were
+        // reached at all, so those two cases are distinguishable.
+        final boolean trace = "1".equals(System.getenv("VOXY_FOG_TRACE"));
+        if (trace && (FOG_TRACE_COUNT++ % 600) == 0) {
+            me.cortex.voxy.common.Logger.info(String.format(java.util.Locale.ROOT,
+                    "[FogTrace n=%d] IN  env=[%.1f..%.1f] renderDist=[%.1f..%.1f] skyEnd=%.1f cloudEnd=%.1f",
+                    FOG_TRACE_COUNT - 1, data.environmentalStart, data.environmentalEnd,
+                    data.renderDistanceStart, data.renderDistanceEnd, data.skyEnd, data.cloudEnd));
+        }
+
         data.renderDistanceStart = 999999999;
         data.renderDistanceEnd = 999999999;
         if (!VoxyConfig.CONFIG.useEnvironmentalFog) {
             data.environmentalStart = 99999999;
             data.environmentalEnd = 99999999;
         }
+        // Vanilla still fades sky and clouds on their own ranges; Voxy owns the far field, so
+        // push those out too. Without this the horizon keeps a sky-coloured band that reads as
+        // the LOD "fading into transparency".
+        data.skyEnd = 99999999;
+        data.cloudEnd = 99999999;
+
+        if (trace && ((FOG_TRACE_COUNT - 1) % 600) == 0) {
+            me.cortex.voxy.common.Logger.info(String.format(java.util.Locale.ROOT,
+                    "[FogTrace n=%d] OUT env=[%.1f..%.1f] renderDist=[%.1f..%.1f] skyEnd=%.1f cloudEnd=%.1f",
+                    FOG_TRACE_COUNT - 1, data.environmentalStart, data.environmentalEnd,
+                    data.renderDistanceStart, data.renderDistanceEnd, data.skyEnd, data.cloudEnd));
+        }
     }
+
+    private static long FOG_TRACE_COUNT = 0;
 }
