@@ -808,19 +808,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private Matrix4f lodMvp(MDICViewport viewport) {
         var mat = new Matrix4f(viewport.MVP);
         mat.translate(-viewport.innerTranslation.x, -viewport.innerTranslation.y, -viewport.innerTranslation.z);
-        // Experiment (2026-05-26, VOXY_LOD_METAL_NDC=1): GL→Metal NDC-z remap.
-        // Extracted to MetalMvpUtil so the chunk-bound depth-mask pass
-        // (ChunkBoundRenderer.renderMetal) shares the exact same depth
-        // convention — quads.frag compares its gl_FragCoord.z against the
-        // mask's depths, so the two MVPs must remap identically.
-        if (MetalMvpUtil.METAL_NDC_REMAP && this.backend.getType() != BackendType.OPENGL) {
-            MetalMvpUtil.applyNdcRemap(mat);
-        } else if (MetalMvpUtil.REVERSE_Z_REMAP && this.backend.getType() != BackendType.OPENGL) {
-            // Metallum's frame depth is reverse-Z (near=1, far=0); see MetalMvpUtil.REVERSE_Z_REMAP.
-            // ChunkBoundRenderer applies the same remap so the bound mask's depths stay comparable
-            // with quads.frag's gl_FragCoord.z.
-            MetalMvpUtil.applyReverseZRemap(mat);
-        }
+        // No clip-space depth remap any more. The whole-frame path now runs vanilla's projection
+        // unchanged (see VoxyRenderSystem.computeProjectionMat), so the LOD's depth values are
+        // already in the frame's reverse-Z space; remapping here would push them out of it again and
+        // reintroduce exactly the mismatch the depth test depends on not having. On GL neither remap
+        // ever applied, so this block was non-GL-only and is simply gone.
         return mat;
     }
 

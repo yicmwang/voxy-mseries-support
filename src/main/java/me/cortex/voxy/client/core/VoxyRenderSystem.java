@@ -764,17 +764,32 @@ public class VoxyRenderSystem {
         // at short render distances the vanilla terrain doesnt end up covering the 16f near plane voxy uses
         // meaning that it explodes (due to near plane clipping).. _badly_ with the rastered culling being wrong in rare cases for the immediate
         // sections rendered after the vanilla render distance
+        // Whole-frame Metal: use vanilla's projection UNCHANGED.
+        //
+        // Voxy normally substitutes its own near/far so the LOD ring starts where the loaded chunks
+        // end. That changes the depth MAPPING -- and on this path Voxy draws into MC's own depth
+        // attachment, so a LOD fragment's gl_FragCoord.z and the depth MC's terrain already wrote
+        // are values in two different spaces. A depth test cannot occlude across a mismatched
+        // mapping: LOD passes GREATER_EQUAL almost everywhere and paints over vanilla terrain
+        // ("renders over everything"), while everything nearer than Voxy's 16-block near plane is
+        // clipped outright -- which is the plane the LOD refuses to appear in front of.
+        //
+        // Vanilla's own projection is reverse-Z with an infinite far plane, where depth = near/d and
+        // precision is near-uniform at ANY distance. The 16-block near plane's rationale was GL's
+        // [-1,1] depth against a 48000-block far, which does not apply here. Sharing vanilla's
+        // mapping is simpler AND the only way the depth test means anything.
+        //
+        // (This is also why upstream's depth path needs transformBlitDepth: it reprojects MC's depth
+        // through inverse(viewport.MVP) and a target transform precisely because the two projections
+        // differ. Sharing one projection removes the need for the transform entirely.)
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            return new Matrix4f(base);
+        }
+
         float nearVoxy = me.cortex.voxy.client.core.rendering.util.LodProjection.nearVoxy(
                 Minecraft.getInstance().options.renderDistance().get(),
                 VoxyClient.disableSodiumChunkRender());
-
-        // Built from the camera's own fov/aspect, NOT by cancelling vanilla's projection. The cancel
-        // (`base . P(0.05, rd*16)^-1 . P(nearVoxy, 48000)`) is exact only while `base` shares the
-        // GL depth convention it assumes. Under whole-frame Metal vanilla's matrix is reverse-Z with
-        // an infinite far plane, so the z rows do not cancel: the composition left the z row scaled
-        // by nearVoxy/0.05 = 320, and every LOD vertex landed outside Metal's z in [0, w] clip
-        // volume. x/y and w were untouched, so the frame looked plausible and every draw counter
-        // read healthy while no fragment ever reached the framebuffer.
         return me.cortex.voxy.client.core.rendering.util.LodProjection.compute(base, nearVoxy, 16 * 3000);
     }
 
