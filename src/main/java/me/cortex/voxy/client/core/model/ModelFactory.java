@@ -73,6 +73,15 @@ public class ModelFactory {
      * face, and the mesher is culling on garbage. This prints what was decided so that is a
      * measurement rather than an inference. {@code VOXY_BAKE_DUMP=1}.
      */
+    /**
+     * True when the bake's depth word is a coverage marker rather than real depth -- i.e. on every
+     * non-GL backend, where MetalViewCapture writes it from its pre-dilation snapshot. See the
+     * checkMode assignment in the model bake.
+     */
+    private static final boolean METAL_COVERAGE_MARKER =
+            me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                    != me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
+
     private static final boolean BAKE_DUMP = "1".equals(System.getenv("VOXY_BAKE_DUMP"));
     private static final java.util.Set<String> BAKE_DUMP_SEEN = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
@@ -490,7 +499,15 @@ public class ModelFactory {
         ChunkSectionLayer blockRenderLayer = layerFor(blockState);
 
 
-        int checkMode = blockRenderLayer==ChunkSectionLayer.SOLID?TextureUtils.WRITE_CHECK_STENCIL:TextureUtils.WRITE_CHECK_ALPHA;
+        // Which test decides "the model drew this pixel". On GL the depth word carries real depth
+        // and only SOLID blocks may use it. On Metal the depth word carries nothing but the
+        // coverage marker MetalViewCapture writes from its pre-dilation snapshot, and it is
+        // truthful for every layer -- while the ALPHA test is not, because the atlas dilation has
+        // already filled every empty texel by the time this runs. Reading alpha here is what made
+        // every model look like a full occluding cube; see the snapshot comment in
+        // MetalViewCapture.emitToStream.
+        int checkMode = (blockRenderLayer==ChunkSectionLayer.SOLID || METAL_COVERAGE_MARKER)
+                ?TextureUtils.WRITE_CHECK_STENCIL:TextureUtils.WRITE_CHECK_ALPHA;
 
 
 
@@ -700,7 +717,7 @@ public class ModelFactory {
 
             faceModelData |= ((!faceCoversFullBlock)&&blockRenderLayer != ChunkSectionLayer.TRANSLUCENT)?1<<23:0;//Alpha discard override, translucency doesnt have alpha discard
 
-            if (BAKE_DUMP && face == 0 && BAKE_DUMP_SEEN.size() < 24
+            if (BAKE_DUMP && face == 0 && BAKE_DUMP_SEEN.size() < 600
                     && BAKE_DUMP_SEEN.add(blockState.getBlock().getName().getString() + "/" + blockRenderLayer)) {
                 me.cortex.voxy.common.Logger.info(String.format(
                         "[Metal-BAKE-META] %s layer=%s checkMode=%d  offset=%.3f  writeCount=%d/%d  "
