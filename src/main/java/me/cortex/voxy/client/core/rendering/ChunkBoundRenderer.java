@@ -179,6 +179,11 @@ public class ChunkBoundRenderer {
         }
     }
 
+    /** Whether this section is currently in the mask — lets a caller skip removals that no-op. */
+    public boolean hasSection(long pos) {
+        return this.chunk2idx.containsKey(pos);
+    }
+
     public void removeSection(long pos) {
         if (!this.addQueue.remove(pos)) {
             this.remQueue.add(pos);

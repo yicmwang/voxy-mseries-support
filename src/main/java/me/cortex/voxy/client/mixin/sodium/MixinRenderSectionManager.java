@@ -46,37 +46,26 @@ public class MixinRenderSectionManager {
     }
 
     /**
-     * Feed the chunk-bound depth mask with the sections Sodium actually renders.
+     * Drop a section from the chunk-bound depth mask when Sodium unloads it.
      *
-     * <p>Nothing did this before. {@code ChunkBoundRenderer.addSection} / {@code mirrorAdd} had no
-     * caller anywhere, so {@code chunk2idx} stayed empty, {@code renderMetal}'s {@code count > 0}
-     * guard never opened, the mask pass issued no draw, and the mask kept the 0 it was cleared to.
-     * The test in quads.frag is {@code if (gl_FragCoord.z < voxyBoundDepth) discard;}, and
-     * {@code fragDepth < 0} is false for every fragment — so the mask discarded nothing, ever, and
-     * the LOD drew over the loaded chunks and wrote depth there, leaving Sodium's terrain to fail
-     * its depth test against it. That is "vanilla renders under the LOD".
+     * <p>Additions deliberately do NOT come from here. {@code onSectionAdded} fires when a chunk
+     * loads, for every section of its column including plain air, and a mask over air hides distant
+     * LOD that has nothing in front of it — the mask is a volume test, so an empty section is not a
+     * no-op. That mistake cost a run: the LOD's distant ring vanished behind 16³ boxes containing
+     * nothing. Sections enter the mask from the mesh upload instead, in
+     * {@link MixinRenderRegionManager}, which is the point at which a section actually acquires
+     * geometry.
      *
-     * <p>Both the static mirror and the live renderer are fed. The mirror is what a *future*
-     * ChunkBoundRenderer seeds from (a renderer reload builds a fresh one while Sodium's sections
-     * never re-transition); the live instance needs the incremental events because it only reads the
-     * mirror at construction.
+     * <p>Removal is guarded on membership: this fires for every section of an unloading chunk,
+     * including ones that were never built and so were never in the mask, and an unguarded removal
+     * would log a warning for each.
      */
-    @Inject(method = "onSectionAdded", at = @At("TAIL"))
-    private void voxy$boundMaskAdd(int x, int y, int z, CallbackInfo ci) {
-        long pos = me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.packSectionPos(x, y, z);
-        me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorAdd(pos);
-        VoxyRenderSystem vrs = IGetVoxyRenderSystem.getNullable();
-        if (vrs != null) {
-            vrs.chunkBoundRenderer.addSection(pos);
-        }
-    }
-
     @Inject(method = "onSectionRemoved", at = @At("TAIL"))
     private void voxy$boundMaskRemove(int x, int y, int z, CallbackInfo ci) {
         long pos = me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.packSectionPos(x, y, z);
         me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorRemove(pos);
         VoxyRenderSystem vrs = IGetVoxyRenderSystem.getNullable();
-        if (vrs != null) {
+        if (vrs != null && vrs.chunkBoundRenderer.hasSection(pos)) {
             vrs.chunkBoundRenderer.removeSection(pos);
         }
     }
