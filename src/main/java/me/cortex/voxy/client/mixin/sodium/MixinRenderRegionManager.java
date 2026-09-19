@@ -40,6 +40,21 @@ public class MixinRenderRegionManager {
      * sections never re-transition — and the live instance needs the incremental events because it
      * only reads the mirror at construction.
      */
+    /**
+     * Whether this section has anything to hide LOD behind — which is not the same question as
+     * {@link RenderSection#isBuilt()}.
+     *
+     * <p>{@code isBuilt()} means the build finished, and Sodium marks a section built even when it
+     * meshed to nothing. Using it as the mask predicate put every air section above the terrain into
+     * the mask, so each chunk column masked its full height and the LOD was discarded in the empty
+     * air above every chunk — visible as sky-coloured rectangles ringing each vanilla chunk, occluding
+     * LOD that had nothing in front of it. {@code getLastMeshResultSize()} is 0 for a section that
+     * produced no geometry, which is the question the mask actually needs answered.
+     */
+    private static boolean hasGeometry(RenderSection section) {
+        return section.isBuilt() && section.getLastMeshResultSize() > 0;
+    }
+
     @Inject(method = "uploadResults(Ljava/util/Collection;Lnet/caffeinemc/mods/sodium/client/render/chunk/UniformBufferManager;)V",
             at = @At("HEAD"), remap = false)
     private void voxy$feedBoundMask(Collection<BuilderTaskOutput> outputs, UniformBufferManager ubm, CallbackInfo ci) {
@@ -49,7 +64,7 @@ public class MixinRenderRegionManager {
             if (section == null) continue;
             long pos = ChunkBoundRenderer.packSectionPos(
                     section.getPosition().x(), section.getPosition().y(), section.getPosition().z());
-            if (section.isBuilt()) {
+            if (hasGeometry(section)) {
                 ChunkBoundRenderer.mirrorAdd(pos);
                 // Guarded like the removal: a rebuilt section is re-uploaded every time its mesh
                 // changes, and an unguarded add would make _addPos log "Chunk already in map" on
