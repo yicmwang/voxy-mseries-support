@@ -110,6 +110,16 @@ loom {
             if (System.getenv("VOXY_QUICKPLAY") != null) {
                 programArgs("--quickPlaySingleplayer", System.getenv("VOXY_QUICKPLAY"))
             }
+            // The whole point of this fork is the Metal path, and VoxyClient's backend gate
+            // DISABLES Voxy entirely when this flag is absent on a non-GL backend. A dev client
+            // launched without it renders vanilla + Sodium, logs "[M9 TRANSITIONAL] ... disabled"
+            // and then "Voxy is unsupported on your system" — which reads like the mod is broken,
+            // not like a flag is missing, and is indistinguishable from a real failure at a glance.
+            // Default it ON for the dev client so a plain `runClient` exercises the real path.
+            // VOXY_FORCE_METAL=0 opts back out (e.g. to capture a vanilla-only baseline).
+            if (!"0".equals(System.getenv("VOXY_FORCE_METAL"))) {
+                property("voxy.forceMetal", "true")
+            }
             // Encoder/buffer tracing for the foreign-renderer sharing work: Metal's "already
             // encoding" assertions carry no Java stack, so attribution needs the trail.
             if (System.getenv("VOXY_INTEROP_TRACE") != null) {
