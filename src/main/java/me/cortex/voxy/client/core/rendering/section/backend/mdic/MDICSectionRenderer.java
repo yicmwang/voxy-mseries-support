@@ -1185,8 +1185,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     }
 
     /** Opt-in encoder test ({@code VOXY_LOD_TRIANGLE=1}); see {@link #drawDebugTriangle}. */
-    private static final boolean DEBUG_TRIANGLE = "1".equals(System.getenv("VOXY_LOD_TRIANGLE"));
-    private static final boolean DEBUG_TRIANGLE_PROBE = "probe".equals(System.getenv("VOXY_LOD_TRIANGLE"));
+    private static final String DEBUG_TRIANGLE_MODE = System.getenv("VOXY_LOD_TRIANGLE");
+    /** Voxy's own createGraphicsPipeline pipeline, drawn through Voxy's (detached) encoder. */
+    private static final boolean DEBUG_TRIANGLE =
+            "1".equals(DEBUG_TRIANGLE_MODE) || "both".equals(DEBUG_TRIANGLE_MODE);
+    /** The P0 probe's MSL pipeline, drawn through an encoder made directly from the command buffer. */
+    private static final boolean DEBUG_TRIANGLE_PROBE =
+            "probe".equals(DEBUG_TRIANGLE_MODE) || "both".equals(DEBUG_TRIANGLE_MODE);
     private static int probeTriLogged;
     private me.cortex.voxy.client.core.gpu.IGpuPipeline debugTrianglePipeline;
 
@@ -1244,7 +1249,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                         + " color=0x" + Long.toHexString(colorHandle)
                         + " depth=0x" + Long.toHexString(depthHandle));
             }
-            return;
+            if (!DEBUG_TRIANGLE) {
+                return;   // "both": fall through and also draw with Voxy's own pipeline
+            }
         }
         if (!DEBUG_TRIANGLE) {
             return;
