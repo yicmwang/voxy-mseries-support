@@ -373,12 +373,37 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * post-opaque SSAO compute, and {@link #finish}. The compute pipeline
      * (HOT traversal + buildDrawCalls' 5 prepasses) runs in full.
      */
+    /**
+     * Per-phase frame timings, in nanoseconds, reported every 600 frames.
+     *
+     * <p>Added because the frame rate told us nothing about *where* the time goes, and the obvious
+     * suspects — draw count, the per-draw CPU loop, the mid-frame submit — need separating before
+     * any of them is worth optimising. Splits the frame into: preparation (traversal + the draw-call
+     * prepasses), the split submit (which blocks on GPU completion), the encode of the LOD pass, and
+     * the final submit.
+     */
+    private long perfPrep, perfSplit, perfEncode, perfSubmit;
+    private int perfFrames;
+
+    private void perfReport() {
+        if (++this.perfFrames < 600) return;
+        double n = this.perfFrames;
+        me.cortex.voxy.common.Logger.info(String.format(
+                "[Metal-PERF] ms/frame  prep=%.2f  split=%.2f  encode=%.2f  submit=%.2f  total=%.2f",
+                this.perfPrep / n / 1e6, this.perfSplit / n / 1e6,
+                this.perfEncode / n / 1e6, this.perfSubmit / n / 1e6,
+                (this.perfPrep + this.perfSplit + this.perfEncode + this.perfSubmit) / n / 1e6));
+        this.perfPrep = this.perfSplit = this.perfEncode = this.perfSubmit = 0;
+        this.perfFrames = 0;
+    }
+
     private void runPipelineMetal(Viewport<?> viewport, int sourceFrameBuffer) {
         int fbw = viewport.width;
         int fbh = viewport.height;
         if (fbw <= 0 || fbh <= 0) return;
         var backend = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get();
         if (!(backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mrb)) return;
+        final long perfT0 = System.nanoTime();
 
         // 1) Allocate the IOSurface bridge sized to MC's framebuffer. The
         //    bridge is the cross-context handle: Metal renders into the
@@ -438,6 +463,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         @SuppressWarnings({"rawtypes", "unchecked"})
         AbstractSectionRenderer rs = (AbstractSectionRenderer) this.sectionRenderer;
         rs.buildDrawCalls(viewport);
+        final long perfT1 = System.nanoTime();
 
         // M13 2026-05-14 baseInstance workaround: flush + wait so the compute
         // prepasses (commandGen writes drawCallBuffer's baseInstance field)
@@ -447,6 +473,9 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // indirectBuffer: doesn't propagate it natively). Without this
         // submit() the CPU sees stale data from the prior frame.
         backend.submit();
+        final long perfT2 = System.nanoTime();
+        this.perfPrep += perfT1 - perfT0;   // traversal + draw-call prepasses
+        this.perfSplit += perfT2 - perfT1;  // split submit; includes the GPU wait
 
         // M13 2026-05-15 Layer B diagnostic — read back the renderList and
         // drawCountCallBuffer values so we can see exactly how many sections
@@ -654,7 +683,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // SAME command buffer as the LOD pass (encoder order = the barrier),
         // so the submit() below covers it — no extra waits. Bridge alloc
         // mirrors metalBridge's resize discipline above.
+        final long perfT3 = System.nanoTime();
+        this.perfEncode += perfT3 - perfT2;  // encoding the LOD pass (CPU side)
         backend.submit();
+        this.perfSubmit += System.nanoTime() - perfT3;
+        this.perfReport();
         this.metalFrame++;
 
         // [Metal-VXPLANES] one-shot CPU read-back of the material g-buffer planes
