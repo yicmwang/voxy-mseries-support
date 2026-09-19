@@ -340,35 +340,17 @@ public class ChunkBoundRenderer {
 
         this.uploadSceneUniform(viewport, true);
 
-        int count = this.chunk2idx.size();
-        try (RenderEncoder encoder = backend.beginRenderPass(boundDepthPass(viewport))) {
-            if (count > 0) {
-                encoder.setPipeline(this.rasterPipeline);
-                // Same Y orientation as the LOD pass that SAMPLES this mask -- not a free choice.
-                // quads.frag indexes it with
-                // `boundDepths[gl_FragCoord.y * boundWidth + uint(gl_FragCoord.x)]`, so a row here
-                // means the same screen row there only if both passes were rasterized with the same
-                // viewport height sign. This pass used to hardcode the unflipped form while
-                // AbstractRenderPipeline's LOD pass flips, which mirrored the mask vertically:
-                // fragments in the lower screen read rows from the upper screen, so the LOD was
-                // discarded where the chunk volume is NOT and drew over vanilla where it IS -- and
-                // both wrong regions slid across the viewport as the chunk volume's screen footprint
-                // moved with the camera.
-                if (AbstractRenderPipeline.viewportFlipY()) {
-                    encoder.setViewport(0, viewport.height, viewport.width, -viewport.height, 0, 1);
-                } else {
-                    encoder.setViewport(0, 0, viewport.width, viewport.height, 0, 1);
-                }
-                encoder.setBuffer(SCENE_UNIFORM_BINDING, this.uniformBuffer, 0);
-                encoder.setBuffer(CHUNK_POS_BINDING, this.chunkPosBuffer, 0);
-                encoder.bindIndexBuffer(SharedIndexBuffer.INSTANCE_BB_SHORT.getBuffer(),
-                        RenderEncoder.INDEX_TYPE_UINT16, 0);
-                encoder.drawIndexed(RenderEncoder.PRIMITIVE_TRIANGLES,
-                        6 * 2 * 3 * 32, (count + 31) / 32, 0, 0, 0);
-            }
-        }
-
-        exportBoundMaskMetal(viewport, backend);
+        // The AABB rasterization that used to happen here is GONE. It masked a section's whole 16^3
+        // volume, so the empty air inside a section occluded LOD that had nothing in front of it --
+        // sky-coloured rectangles ringing each vanilla chunk. That is a granularity problem, not a
+        // membership one: no choice of which sections enter a box mask fixes it. The mask now comes
+        // from MC's frame depth, which is per-pixel.
+        //
+        // The queue drain above, chunk2idx, rasterPipeline, chunkPosBuffer, uniformBuffer and
+        // boundDepthPass are consequently unused -- they existed only to feed that raster. Left in
+        // place for one revision so the box path can be restored cheaply for an A/B; delete them
+        // once the depth mask has covered the cases the box path was written for.
+        exportBoundMaskMetal(viewport, backend, this.pipeline);
     }
 
     /**
@@ -382,7 +364,7 @@ public class ChunkBoundRenderer {
         try (RenderEncoder ignored = RenderBackendFactory.get().beginRenderPass(boundDepthPass(viewport))) {
             // no draws — the CLEAR load action does the fill
         }
-        exportBoundMaskMetal(viewport, RenderBackendFactory.get());
+        exportBoundMaskMetal(viewport, RenderBackendFactory.get(), this.pipeline);
     }
 
     /**
@@ -398,7 +380,8 @@ public class ChunkBoundRenderer {
      * LOD pass, so the LOD fragments read this frame's mask. Layout: uint
      * width + 12 pad bytes, floats at offset 16.
      */
-    private static void exportBoundMaskMetal(Viewport<?> viewport, RenderBackend backend) {
+    private static void exportBoundMaskMetal(Viewport<?> viewport, RenderBackend backend,
+                                             AbstractRenderPipeline pipeline) {
         if (!(backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mrb)) {
             return;
         }
@@ -414,8 +397,12 @@ public class ChunkBoundRenderer {
                     ((me.cortex.voxy.client.core.metal.MetalBuffer) buf).getContentsPtr(),
                     viewport.width);
         }
-        mrb.copyTextureToBuffer(viewport.depthBoundingBuffer.getDepthTex(), buf,
-                viewport.width, viewport.height, 16);
+        // MC's frame depth, not a rasterized chunk AABB: per-pixel, and already populated because
+        // Voxy's hook is Sodium's CUTOUT pass -- SOLID and CUTOUT_MIPPED have drawn by then. The
+        // depth-format texture is blitted into a plain buffer rather than sampled directly, because
+        // a depth texture read through the texture2d<float> declaration SPIRV-Cross emits for
+        // sampler2D silently returns zeros on Metal (round 18/20).
+        mrb.copyTextureToBuffer(pipeline.frameDepth(), buf, viewport.width, viewport.height, 16);
     }
 
     private static RenderPassDesc boundDepthPass(Viewport<?> viewport) {

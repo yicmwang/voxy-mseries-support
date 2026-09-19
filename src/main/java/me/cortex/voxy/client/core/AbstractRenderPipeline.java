@@ -154,6 +154,26 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     public static boolean viewportFlipY() {
         return FLIP_Y;
     }
+
+    /**
+     * MC's frame depth attachment as an {@code IGpuTexture} — the per-pixel vanilla terrain depth.
+     *
+     * <p>This is the correct source for the chunk-bound mask and replaces rasterizing loaded-chunk
+     * AABBs into a depth buffer. A box mask is chunk-granular: it hides LOD for a section's whole
+     * 16³ volume, so the empty air inside a section occludes LOD that has nothing in front of it,
+     * which shows as sky-coloured rectangles ringing each vanilla chunk. No choice of *which*
+     * sections enter a box mask fixes that, because the granularity is the problem.
+     *
+     * <p>Real terrain depth is available at Voxy's draw point: the hook is Sodium's CUTOUT pass, by
+     * which time SOLID and CUTOUT_MIPPED have already drawn into this same attachment.
+     */
+    public me.cortex.voxy.client.core.metal.MetallumAttachmentTexture frameDepth() {
+        if (this.metallumDepth == null) {
+            this.metallumDepth = me.cortex.voxy.client.core.metal.MetallumAttachmentTexture.depth();
+        }
+        this.metallumDepth.refresh();
+        return this.metallumDepth;
+    }
     /** Opt-in attachment-identity trace ({@code VOXY_ATTACH_TRACE=1}). */
     private static long attachTraceCount = 0;
 
