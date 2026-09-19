@@ -488,8 +488,22 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                             mipBias = 0.0f;
                         }
                     }
-                    String maxLod = String.format(java.util.Locale.ROOT, "%.1f",
-                            (float) (me.cortex.voxy.client.core.model.ModelFactory.LAYERS - 1));
+                    // VOXY_ATLAS_MAX_LOD_OVERRIDE=<n>: cap the atlas mip the LOD may sample, so the
+                    // level that goes black can be found by bisection instead of by argument. The
+                    // CPU-side atlas is verified good at every level (VOXY_ATLAS_DUMP shows level 3
+                    // holding the same colour and alpha as level 0 for Dirt/Stone/Grass Block/Sand),
+                    // so if a level is black on screen the fault is between that buffer and the
+                    // sampler, not in MipGen.
+                    int maxLodLevel = me.cortex.voxy.client.core.model.ModelFactory.LAYERS - 1;
+                    String maxLodOverride = System.getenv("VOXY_ATLAS_MAX_LOD_OVERRIDE");
+                    if (maxLodOverride != null && !maxLodOverride.isBlank()) {
+                        try {
+                            maxLodLevel = Math.max(0, Integer.parseInt(maxLodOverride.trim()));
+                        } catch (NumberFormatException e) {
+                            Logger.warn("VOXY_ATLAS_MAX_LOD_OVERRIDE is not an integer: " + maxLodOverride);
+                        }
+                    }
+                    String maxLod = String.format(java.util.Locale.ROOT, "%.1f", (float) maxLodLevel);
                     String biasStr = String.format(java.util.Locale.ROOT, "%.4f", mipBias);
                     opaqueDefines.put("VOXY_LOD_DIST_MIP", "");
                     opaqueDefines.put("VOXY_ATLAS_MAX_LOD", maxLod);

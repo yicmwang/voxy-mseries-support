@@ -28,6 +28,28 @@ public class VoxelIngestService {
     public static final java.util.concurrent.atomic.AtomicLong DIAG_PROCESS_COUNT = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_RAW_INGEST_COUNT = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * Fill an all-air, no-light-layer section with air at FULL SKY instead of zero
+     * ({@code VOXY_AIR_SECTION_SKY_LIGHT=1}).
+     *
+     * <p><b>Measured, and it does NOT fix the black.</b> The reasoning was sound: an absent sky layer
+     * is, per MC's own {@code SkyLightSectionStorage}, the uniformly-fully-lit case, so storing zero
+     * gives every air voxel above the terrain a light of 0, and the surface face of every column takes
+     * its light from exactly that voxel. Switching it on leaves the camera-independent counts where
+     * they were, though — {@code [Metal-DARKSRC]} dark-from-air 11,358,933 -> 11,522,942 and
+     * {@code [Metal-LITAUD] zeroLight} 43.50% -> 42.92% at equal section counts. So the air those dark
+     * faces read is NOT in these sections; it is inside partially-solid sections, where
+     * {@link #lightingSupplier} already supplies it.
+     *
+     * <p>Kept as an opt-in rather than deleted because the earlier attempt at it was reverted on a
+     * reading (~10-20% dark to 75-83%) that this round showed to be untrustworthy — an unpinned camera
+     * and a bake whose metadata was wrong. This is that same change measured properly. It is a real
+     * latent bug for fully-lit open-sky sections on its own merits, but it is not the splotches. Off by
+     * default.
+     */
+    private static final boolean AIR_SECTION_SKY_LIGHT =
+            "1".equals(System.getenv("VOXY_AIR_SECTION_SKY_LIGHT"));
+
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
     private final Service service;
     private record IngestSection(int cx, int cy, int cz, WorldEngine world, LevelChunkSection section, DataLayer blockLight, DataLayer skyLight){}
@@ -46,11 +68,24 @@ public class VoxelIngestService {
         var vs = SECTION_CACHE.get().setPosition(task.cx, task.cy, task.cz);
 
         if (section.hasOnlyAir() && task.blockLight==null && task.skyLight==null) {//If the chunk section has lighting data, propagate it
-            // TRIED AND REVERTED (2026-09-19): filling this with air at sky 15 instead of plain
-            // zero, on the theory that an absent sky layer means the section is open sky. It made
-            // the frame dramatically worse -- LOD-band darkness went from ~10-20% to 75-83% and
-            // stayed there. Left as zero, which is what upstream does.
-            WorldUpdater.insertUpdate(task.world, vs.zero());
+            // An all-air section whose sky layer is ABSENT is, per MC's own SkyLightSectionStorage, a
+            // section that is uniformly fully sky-lit -- it stores no DataLayer precisely because every
+            // cell is 15, so storing zero here is wrong on its own terms. It is NOT the black splotches
+            // though: with VOXY_AIR_SECTION_SKY_LIGHT=1 the camera-independent counts do not move
+            // (dark-from-air 11,358,933 -> 11,522,942). See the gate's javadoc.
+            boolean skyLitAir = AIR_SECTION_SKY_LIGHT;
+            if (skyLitAir) {
+                var lit = vs.zero();
+                long airAtFullSky = me.cortex.voxy.common.world.other.Mapper.airWithLight(0x0F);
+                // The whole array, not just the 16^3 level-0 block: a VoxelizedSection also carries the
+                // already-mipped 8^3/4^3/2^3/1 levels, and this branch skips mipSection(), so anything
+                // left at zero is what a coarser LOD cell reads. Filling only level 0 would leave the
+                // black at distance while fixing it up close.
+                java.util.Arrays.fill(lit.section, airAtFullSky);
+                WorldUpdater.insertUpdate(task.world, lit);
+            } else {
+                WorldUpdater.insertUpdate(task.world, vs.zero());
+            }
         } else {
             VoxelizedSection csec = WorldConversionFactory.convert(
                     SECTION_CACHE.get(),

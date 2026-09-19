@@ -434,9 +434,39 @@ public class RenderDataFactory {
     public static final java.util.concurrent.atomic.AtomicLong DIAG_CULL_SAME = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_CULL_FULLY_OPAQUE = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * Of the meshed faces carrying light 0, how many took it from an AIR neighbour and how many from a
+     * SOLID one, counted over BOTH meshing paths.
+     *
+     * <p>This is the split that names the fault. Light does not propagate into a solid block, so a face
+     * reading 0 from a solid neighbour is legitimately black — but a surface face's neighbour is air,
+     * and an air cell carries the sky light directly, so a face reading 0 from an air cell means the
+     * mesher is reading the wrong cell or the stored light is missing. `[Metal-VOXEL2]` says the
+     * ingest-side air above ground is never dark, so those two cannot both be true and the count says
+     * which side is wrong.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_DARK_FROM_AIR = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_DARK_FROM_SOLID = new java.util.concurrent.atomic.AtomicLong();
+
     private static void auditFace(long lightBits) {
         DIAG_ALL_FACES.incrementAndGet();
         if (lightBits == 0) DIAG_ALL_DARK.incrementAndGet();
+    }
+
+    /**
+     * Count a face's light, splitting the zero cases by what the neighbour cell is. {@code
+     * neighbourModelWord} is the neighbouring cell's packed long, whose bits 26..41 hold the block id —
+     * zero there means air.
+     */
+    private static void auditFace(long lightBits, long neighbourModelWord) {
+        auditFace(lightBits);
+        if (lightBits == 0) {
+            if (((neighbourModelWord >>> 26) & 0xFFFFL) == 0) {
+                DIAG_ALL_DARK_FROM_AIR.incrementAndGet();
+            } else {
+                DIAG_ALL_DARK_FROM_SOLID.incrementAndGet();
+            }
+        }
     }
 
     /**
@@ -476,7 +506,7 @@ public class RenderDataFactory {
                     }
                 }
             }
-            auditFace(light);
+            auditFace(light, neighborQuad);
             mesher.putNext((long) (face&1) |
                     (quad&~LM) | light);
         } else {
@@ -541,7 +571,7 @@ public class RenderDataFactory {
                             }
                         }
 
-                        auditFace(nextModel&LM);
+                        auditFace(nextModel&LM, nextModel);
                         this.blockMesher.putNext(((long) facingForward) |//Facing
                                 (selfModel&~LM) |
                                 (nextModel&LM)//Apply lighting

@@ -805,6 +805,12 @@ public class ModelFactory {
 
         MipGen.putTextures(darkenedTinting, textureData, uploadResult.texture);
 
+        if (ATLAS_DUMP
+                && (BAKE_DUMP_ONLY.isEmpty()
+                        || BAKE_DUMP_ONLY.contains(blockState.getBlock().getName().getString()))) {
+            dumpAtlasLevels(blockState, darkenedTinting, uploadResult.texture.address);
+        }
+
         //glGenerateTextureMipmap(this.textures.id);
 
         //Set the mapping at the very end
@@ -1091,6 +1097,55 @@ public class ModelFactory {
             }
         }
     }
+
+    /**
+     * Read back what {@link MipGen} actually put in the block-model atlas, per mip level and per face
+     * cell ({@code VOXY_ATLAS_DUMP=1}, filtered by {@code VOXY_BAKE_ONLY}).
+     *
+     * <p>This exists because the black LOD splotches are caused by the LOD sampling this atlas at a
+     * distance-selected mip: forcing that sampler to mip 0 with {@code VOXY_LOD_MIP_BIAS=-8} takes the
+     * frame from 9.54% black to 1.66% black under a pinned camera, so the high mips here render dark
+     * and/or transparent for terrain. Everything before this point is inference about why. The atlas
+     * level sizes follow {@link MipGen#putTextures}: level L is (48>>L) x (32>>L) RGBA, laid out
+     * contiguously, so each of the six face cells at level 3 is a single 2x2 block of texels.
+     */
+    private static void dumpAtlasLevels(BlockState blockState, boolean darkened, long atlasAddr) {
+        var sb = new StringBuilder(String.format(
+                "[Metal-ATLAS] %s darkened=%s", blockState.getBlock().getName().getString(), darkened));
+        int offset = 0;
+        int w = MODEL_TEXTURE_SIZE * 3;
+        for (int level = 0; level < LAYERS; level++) {
+            int h = (MODEL_TEXTURE_SIZE * 2) >> level;
+            int cw = MODEL_TEXTURE_SIZE >> level;
+            sb.append(String.format("%n    L%d (%dx%d):", level, w, h));
+            for (int cell = 0; cell < 6; cell++) {
+                // Cell (cell%3, cell/3) of the 3x2 face grid, at this level's cell size.
+                int x0 = (cell % 3) * cw;
+                int y0 = (cell / 3) * (MODEL_TEXTURE_SIZE >> level);
+                // Average alpha and colour over the cell, which is what the LOD samples at this level.
+                long r = 0, g = 0, b = 0, a = 0;
+                int n = 0;
+                for (int y = y0; y < y0 + (MODEL_TEXTURE_SIZE >> level); y++) {
+                    for (int x = x0; x < x0 + cw; x++) {
+                        int p = MemoryUtil.memGetInt(atlasAddr + offset + ((long) y * w + x) * 4L);
+                        r += p & 0xFF; g += (p >> 8) & 0xFF; b += (p >> 16) & 0xFF; a += (p >>> 24);
+                        n++;
+                    }
+                }
+                sb.append(String.format("  f%d=rgba(%d,%d,%d,%d)", cell,
+                        (int) (r / n), (int) (g / n), (int) (b / n), (int) (a / n)));
+            }
+            offset += w * h * 4;
+            w >>= 1;
+        }
+        me.cortex.voxy.common.Logger.info(sb.toString());
+    }
+
+    /**
+     * Dump the model atlas's per-level content ({@code VOXY_ATLAS_DUMP=1}). See
+     * {@link #dumpAtlasLevels}.
+     */
+    private static final boolean ATLAS_DUMP = "1".equals(System.getenv("VOXY_ATLAS_DUMP"));
 
     private static float[] computeModelDepth(ColourDepthTextureData[] textures, int checkMode) {
         float[] res = new float[6];
