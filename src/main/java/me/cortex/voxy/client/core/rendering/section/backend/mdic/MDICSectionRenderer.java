@@ -1019,10 +1019,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      *   <li>No {@code setupAndBindOpaque} — the render pass already targets
      *       the bridge; there's no separate FBO bind step.</li>
      *   <li>Lightmap (binding 1 sampler) is bound via
-     *       {@code LightMapHelper.bindMetal} — Voxy keeps a Shared-storage
-     *       mirror of MC's 16×16 lightmap and CPU-uploads it once per frame
-     *       (M13 chunk 2). Depth-bounding texture (binding 2 sampler) stays
-     *       unbound — it depends on M13 chunk 3's MC depth import.</li>
+     *       {@code LightMapHelper.bindMetal}, which binds MC's own lightmap
+     *       texture — it is already a Metallum texture, so there is no
+     *       mirror and no per-frame copy. Depth-bounding texture (binding 2
+     *       sampler) stays unbound — it depends on M13 chunk 3's MC depth
+     *       import.</li>
      *   <li>Model atlas texture + sampler (binding 0) also skipped —
      *       {@code ModelTextureBakery} is GL-only so the atlas is blank on
      *       Metal anyway; only the model + colour SSBOs feed shape data.</li>
@@ -1476,7 +1477,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         encoder.setBuffer(5, viewport.positionScratchBuffer, 0);
         // Texture / sampler binding 1 — MC's 16×16 RGBA8 lightmap, mirrored
         // into a Shared-storage Metal texture each frame (M13 chunk 2).
-        LightMapHelper.bindMetal(encoder, 1, viewport.frameId);
+        LightMapHelper.bindMetal(encoder, 1);
         // Texture / sampler binding 2 — the chunk-bound depth mask
         // (ChunkBoundRenderer.renderMetal rasterized it into
         // viewport.depthBoundingBuffer earlier this frame; same command
