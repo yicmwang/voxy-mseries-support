@@ -538,6 +538,9 @@ public class MetalRenderBackend implements RenderBackend {
      * minutes** (~1,800 lines/second of string building plus log I/O on the render thread), which
      * silently inflates every performance number measured while it was on.
      */
+    /** Per-pass attachment trace ({@code VOXY_ATTACH_TRACE=1}), independent of the verbose ENC_TRACE. */
+    private static long passTraceCount = 0;
+
     static final boolean ENC_TRACE = Boolean.getBoolean("voxy.encTrace")
             || "1".equals(System.getenv("VOXY_ENC_TRACE"));
 
@@ -664,10 +667,46 @@ public class MetalRenderBackend implements RenderBackend {
                         d.clearDepth(), d.level());
             }
 
+            // VOXY_ATTACH_TRACE=1: the ENC trace logs EVERY beginRenderPass, including depth-only
+            // passes (chunk-bound, depth export) that legitimately have no colour attachment, so a
+            // bare "color=0x0" line says nothing about the LOD pass. Log the attachment list as
+            // seen HERE, so the LOD pass (1 colour attachment, CLEAR or LOAD) is identifiable.
+            // Key on the LOD pass's signature -- BOTH a colour and a depth attachment -- because a
+            // "% 400" sample lands on depth-only helper passes and misses it entirely. The clear
+            // colour is printed too: with VOXY_LOD_DEBUG_CLEAR=1 it is magenta (1,0,1,1), so a line
+            // showing that proves the pass really is built against the frame's attachments.
+            int nColors = desc.colorAttachments().size();
+            if ("1".equals(System.getenv("VOXY_ATTACH_TRACE"))
+                    && nColors > 0 && desc.depthAttachment() != null
+                    && (passTraceCount++ % 60) == 1) {
+                var c0 = desc.colorAttachments().get(0);
+                me.cortex.voxy.common.Logger.info("[Metal-PASS] colors=" + nColors
+                        + " colorHandle=0x" + Long.toHexString(colorHandle)
+                        + " depthHandle=0x" + Long.toHexString(depthHandle)
+                        + " load0=" + c0.loadAction()
+                        + " clear=(" + c0.clearR() + "," + c0.clearG() + "," + c0.clearB() + "," + c0.clearA() + ")"
+                        + " size=" + desc.viewportWidth() + "x" + desc.viewportHeight());
+            }
+
             // Pending stream copies must land before the pass's encoder opens
             // (one encoder at a time per buffer; copies feed the pass anyway).
             this.endActiveBlitEncoder();
             this.ensureActiveCommandBuffer();
+            // Must be logged AFTER ensureActiveCommandBuffer, which is what decides whether Voxy
+            // encodes into Metallum's live frame buffer or keeps one of its own. If these differ,
+            // a perfectly-formed pass (correct attachments, correct clear) lands in a command
+            // buffer that is never the one presented -- which is indistinguishable from "the pass
+            // does nothing" everywhere else in the logs.
+            if ("1".equals(System.getenv("VOXY_ATTACH_TRACE")) && nColors > 0
+                    && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
+                long metallumBuf = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
+                me.cortex.voxy.common.Logger.info("[Metal-PASSBUF] active=0x"
+                        + Long.toHexString(this.activeCommandBuffer)
+                        + " metallum=0x" + Long.toHexString(metallumBuf)
+                        + " owns=" + this.ownsActiveCommandBuffer
+                        + (metallumBuf != 0 && this.activeCommandBuffer != metallumBuf
+                            ? "   <-- NOT the presented buffer" : ""));
+            }
 
             // Prefer BORROWING Metallum's encoder for these attachments. Asking Metal for a second
             // encoder on the same command buffer is illegal ("A command encoder is already encoding

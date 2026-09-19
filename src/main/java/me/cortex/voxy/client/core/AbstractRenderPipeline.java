@@ -132,6 +132,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
     private int diagCount;
+    /** Opt-in attachment-identity trace ({@code VOXY_ATTACH_TRACE=1}). */
+    private static long attachTraceCount = 0;
 
     /**
      * Blit destination for {@link #metalDepthTex} (w×h raw D32F floats) and
@@ -593,15 +595,49 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     + " useMetallumTarget=" + this.useMetallumTarget);
             me.cortex.voxy.client.core.metal.MetallumBridge.logRenderPassCounters();
         }
+        // VOXY_ATTACH_TRACE=1: compare the colour attachment Voxy renders the LOD into against
+        // Minecraft's actual main render target. The LOD pass provably runs (no "skipping the LOD
+        // pass" warning, useMetallumTarget=true) and provably carries valid geometry, yet a
+        // debug-CLEAR of that attachment to magenta never reaches the screen. If these two handles
+        // differ, the pass is drawing into a texture that is never composited -- which explains
+        // valid draws producing zero pixels without anything else being wrong.
+        if ("1".equals(System.getenv("VOXY_ATTACH_TRACE")) && (attachTraceCount++ % 600) == 1) {
+            long voxyColor = me.cortex.voxy.client.core.metal.MetallumBridge.colorAttachment();
+            long mcColor = 0;
+            try {
+                // mainRenderTarget() returns a RenderTarget, not a texture -- textureHandle needs
+                // the GpuTexture inside it, or it returns 0 and the comparison says nothing.
+                com.mojang.blaze3d.pipeline.RenderTarget rt =
+                        net.minecraft.client.Minecraft.getInstance().gameRenderer.mainRenderTarget();
+                if (rt != null && rt.getColorTexture() != null) {
+                    mcColor = me.cortex.voxy.client.core.metal.MetallumBridge.textureHandle(rt.getColorTexture());
+                }
+            } catch (Throwable ignored) {
+                // diagnostic only
+            }
+            me.cortex.voxy.common.Logger.info("[Metal-ATTACH] voxyColor=0x" + Long.toHexString(voxyColor)
+                    + "  mcMainTarget=0x" + Long.toHexString(mcColor)
+                    + (mcColor != 0 && voxyColor != mcColor ? "   <-- MISMATCH: LOD draws into a texture that is never composited" : ""));
+        }
+
         if (this.useMetallumTarget) {
             // Whole-frame Metal: draw straight into the frame's own attachments. LOAD on both,
             // not CLEAR -- at SOLID-head the frame already holds the sky and MC's cleared depth,
             // and Sodium's near terrain draws over the LODs afterwards. Voxy owns neither buffer,
             // so it must not clear them.
+            // VOXY_LOD_DEBUG_CLEAR=1 -- render-target test that does not depend on geometry
+            // at all. The LOD pass normally LOADs the frame's attachments (Voxy owns neither
+            // buffer). Clearing to magenta instead proves in one frame whether this pass writes
+            // to the attachments the screen is actually made of: a magenta frame means the
+            // target and pass are sound and the fault is downstream in the draws; an unchanged
+            // frame means the pass is writing somewhere that never reaches the screen.
+            boolean debugClear = "1".equals(System.getenv("VOXY_LOD_DEBUG_CLEAR"));
             passBuilder.addColorAttachment(this.metallumColor, 0,
-                            me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
+                            debugClear
+                                    ? me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.CLEAR
+                                    : me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
-                            0f, 0f, 0f, 0f)
+                            debugClear ? 1f : 0f, 0f, debugClear ? 1f : 0f, 1f)
                     .depthAttachment(this.metallumDepth, 0,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,

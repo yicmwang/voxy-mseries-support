@@ -200,6 +200,20 @@ public final class MetalRenderEncoder implements RenderEncoder {
             indirectContents = mb.getContentsPtr();
         }
         long perDrawScratchAddr = MemoryUtil.memAddress(this.perDrawScratch);
+        // VOXY_BI_TRACE=1: the push below is skipped entirely when indirectContents == 0, i.e.
+        // when the indirect buffer is not CPU-visible. In that case no setVertexBytes happens for
+        // ANY draw, every vertex reads the same stale voxyMetalDrawIndex, and the geometry
+        // collapses to one quad -- thousands of valid indices rasterizing nothing. Log whether
+        // the push actually happens and what it pushes.
+        if (BI_TRACE && (biTraceCount++ % 600) == 1) {
+            me.cortex.voxy.common.Logger.info("[Metal-BI] drawCount=" + drawCount
+                    + " indirectContents=0x" + Long.toHexString(indirectContents)
+                    + (indirectContents == 0
+                        ? "  <-- NOT CPU-VISIBLE: no setVertexBytes is issued for any draw"
+                        : "  first4=" + MemoryUtil.memGetInt(indirectContents + offset + 16)
+                          + "," + (drawCount > 1 ? MemoryUtil.memGetInt(indirectContents + offset + stride + 16) : -1)
+                          + "," + (drawCount > 2 ? MemoryUtil.memGetInt(indirectContents + offset + 2L * stride + 16) : -1)));
+        }
         for (int i = 0; i < drawCount; i++) {
             long cmdAddr = offset + (long) i * stride;
             if (indirectContents != 0) {
@@ -221,6 +235,10 @@ public final class MetalRenderEncoder implements RenderEncoder {
 
     /** Vertex-buffer binding slot used by the per-draw baseInstance workaround. */
     private static final int VOXY_METAL_PER_DRAW_UBO_BINDING = 6;
+
+    /** Opt-in per-draw baseInstance trace ({@code VOXY_BI_TRACE=1}). */
+    private static final boolean BI_TRACE = "1".equals(System.getenv("VOXY_BI_TRACE"));
+    private static long biTraceCount = 0;
 
     @Override
     public void drawIndexedIndirectCount(int primitiveType,
