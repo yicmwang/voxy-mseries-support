@@ -123,6 +123,15 @@ uvec3 makeRemainingAttributes(const in BlockModel model, const in Quad quad, uin
     attributes.z = addin|(face<<8);
     #endif
 
+    #ifdef VOXY_LOD_SHOW_LIGHT
+    // Diagnostic (VOXY_LOD_SHOW_LIGHT=1): `lighting` is the raw byte
+    // VoxelIngestService.getLightingSupplier wrote into the voxel -- sky in the low nibble,
+    // block in the high. Both the lightmap sample above and every downstream colour term are
+    // lossy, so carry the byte itself to the fragment stage in bits 24-31 of attributes.z,
+    // which no reader touches (addin owns 0-6, face 8-10, dist-mip 16-18).
+    attributes.z |= (lighting & 0xFFu) << 24;
+    #endif
+
     #ifdef VOXY_LOD_DIST_MIP
     // Distance-mip (Metal): the fragment stage needs the quad's LOD scale to
     // turn view distance into an atlas mip level. `addin` only carries the

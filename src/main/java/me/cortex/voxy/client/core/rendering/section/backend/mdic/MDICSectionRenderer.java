@@ -425,6 +425,17 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     translucentDefines.put("VOXY_LOD_FORCE_VERTEX", "");
                     Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_VERTEX active: LOD emits a fixed clip-space triangle");
                 }
+                // VOXY_LOD_SHOW_LIGHT=1 -- reads the LOD's own light data back out as colour:
+                // red = block light, green = sky light, both /15. Answers the one question the
+                // black-splotch investigation kept failing to settle by argument -- whether a
+                // dark patch is UNLIT geometry or ABSENT geometry -- because it bypasses every
+                // downstream term (atlas, tint, fog, brightness) and paints the raw byte that
+                // VoxelIngestService.getLightingSupplier produced for that voxel.
+                if ("1".equals(System.getenv("VOXY_LOD_SHOW_LIGHT"))) {
+                    opaqueDefines.put("VOXY_LOD_SHOW_LIGHT", "");
+                    translucentDefines.put("VOXY_LOD_SHOW_LIGHT", "");
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_SHOW_LIGHT active: LOD emits raw light as colour (R=block, G=sky)");
+                }
 
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
                 //   derivative-based mip. DEFAULT ON for Metal (2026-06-09): the

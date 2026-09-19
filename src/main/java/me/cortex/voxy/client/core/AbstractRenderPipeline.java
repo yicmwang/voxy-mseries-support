@@ -810,6 +810,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_TOP_LEVEL_ADD_COUNT.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_GEOMETRY_RESULT_COUNT.get()));
             Logger.info(String.format(
+                    "[Metal-LIGHT f=%d] noLight_chunk=%d  noLight_raw=%d  halfLight=%d  (ingestQ=%d)",
+                    this.metalFrame,
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_CHUNK.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_RAW.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_HALF.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get()));
+            Logger.info(String.format(
                     "[Metal-TICK  f=%d] tickWithResults=%d  tickWithUploads=%d  lastResultSectionCount=%d  basicSectionCount=%d",
                     this.metalFrame,
                     me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_TICK_WITH_RESULTS_COUNT.get(),
