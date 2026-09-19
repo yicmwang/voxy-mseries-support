@@ -8,6 +8,7 @@ import me.cortex.voxy.common.voxelization.VoxelizedSection;
 import me.cortex.voxy.common.voxelization.WorldConversionFactory;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldUpdater;
+import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.minecraft.core.SectionPos;
@@ -18,6 +19,7 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.lighting.LayerLightSectionStorage;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 public class VoxelIngestService {
@@ -44,6 +46,10 @@ public class VoxelIngestService {
         var vs = SECTION_CACHE.get().setPosition(task.cx, task.cy, task.cz);
 
         if (section.hasOnlyAir() && task.blockLight==null && task.skyLight==null) {//If the chunk section has lighting data, propagate it
+            // TRIED AND REVERTED (2026-09-19): filling this with air at sky 15 instead of plain
+            // zero, on the theory that an absent sky layer means the section is open sky. It made
+            // the frame dramatically worse -- LOD-band darkness went from ~10-20% to 75-83% and
+            // stayed there. Left as zero, which is what upstream does.
             WorldUpdater.insertUpdate(task.world, vs.zero());
         } else {
             VoxelizedSection csec = WorldConversionFactory.convert(
@@ -53,6 +59,7 @@ public class VoxelIngestService {
                     section.getBiomes(),
                     getLightingSupplier(task)
             );
+            scanIngestOutput(csec);
             WorldConversionFactory.mipSection(csec, task.world.getMapper());
             WorldUpdater.insertUpdate(task.world, csec);
         }
@@ -102,6 +109,86 @@ public class VoxelIngestService {
         return true;
     }
 
+    /**
+     * Splits "the LOD is dark" into its two possible halves. Voxels that are solid but carry a
+     * light byte of zero, counted at the moment the section leaves the ingest, tell us whether the
+     * light engine handed us darkness or whether it was lost afterwards in storage, upload or
+     * meshing. Only the first half is an ingest bug; the second is not, and the black-splotch
+     * investigation wasted rounds by not separating them.
+     *
+     * <p>{@code VOXY_INGEST_SCAN=1}, read once — 4096 longs per section is cheap next to the
+     * conversion itself, but there is no reason to pay it in a normal run.
+     */
+    private static final boolean SCAN_INGEST = "1".equals(System.getenv("VOXY_INGEST_SCAN"));
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_SOLID = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_SOLID_DARK = new java.util.concurrent.atomic.AtomicLong();
+
+    private static void scanIngestOutput(VoxelizedSection csec) {
+        if (!SCAN_INGEST) return;
+        long solid = 0;
+        long dark = 0;
+        long top = 0;
+        long topDark = 0;
+        // Section index layout is y-major, matching DataLayer and Mipper: (y<<8)|(z<<4)|x.
+        for (int z = 0; z < 16; z++) {
+            for (int x = 0; x < 16; x++) {
+                for (int y = 15; y >= 0; y--) {
+                    final int i = (y << 8) | (z << 4) | x;
+                    final long v = csec.section[i];
+                    if (me.cortex.voxy.common.world.other.Mapper.isAir(v)) continue;
+                    solid++;
+                    final boolean isDark = (me.cortex.voxy.common.world.other.Mapper.getLightId(v) & 0xFF) == 0;
+                    if (isDark) dark++;
+                    // The column's topmost solid voxel is what a viewer sees from above, so it is
+                    // the one voxel per column that is unambiguously exposed to the sky. Dark
+                    // there is a real defect; dark anywhere else is just "underground".
+                    if (y == 15) continue;
+                    final long above = csec.section[((y + 1) << 8) | (z << 4) | x];
+                    if (me.cortex.voxy.common.world.other.Mapper.isAir(above)) {
+                        top++;
+                        if (isDark) topDark++;
+                    }
+                    break;
+                }
+            }
+        }
+        // The cell that actually lights a surface face. Voxy's mesher takes an opaque block's face
+        // light from the ADJACENT cell (RenderDataFactory: `(A&~LM) | (lighter&LM)`), because light
+        // does not propagate into solid blocks -- a surface grass block legitimately holds light 0
+        // in its own cell. So the meaningful question is whether the AIR resting on the ground
+        // carries sky light, and counting dark solid voxels measures the wrong thing entirely.
+        long ground = 0;
+        long groundDark = 0;
+        for (int z = 0; z < 16; z++) {
+            for (int x = 0; x < 16; x++) {
+                for (int y = 1; y < 16; y++) {
+                    final int i = (y << 8) | (z << 4) | x;
+                    final long v = csec.section[i];
+                    if (!me.cortex.voxy.common.world.other.Mapper.isAir(v)) continue;
+                    if (me.cortex.voxy.common.world.other.Mapper.isAir(csec.section[((y - 1) << 8) | (z << 4) | x])) continue;
+                    ground++;
+                    if ((me.cortex.voxy.common.world.other.Mapper.getLightId(v) & 0xFF) == 0) groundDark++;
+                    break;
+                }
+            }
+        }
+        DIAG_VOXEL_GROUND.addAndGet(ground);
+        DIAG_VOXEL_GROUND_DARK.addAndGet(groundDark);
+
+        DIAG_VOXEL_SOLID.addAndGet(solid);
+        DIAG_VOXEL_SOLID_DARK.addAndGet(dark);
+        DIAG_VOXEL_TOP.addAndGet(top);
+        DIAG_VOXEL_TOP_DARK.addAndGet(topDark);
+    }
+
+    /** Air cells resting on solid ground — the cells that light the visible surface faces. */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND_DARK = new java.util.concurrent.atomic.AtomicLong();
+
+    /** Solid voxels with air directly above — the section's exposed surface. */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_TOP = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_TOP_DARK = new java.util.concurrent.atomic.AtomicLong();
+
     /** Total times enqueueIngest was called regardless of outcome. */
     public static final java.util.concurrent.atomic.AtomicLong DIAG_ENQUEUE_CALL_COUNT = new java.util.concurrent.atomic.AtomicLong();
     /** Times enqueueIngest exited early because gotLighting was false. */
@@ -140,6 +227,53 @@ public class VoxelIngestService {
 
     /** Sections enqueued with no stored sky layer — the ones the old supplier zeroed. */
     public static final java.util.concurrent.atomic.AtomicLong DIAG_LIGHT_NO_SKY = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Does Minecraft agree with what we baked?
+     *
+     * <p>Every layer of this investigation so far has compared Voxy against Voxy. This asks the
+     * authority instead: for sampled voxels, it reads the sky light back out of
+     * {@code LevelLightEngine} — the same call vanilla's own renderer makes — and compares it with
+     * the byte Voxy is about to store. A mismatch means the fault is in how the ingest obtains
+     * light, and the direction of the mismatch says which way. Agreement means the LOD is faithfully
+     * reproducing a world that really is that dark, and the search belongs somewhere else entirely.
+     *
+     * <p>{@code VOXY_LIGHT_COMPARE=1}.
+     */
+    private static final boolean COMPARE_LIGHT = "1".equals(System.getenv("VOXY_LIGHT_COMPARE"));
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CMP_SAMPLES = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CMP_AGREE = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CMP_MC_BRIGHTER = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_CMP_VOXY_BRIGHTER = new java.util.concurrent.atomic.AtomicLong();
+
+    /** Sampled sky light at the section's own voxels: MC's answer vs the byte we baked. */
+    private static void compareAgainstLightEngine(net.minecraft.world.level.Level level,
+                                                  SectionPos pos,
+                                                  DataLayer blockLight,
+                                                  DataLayer skyLight) {
+        if (!COMPARE_LIGHT) return;
+        var engine = level.getLightEngine();
+        for (int y = 0; y < 16; y += 4) {
+            for (int z = 0; z < 16; z += 4) {
+                for (int x = 0; x < 16; x += 4) {
+                    final int mcSky = engine.getLayerListener(LightLayer.SKY)
+                            .getLightValue(pos.origin().offset(x, y, z));
+                    final int mcBlock = engine.getLayerListener(LightLayer.BLOCK)
+                            .getLightValue(pos.origin().offset(x, y, z));
+                    final int voxySky = skyLight == null ? 15 : Math.min(15, skyLight.get(x, y, z));
+                    final int voxyBlock = blockLight == null ? 0 : Math.min(15, blockLight.get(x, y, z));
+                    DIAG_CMP_SAMPLES.incrementAndGet();
+                    if (mcSky == voxySky && mcBlock == voxyBlock) {
+                        DIAG_CMP_AGREE.incrementAndGet();
+                    } else if (mcSky > voxySky || mcBlock > voxyBlock) {
+                        DIAG_CMP_MC_BRIGHTER.incrementAndGet();
+                    } else {
+                        DIAG_CMP_VOXY_BRIGHTER.incrementAndGet();
+                    }
+                }
+            }
+        }
+    }
 
     public boolean enqueueIngest(WorldEngine engine, LevelChunk chunk) {
         DIAG_ENQUEUE_CALL_COUNT.incrementAndGet();
@@ -217,6 +351,7 @@ public class VoxelIngestService {
 
             DIAG_ENQUEUE_COUNT.incrementAndGet();
             classifyLighting(bl, sl, false);
+            compareAgainstLightEngine(chunk.getLevel(), pos, bl, sl);
             this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, bl, sl));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
             try {
                 this.service.execute();

@@ -166,13 +166,16 @@ void main() {
 #endif
 #ifdef VOXY_LOD_SHOW_LIGHT
     // VOXY_LOD_SHOW_LIGHT=1 -- reads the LOD's own light data back out, before any shading.
-    // Red = block light, green = sky light, each /15 (see makeRemainingAttributes in
-    // quad_util.glsl for the packing). Pure black therefore means the voxel was ingested with
-    // BOTH nibbles zero -- an unlit section -- and not that geometry is missing: a missing quad
-    // draws nothing at all and shows whatever is behind it.
-    outColour = vec4(float((interData.w >> 28) & 0xFu) / 15.0,
-                     float((interData.w >> 24) & 0xFu) / 15.0,
-                     0.0, 1.0);
+    // Red = sky light, green = block light, each /15 (see makeRemainingAttributes in
+    // quad_util.glsl for the packing); blue = the quad's LOD level /7, which is what separates
+    // "the far field is dark because it is coarse" from "the far field is dark because those
+    // particular voxels lost their light". Pure black in red+green means the voxel was baked
+    // with BOTH nibbles zero, and not that geometry is missing: a missing quad draws nothing at
+    // all and shows whatever is behind it.
+    outColour = vec4(float((interData.w >> 24) & 0xFu) / 15.0,
+                     float((interData.w >> 28) & 0xFu) / 15.0,
+                     (interData.x & 1u) != 0u ? 0.8 : 0.2,
+                     1.0);
     return;
 #endif
 #if defined(TRANSLUCENT) && !defined(PATCHED_SHADER)

@@ -810,12 +810,57 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_TOP_LEVEL_ADD_COUNT.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_GEOMETRY_RESULT_COUNT.get()));
             Logger.info(String.format(
-                    "[Metal-LIGHT f=%d] noLight_chunk=%d  noLight_raw=%d  halfLight=%d  (ingestQ=%d)",
+                    "[Metal-LIGHT f=%d] noSkyLayer=%d  bothNull_chunk=%d  blockOnly=%d  (ingestQ=%d)",
                     this.metalFrame,
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NO_SKY.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_CHUNK.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_RAW.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_HALF.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get()));
+            if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get() > 0) {
+                Logger.info(String.format(
+                        "[Metal-CMP   f=%d] samples=%d  agree=%.2f%%  MCbrighter=%.2f%%  voxyBrighter=%.2f%%",
+                        this.metalFrame,
+                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get(),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_AGREE.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get()),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_MC_BRIGHTER.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get()),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_VOXY_BRIGHTER.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get())));
+            }
+            if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID.get() > 0) {
+                Logger.info(String.format(
+                        "[Metal-VOXEL f=%d] solid=%d dark=%.2f%%  |  exposedSurface=%d dark=%.2f%%",
+                        this.metalFrame,
+                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID.get(),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID_DARK.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID.get()),
+                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP.get(),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP_DARK.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP.get())));
+                Logger.info(String.format(
+                        "[Metal-FACE  f=%d] selfLit=%d dark=%.2f%%   neighLit=%d dark=%.2f%%",
+                        this.metalFrame,
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_SELF.get(),
+                        100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_SELF_DARK.get()
+                                / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_SELF.get()),
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH.get(),
+                        100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get()
+                                / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH.get())));
+            }
+            if (me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get() > 0) {
+                Logger.info(String.format(
+                        "[Metal-NDARK f=%d] darkNeigh lightFromAir=%d  lightFromSolid=%d",
+                        this.metalFrame,
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_AIR.get(),
+                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_SOLID.get()));
+                Logger.info(String.format(
+                        "[Metal-VOXEL2 f=%d] groundAir=%d  dark=%.2f%%   <- the cells a surface face takes its light from",
+                        this.metalFrame,
+                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get(),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get())));
+            }
             Logger.info(String.format(
                     "[Metal-TICK  f=%d] tickWithResults=%d  tickWithUploads=%d  lastResultSectionCount=%d  basicSectionCount=%d",
                     this.metalFrame,

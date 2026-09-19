@@ -378,11 +378,50 @@ public class RenderDataFactory {
         return true;
     }
 
+    /**
+     * Meshed-face light audit. A quad's light byte is either the block's OWN cell light or the
+     * ADJACENT cell's, and for a non-opaque block those differ sharply: light does not propagate
+     * into a leaf cell, so a leaf's own cell holds 0 while the air in front of it holds 15.
+     * Counting the two branches separately, and how often each lands on zero, is what separates
+     * "foliage is dark because it took the neighbour's light and the neighbour is dark" from
+     * "foliage is dark because it took its own light, which is legitimately zero".
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_FACE_SELF = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_FACE_SELF_DARK = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_FACE_NEIGH = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_FACE_NEIGH_DARK = new java.util.concurrent.atomic.AtomicLong();
+    /**
+     * Of the dark neighbour-lit faces, how many took their light from an AIR cell versus a SOLID
+     * one. An air cell carries the sky light directly, so a dark air neighbour means the light was
+     * lost in storage or during mipping. A solid neighbour means the mesher is reading a face's
+     * light from a cell that cannot hold light -- and since light does not propagate into a solid
+     * block, that cell is legitimately zero, so the face is black by construction.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_NEIGH_DARK_FROM_AIR = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_NEIGH_DARK_FROM_SOLID = new java.util.concurrent.atomic.AtomicLong();
+
     private static void meshNonOpaqueFace(int face, long quad, long meta, long neighborQuad, long neighborMeta, Mesher mesher) {
         if (shouldMeshNonOpaqueBlockFace(face, quad, meta, neighborQuad, neighborMeta)) {
+            final boolean self = ModelQueries.faceUsesSelfLighting(meta, face);
+            final long light = (self ? quad : neighborQuad) & LM;
+            if (self) {
+                DIAG_FACE_SELF.incrementAndGet();
+                if (light == 0) DIAG_FACE_SELF_DARK.incrementAndGet();
+            } else {
+                DIAG_FACE_NEIGH.incrementAndGet();
+                if (light == 0) {
+                    DIAG_FACE_NEIGH_DARK.incrementAndGet();
+                    // An air cell's packed quad is light-only, so a zero model id means the face
+                    // read its light from air; anything else is a real block.
+                    if ((neighborQuad >>> 26) == 0) {
+                        DIAG_NEIGH_DARK_FROM_AIR.incrementAndGet();
+                    } else {
+                        DIAG_NEIGH_DARK_FROM_SOLID.incrementAndGet();
+                    }
+                }
+            }
             mesher.putNext((long) (face&1) |
-                    (quad&~LM) |
-                    ((ModelQueries.faceUsesSelfLighting(meta, face)?quad:neighborQuad) & LM));
+                    (quad&~LM) | light);
         } else {
             mesher.skip(1);
         }
