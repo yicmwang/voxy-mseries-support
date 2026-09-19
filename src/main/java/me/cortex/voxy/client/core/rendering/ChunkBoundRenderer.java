@@ -158,6 +158,21 @@ public class ChunkBoundRenderer {
         this.glProgram = (this.rasterPipeline instanceof GlGraphicsPipeline gp) ? gp.program() : 0;
     }
 
+    /**
+     * Pack a section coordinate for {@link #addSection} / {@link #removeSection}, matching
+     * {@code outline.vsh}'s {@code unpackPos} exactly — this same long is both the CPU-side map key
+     * and the value the mask pass rasterizes, so the two have to agree bit for bit.
+     *
+     * <p>Layout, low bits first: {@code y} bits 0..19, {@code z} bits 20..41, {@code x} bits 42..63.
+     * The vertical axis gets 20 bits because it is bounded by the world height; the horizontal pair
+     * gets 22 each because they are not.
+     */
+    public static long packSectionPos(int x, int y, int z) {
+        return ((long) y & 0xFFFFFL)
+                | (((long) z & 0x3FFFFFL) << 20)
+                | (((long) x & 0x3FFFFFL) << 42);
+    }
+
     public void addSection(long pos) {
         if (!this.remQueue.remove(pos)) {
             this.addQueue.add(pos);

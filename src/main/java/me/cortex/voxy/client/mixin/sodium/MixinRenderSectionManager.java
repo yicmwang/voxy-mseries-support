@@ -38,6 +38,47 @@ public class MixinRenderSectionManager {
     @Inject(method = "<init>", at = @At("TAIL"))
     private void voxy$resetChunkTracker(ClientLevel level, int renderDistance, SortBehavior sortBehavior, CallbackInfo ci) {
         this.bottomSectionY = this.level.getMinY()>>4;
+        // Sodium rebuilds its RenderSectionManager on a level change or a render-distance change, and
+        // the built-section set starts over with it. Without this the mirror keeps sections from the
+        // previous world, and the next ChunkBoundRenderer to seed from it would mask-discard LODs
+        // over chunks that no longer exist.
+        me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorReset();
+    }
+
+    /**
+     * Feed the chunk-bound depth mask with the sections Sodium actually renders.
+     *
+     * <p>Nothing did this before. {@code ChunkBoundRenderer.addSection} / {@code mirrorAdd} had no
+     * caller anywhere, so {@code chunk2idx} stayed empty, {@code renderMetal}'s {@code count > 0}
+     * guard never opened, the mask pass issued no draw, and the mask kept the 0 it was cleared to.
+     * The test in quads.frag is {@code if (gl_FragCoord.z < voxyBoundDepth) discard;}, and
+     * {@code fragDepth < 0} is false for every fragment — so the mask discarded nothing, ever, and
+     * the LOD drew over the loaded chunks and wrote depth there, leaving Sodium's terrain to fail
+     * its depth test against it. That is "vanilla renders under the LOD".
+     *
+     * <p>Both the static mirror and the live renderer are fed. The mirror is what a *future*
+     * ChunkBoundRenderer seeds from (a renderer reload builds a fresh one while Sodium's sections
+     * never re-transition); the live instance needs the incremental events because it only reads the
+     * mirror at construction.
+     */
+    @Inject(method = "onSectionAdded", at = @At("TAIL"))
+    private void voxy$boundMaskAdd(int x, int y, int z, CallbackInfo ci) {
+        long pos = me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.packSectionPos(x, y, z);
+        me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorAdd(pos);
+        VoxyRenderSystem vrs = IGetVoxyRenderSystem.getNullable();
+        if (vrs != null) {
+            vrs.chunkBoundRenderer.addSection(pos);
+        }
+    }
+
+    @Inject(method = "onSectionRemoved", at = @At("TAIL"))
+    private void voxy$boundMaskRemove(int x, int y, int z, CallbackInfo ci) {
+        long pos = me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.packSectionPos(x, y, z);
+        me.cortex.voxy.client.core.rendering.ChunkBoundRenderer.mirrorRemove(pos);
+        VoxyRenderSystem vrs = IGetVoxyRenderSystem.getNullable();
+        if (vrs != null) {
+            vrs.chunkBoundRenderer.removeSection(pos);
+        }
     }
 
     @Inject(method = "onChunkRemoved", at = @At("HEAD"))
