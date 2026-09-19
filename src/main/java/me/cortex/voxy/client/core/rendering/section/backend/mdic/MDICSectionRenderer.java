@@ -711,7 +711,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     Logger.info("[Metal-LODTEST] VOXY_LOD_NO_DEPTH active: opaque LOD depth test/write DISABLED");
                 }
                 boolean reverseZ = MetalMvpUtil.REVERSE_Z_REMAP;
-                var opaqueDepth = lodDepthState(reverseZ, lodNoDepth);
+                var opaqueDepth = lodDepthState(reverseZ, lodNoDepth, /*writeEnabled*/ true);
                 if (reverseZ && !reverseZLogged) {
                     reverseZLogged = true;
                     Logger.info("[Metal-LODTEST] VOXY_LOD_REVERSE_Z active: LOD depth compare = GreaterEqual");
@@ -730,9 +730,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // opaque depth) and must WRITE depth — the water surface
                 // depth becomes vxDepthTexTrans, which the pack's deferred
                 // uses to composite LOD water as water.
-                var transDepthState = me.cortex.voxy.client.core.util.IrisUtil.vxContractActive()
-                        ? me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT
-                        : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.TEST_NO_WRITE;
+                // Same depth convention as the opaque pass -- the compare operator belongs to the
+                // frame's depth buffer, not to this pass. Leaving this on the GL-convention presets
+                // while the opaque pass was fixed is what put water in front of everything and made
+                // it un-occludable.
+                var transDepthState = lodDepthState(reverseZ, waterDebugDepth,
+                        /*writeEnabled*/ me.cortex.voxy.client.core.util.IrisUtil.vxContractActive());
                 // Material mode: the 3 g-buffer planes carry DATA (straight-alpha
                 // albedo + nibble-packed light/face/id), not composited colour —
                 // the pack's blender does the real compositing at resolve time.
@@ -746,10 +749,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 var transBlend = vxMaterial && !"1".equals(System.getenv("VOXY_VX_PLANE_BLEND"))
                         ? me.cortex.voxy.client.core.gpu.PipelineState.BlendState.OPAQUE
                         : me.cortex.voxy.client.core.gpu.PipelineState.BlendState.PREMULTIPLIED_ALPHA;
+                // transDepthState already carries the waterDebugDepth kill switch (lodDepthState
+                // maps a disabled test to DISABLED).
                 translucentState = new me.cortex.voxy.client.core.gpu.PipelineState(
-                        waterDebugDepth
-                                ? me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DISABLED
-                                : transDepthState,
+                        transDepthState,
                         transBlend,
                         me.cortex.voxy.client.core.gpu.PipelineState.RasterState.NO_CULL);
             }
@@ -1192,7 +1195,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     }
 
     /**
-     * The depth state the LOD's opaque pass must use.
+     * The depth state both LOD passes must use — the compare OPERATOR is a property of the frame's
+     * depth buffer, not of the pass, so opaque and translucent have to agree on it.
      *
      * <p>Extracted so it can be pinned by a unit test rather than only by running the game. This is
      * the decision that was wrong: the frame's depth buffer is reverse-Z, and comparing LessEqual
@@ -1200,18 +1204,28 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * depth is a large positive number, so {@code fragDepth <= 0} is false everywhere. The LOD drew
      * and contributed nothing, which no draw counter or command dump can show.
      *
+     * <p>The opaque pass was fixed first and the translucent one missed, which inverted the water
+     * pass in both directions at once: it drew in front of terrain it should have been hidden by,
+     * and was hidden by terrain it should have drawn in front of. Both passes now come through here.
+     *
      * @param reverseZFrame true when the render target's depth buffer is reverse-Z (Metallum's is)
-     * @param depthDisabled true for {@code VOXY_LOD_NO_DEPTH=1}, which forces the test off entirely
+     * @param depthDisabled true for {@code VOXY_LOD_NO_DEPTH=1} / {@code VOXY_LOD_WATER_DEBUG=1},
+     *                      which force the test off entirely
+     * @param writeEnabled  true for the opaque pass; false for translucent water, which must test
+     *                      against the opaque depth but not write, or it occludes itself
      */
     static me.cortex.voxy.client.core.gpu.PipelineState.DepthState lodDepthState(
-            final boolean reverseZFrame, final boolean depthDisabled) {
+            final boolean reverseZFrame, final boolean depthDisabled, final boolean writeEnabled) {
         if (depthDisabled) {
             return me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DISABLED;
         }
-        return reverseZFrame
-                ? new me.cortex.voxy.client.core.gpu.PipelineState.DepthState(
-                        true, true, me.cortex.voxy.client.core.gpu.PipelineState.CompareOp.GREATER_EQUAL)
-                : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT;
+        if (reverseZFrame) {
+            return new me.cortex.voxy.client.core.gpu.PipelineState.DepthState(
+                    true, writeEnabled, me.cortex.voxy.client.core.gpu.PipelineState.CompareOp.GREATER_EQUAL);
+        }
+        return writeEnabled
+                ? me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT
+                : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.TEST_NO_WRITE;
     }
 
     /** Opt-in encoder test ({@code VOXY_LOD_TRIANGLE=1}); see {@link #drawDebugTriangle}. */
