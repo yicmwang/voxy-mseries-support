@@ -24,7 +24,8 @@ public final class MetallumBridge {
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
             mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
             mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle,
-            mHasPendingColorClear, mHasPendingDepthClear, mPendingColorClearCount;
+            mHasPendingColorClear, mHasPendingDepthClear, mPendingColorClearCount,
+            mDrawProbeStyleTriangle;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -57,6 +58,8 @@ public final class MetallumBridge {
             mHasPendingColorClear = interop.getMethod("hasPendingColorClear", long.class);
             mHasPendingDepthClear = interop.getMethod("hasPendingDepthClear", long.class);
             mPendingColorClearCount = interop.getMethod("pendingColorClearCount");
+            mDrawProbeStyleTriangle = interop.getMethod("drawProbeStyleTriangle",
+                    long.class, long.class, int.class, int.class, String.class);
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
             Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
@@ -277,6 +280,23 @@ public final class MetallumBridge {
             return (Integer) mPendingColorClearCount.invoke(null);
         } catch (Throwable t) {
             return -1;
+        }
+    }
+
+    /**
+     * Draw a magenta triangle at the current point in the frame, via the P0 probe's own path
+     * (a fresh encoder made directly from the command buffer), bypassing
+     * {@code renderCommandEncoderForHandles}. Diagnostic only; see the metallum-side javadoc.
+     */
+    public static boolean drawProbeStyleTriangle(final long colorTexture, final long depthTexture,
+                                                 final int width, final int height, final String label) {
+        resolve();
+        if (mDrawProbeStyleTriangle == null) return false;
+        try {
+            return (Boolean) mDrawProbeStyleTriangle.invoke(null, colorTexture, depthTexture, width, height, label);
+        } catch (Throwable t) {
+            Logger.error("MetallumBridge.drawProbeStyleTriangle failed", t);
+            return false;
         }
     }
 

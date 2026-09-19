@@ -1028,8 +1028,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         int rawCount = rawOpaqueCount(viewport, OPAQUE_DRAW_COUNT_OFFSET);
         maxDrawCount = metalDrawCount(viewport, OPAQUE_DRAW_COUNT_OFFSET, maxDrawCount);
         lodDrawDiag(this.geometryManager.getSectionCount(), rawCount, maxDrawCount);
-        if (maxDrawCount == 0) return;
-        this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
+        if (maxDrawCount != 0) {
+            this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
+        }
+        // Encoder-sequencing test, drawn AFTER the LOD so the LOD cannot hide it. Deliberately
+        // outside the maxDrawCount guard: the question is whether this encoder accepts a draw at
+        // all, which must not depend on whether the LOD happened to issue any commands.
+        this.drawDebugTriangle(encoder, viewport);
     }
 
     /**
@@ -1163,6 +1168,89 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     org.lwjgl.system.MemoryUtil.memGetInt(a + 16)));
         }
         me.cortex.voxy.common.Logger.info("[Metal-CMD " + tag + "] maxDrawCount=" + maxDrawCount + sb);
+    }
+
+    /** Opt-in encoder test ({@code VOXY_LOD_TRIANGLE=1}); see {@link #drawDebugTriangle}. */
+    private static final boolean DEBUG_TRIANGLE = "1".equals(System.getenv("VOXY_LOD_TRIANGLE"));
+    private static final boolean DEBUG_TRIANGLE_PROBE = "probe".equals(System.getenv("VOXY_LOD_TRIANGLE"));
+    private static int probeTriLogged;
+    private me.cortex.voxy.client.core.gpu.IGpuPipeline debugTrianglePipeline;
+
+    private static final String DEBUG_TRI_VERT = """
+            #version 430 core
+            void main() {
+                // Triangle covering the lower-left half of clip space, generated from
+                // gl_VertexID so it needs no vertex buffers and no uniforms at all.
+                vec2 p = vec2(float(gl_VertexID & 1) * 1.7 - 0.9, float(gl_VertexID >> 1) * 1.7 - 0.9);
+                gl_Position = vec4(p, 0.5, 1.0);
+            }
+            """;
+    private static final String DEBUG_TRI_FRAG = """
+            #version 430 core
+            layout(location = 0) out vec4 outColour;
+            void main() { outColour = vec4(1.0, 0.0, 1.0, 1.0); }
+            """;
+
+    /**
+     * Encoder-sequencing test: draw a magenta triangle through the SAME encoder, at the SAME point
+     * in the frame, that Voxy's LOD pass just used -- i.e. after the HOT traversal, the five cmdgen
+     * compute prepasses, the mid-frame {@code backend.submit()} (which commits the command buffer
+     * and nulls Metallum's encoder), the chunk-bound render pass and the depth-mask blit.
+     *
+     * <p>The P0 probe already proved a foreign renderer can draw into this frame, but it draws at
+     * Sodium's CUTOUT tail, before any of that Voxy-specific machinery runs. This test draws after
+     * all of it, so it separates two explanations that look identical from every other diagnostic:
+     *
+     * <ul>
+     *   <li><b>Magenta appears</b> -- the encoder state at Voxy's draw point accepts draws, so the
+     *       sequencing is sound and the fault is Voxy's own pipeline/draw state (depth convention,
+     *       pipeline object, or the LOD's own commands).</li>
+     *   <li><b>No magenta</b> -- draws at that point do not reach the framebuffer at all, whatever
+     *       the pipeline is, and the cause is the sequencing itself.</li>
+     * </ul>
+     *
+     * <p>Depth testing is DISABLED for the triangle on purpose: the point is to test whether the
+     * encoder accepts a draw, so nothing about depth conventions may be allowed to reject it and
+     * muddy the result. Drawn AFTER the LOD so the LOD cannot cover it.
+     */
+    private void drawDebugTriangle(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
+        // VOXY_LOD_TRIANGLE=probe -- draw the same magenta triangle at the same point, but via the
+        // P0 probe's own path: end whatever encoder is open, make a fresh one straight from the
+        // command buffer, draw, end it. That bypasses Metallum's renderCommandEncoderForHandles
+        // bookkeeping, which is the one structural difference between the probe (works) and Voxy's
+        // LOD pass (draws nothing). If this appears where VOXY_LOD_TRIANGLE=1 did not, the fault is
+        // in that bookkeeping rather than in the moment in the frame.
+        if (DEBUG_TRIANGLE_PROBE) {
+            long colorHandle = me.cortex.voxy.client.core.metal.MetallumBridge.colorAttachment();
+            long depthHandle = me.cortex.voxy.client.core.metal.MetallumBridge.depthAttachment();
+            boolean drew = me.cortex.voxy.client.core.metal.MetallumBridge.drawProbeStyleTriangle(
+                    colorHandle, depthHandle, viewport.width, viewport.height, "voxy-lod-pass");
+            if (probeTriLogged++ == 0) {
+                Logger.info("[Metal-LODTEST] VOXY_LOD_TRIANGLE=probe at the LOD pass: drew=" + drew
+                        + " color=0x" + Long.toHexString(colorHandle)
+                        + " depth=0x" + Long.toHexString(depthHandle));
+            }
+            return;
+        }
+        if (!DEBUG_TRIANGLE) {
+            return;
+        }
+        if (this.debugTrianglePipeline == null) {
+            this.debugTrianglePipeline = this.backend.createGraphicsPipeline(
+                    new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(
+                            DEBUG_TRI_VERT, DEBUG_TRI_FRAG, java.util.Map.of(),
+                            null, null, null, null,
+                            GL_RGBA8,
+                            me.cortex.voxy.client.core.gpu.VertexLayout.EMPTY,
+                            // PipelineState.DEFAULT == (DepthState.DISABLED, BlendState.OPAQUE,
+                            // RasterState.NO_CULL) -- depth test and write both off, which is what
+                            // this test needs so no depth convention can reject the triangle.
+                            me.cortex.voxy.client.core.gpu.PipelineState.DEFAULT,
+                            "VoxyDebugTriangle"));
+            Logger.info("[Metal-LODTEST] VOXY_LOD_TRIANGLE active: magenta triangle drawn through the LOD encoder, depth test off");
+        }
+        encoder.setPipeline(this.debugTrianglePipeline);
+        encoder.draw(me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES, 0, 3, 1, 0);
     }
 
     private void renderTerrainMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,
