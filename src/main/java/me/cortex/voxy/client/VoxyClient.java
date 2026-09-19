@@ -203,7 +203,69 @@ public class VoxyClient implements ClientModInitializer {
             });
         }
 
-        // VOXY_FPS_LOG=<seconds>: log Minecraft's own frame rate.
+        // VOXY_DEV_CAM="x,y,z[,yaw,pitch]": pin the camera for the whole run, so two builds produce
+        // comparable frames. Debug-loop aid, and the fix for the reason visual A/B has kept lying.
+        //
+        // VOXY_DEV_TIME is not enough. It pins the clock, but the test world spawns the player in the
+        // air, so the camera is FALLING: every screenshot is taken at a different height and pitch
+        // even though the x/z read the same. Measured this session -- the same build reported the
+        // black fraction as 11.5% and the sky fraction as 6.7%, then 10.4%/18.3%, then 26.1%/18.5%
+        // while the camera x/z never moved off (246,-235). Every one of those differences is the fall,
+        // not the change under test, and a candidate fix was nearly accepted and another nearly
+        // rejected on that basis. Spectator mode plus a periodic tp holds the eye still; the optional
+        // yaw/pitch are omitted from the tp when absent, which keeps the spawn orientation (identical
+        // across runs of the same world) instead of inventing one.
+        String devCam = System.getenv("VOXY_DEV_CAM");
+        if (devCam != null && !devCam.isBlank()) {
+            final String[] parts = devCam.trim().split("\\s*,\\s*");
+            final String tpArgs;
+            if (parts.length >= 5) {
+                tpArgs = parts[0] + " " + parts[1] + " " + parts[2] + " " + parts[3] + " " + parts[4];
+            } else if (parts.length == 3) {
+                tpArgs = parts[0] + " " + parts[1] + " " + parts[2];
+            } else {
+                throw new IllegalStateException(
+                        "VOXY_DEV_CAM must be \"x,y,z\" or \"x,y,z,yaw,pitch\"; got \"" + devCam + "\"");
+            }
+            final int[] ticksUntilApply = {40};
+            final boolean[] applied = {false};
+            final int[] reapplyCountdown = {20};
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                if (client.level == null) return;
+                var server = client.getSingleplayerServer();
+                if (server == null) return;
+                // The command source needs BOTH the player (so `@s` resolves) and level-4 permission
+                // (so tp/gamemode are allowed). The server console stack has the permission but no
+                // entity, so `@s` would fail and the command would report failure to nobody; the
+                // player's own stack has the entity but no op. Take the console stack and attach the
+                // player to it.
+                var players = server.getPlayerList().getPlayers();
+                if (players.isEmpty()) return;
+                var source = server.createCommandSourceStack().withEntity(players.get(0));
+                var commands = server.getCommands();
+                try {
+                    if (!applied[0]) {
+                        if (ticksUntilApply[0]-- > 0) return;
+                        applied[0] = true;
+                        // Spectator: no gravity, no collision, and the LOD ring still follows the eye.
+                        commands.performPrefixedCommand(source, "gamemode spectator");
+                        commands.performPrefixedCommand(source, "tp @s " + tpArgs);
+                        Logger.info("VOXY_DEV_CAM active: pinned the camera to " + tpArgs);
+                        return;
+                    }
+                    // Re-assert periodically: the first tp can land before the world finishes loading
+                    // the chunks under it, and MC will nudge a player that ends up inside geometry.
+                    if (reapplyCountdown[0]-- > 0) return;
+                    reapplyCountdown[0] = 20;
+                    commands.performPrefixedCommand(source, "tp @s " + tpArgs);
+                } catch (Throwable t) {
+                    Logger.error("VOXY_DEV_CAM failed to pin the camera to " + tpArgs, t);
+                    applied[0] = true;
+                }
+            });
+        }
+
+
         //
         // Voxy's frame-rate diagnostic (Metal-RING) only exists when Voxy's render system is
         // running, so it cannot measure the vanilla-only baseline of an A/B -- which is exactly the

@@ -85,10 +85,21 @@ public class ModelTextureBakery {
         boolean hasDiscard = layer == ChunkSectionLayer.CUTOUT ||
                 layer == ChunkSectionLayer.TRANSLUCENT;
 
+        // Deliberately computed and NOT applied -- see the note below on why.
         boolean isMipped = layer == ChunkSectionLayer.SOLID ||
                 layer == ChunkSectionLayer.TRANSLUCENT;
 
         int meta = hasDiscard?1:0;
+        // isMipped is computed and deliberately NOT applied. Upstream writes `meta |= isMipped?2:0`
+        // (voxy/.../BakedBlockEntityModel:61), which reads like a port bug here -- bit 1 drives the
+        // bake shader's LOD bias, and mipping a cutout texture smears its transparent pixels into
+        // partial alpha. It was measured both ways with the camera pinned (VOXY_DEV_CAM) and honouring
+        // isMipped is WORSE, so this stays as it is.
+        //
+        // Why: our layerFor (ModelFactory:877) sends every non-leaf, non-fluid block to CUTOUT, where
+        // upstream would send terrain to solid(). Holding bit 1 set is what reproduces upstream's
+        // effective behaviour for terrain under that mapping. yaoxi_voxy's ModelTextureBakery has the
+        // identical `true?2:0`, so this is not unique to the port either.
         meta |= true?2:0;
         return meta;
     }
