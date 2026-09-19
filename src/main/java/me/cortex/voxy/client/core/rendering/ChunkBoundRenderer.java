@@ -270,6 +270,11 @@ public class ChunkBoundRenderer {
         var mvp = viewport.MVP.translate(negInnerSec.negate(), new Matrix4f());
         if (metalNdcRemap && MetalMvpUtil.METAL_NDC_REMAP) {
             MetalMvpUtil.applyNdcRemap(mvp);
+        } else if (metalNdcRemap && MetalMvpUtil.REVERSE_Z_REMAP) {
+            // Must match MDICSectionRenderer.uploadUniformBuffer: quads.frag compares its
+            // gl_FragCoord.z against this mask's depths, so the two MVPs have to share one
+            // convention. (Same reasoning as the METAL_NDC_REMAP branch above.)
+            MetalMvpUtil.applyReverseZRemap(mvp);
         }
         mvp.getToAddress(ptr);
 

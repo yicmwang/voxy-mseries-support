@@ -236,6 +236,10 @@ public final class MetalRenderEncoder implements RenderEncoder {
     /** Vertex-buffer binding slot used by the per-draw baseInstance workaround. */
     private static final int VOXY_METAL_PER_DRAW_UBO_BINDING = 6;
 
+    /** Experimental: end borrowed encoders too ({@code VOXY_END_BORROWED_ENCODER=1}). */
+    private static final boolean END_BORROWED_ENCODER =
+            "1".equals(System.getenv("VOXY_END_BORROWED_ENCODER"));
+
     /** Opt-in per-draw baseInstance trace ({@code VOXY_BI_TRACE=1}). */
     private static final boolean BI_TRACE = "1".equals(System.getenv("VOXY_BI_TRACE"));
     private static long biTraceCount = 0;
@@ -279,7 +283,20 @@ public final class MetalRenderEncoder implements RenderEncoder {
         if (this.encoderHandle == 0) return;
         if (this.borrowed) {
             // Shared with Metallum: leave the encoder open and let Metallum rebind its own state.
-            MetallumBridge.invalidateRenderPassState();
+            //
+            // VOXY_END_BORROWED_ENCODER=1 -- experiment. "Borrowed" covers two different things:
+            // (a) an encoder Metallum had open for its own live pass, which must NOT be ended, and
+            // (b) a FRESH encoder created for Voxy by renderCommandEncoderForHandles' slow path.
+            // Case (b) happens whenever Metallum has no matching encoder open -- which is exactly
+            // the state after the mid-frame submit. If that fresh encoder is never ended, Metal
+            // discards everything encoded into it, which is what "no fragment ever rasterizes,
+            // even a forced screen-covering triangle" looks like.
+            if (END_BORROWED_ENCODER) {
+                MetalNative.mtlEncoderEndEncoding(this.encoderHandle);
+                MetalNative.mtlRelease(this.encoderHandle);
+            } else {
+                MetallumBridge.invalidateRenderPassState();
+            }
         } else {
             MetalNative.mtlEncoderEndEncoding(this.encoderHandle);
             MetalNative.mtlRelease(this.encoderHandle);

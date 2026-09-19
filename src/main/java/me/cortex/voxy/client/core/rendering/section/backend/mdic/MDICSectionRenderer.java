@@ -388,6 +388,20 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     translucentDefines.put("VOXY_BOUND_DEBUG", "");
                 }
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
+                // VOXY_LOD_FORCE_MAGENTA=1 -- bisection switch (see quads.frag). Solid magenta
+                // emitted before every discard/early-out, so the frame shows whether LOD geometry
+                // rasterizes at all. Diagnostic only.
+                if ("1".equals(System.getenv("VOXY_LOD_FORCE_MAGENTA"))) {
+                    opaqueDefines.put("VOXY_LOD_FORCE_MAGENTA", "");
+                    translucentDefines.put("VOXY_LOD_FORCE_MAGENTA", "");
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_MAGENTA active: LOD emits solid magenta before any discard");
+                }
+                // Vertex-stage bisection (see quads3.vert). Defines reach both stages.
+                if ("1".equals(System.getenv("VOXY_LOD_FORCE_VERTEX"))) {
+                    opaqueDefines.put("VOXY_LOD_FORCE_VERTEX", "");
+                    translucentDefines.put("VOXY_LOD_FORCE_VERTEX", "");
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_VERTEX active: LOD emits a fixed clip-space triangle");
+                }
 
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
                 //   derivative-based mip. DEFAULT ON for Metal (2026-06-09): the
@@ -696,10 +710,23 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if (lodNoDepth) {
                     Logger.info("[Metal-LODTEST] VOXY_LOD_NO_DEPTH active: opaque LOD depth test/write DISABLED");
                 }
+                // Reverse-Z (VOXY_LOD_REVERSE_Z=1): the frame's depth buffer is reverse-Z, so the
+                // compare must be GreaterEqual to match. Default here is LessEqual, which against a
+                // reverse-Z buffer rejects every fragment (sky reads 0, Voxy's depths are large
+                // positives) -- the LOD draws and contributes no pixels.
+                boolean reverseZ = MetalMvpUtil.REVERSE_Z_REMAP;
+                var opaqueDepth = lodNoDepth
+                        ? me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DISABLED
+                        : (reverseZ
+                            ? new me.cortex.voxy.client.core.gpu.PipelineState.DepthState(
+                                    true, true, me.cortex.voxy.client.core.gpu.PipelineState.CompareOp.GREATER_EQUAL)
+                            : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT);
+                if (reverseZ && !reverseZLogged) {
+                    reverseZLogged = true;
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_REVERSE_Z active: LOD depth compare = GreaterEqual");
+                }
                 opaqueState = new me.cortex.voxy.client.core.gpu.PipelineState(
-                        lodNoDepth
-                                ? me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DISABLED
-                                : me.cortex.voxy.client.core.gpu.PipelineState.DepthState.DEFAULT,
+                        opaqueDepth,
                         me.cortex.voxy.client.core.gpu.PipelineState.BlendState.OPAQUE,
                         me.cortex.voxy.client.core.gpu.PipelineState.RasterState.NO_CULL);
                 // VOXY_LOD_WATER_DEBUG also DISABLES the depth test for the
@@ -792,6 +819,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // mask's depths, so the two MVPs must remap identically.
         if (MetalMvpUtil.METAL_NDC_REMAP && this.backend.getType() != BackendType.OPENGL) {
             MetalMvpUtil.applyNdcRemap(mat);
+        } else if (MetalMvpUtil.REVERSE_Z_REMAP && this.backend.getType() != BackendType.OPENGL) {
+            // Metallum's frame depth is reverse-Z (near=1, far=0); see MetalMvpUtil.REVERSE_Z_REMAP.
+            // ChunkBoundRenderer applies the same remap so the bound mask's depths stay comparable
+            // with quads.frag's gl_FragCoord.z.
+            MetalMvpUtil.applyReverseZRemap(mat);
         }
         mat.getToAddress(ptr); ptr += 4*4*4;
 
@@ -1069,6 +1101,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * when this count reads 0, so a healthy-looking render list and zero draws are entirely
      * compatible. Logs the raw value read from the GPU-written count buffer alongside the bound.
      */
+    private static boolean reverseZLogged = false;
     private static long LOD_DIAG_FRAME = 0;
     private static void lodDrawDiag(int sectionCount, int rawOpaque, int maxDrawCount) {
         if ((LOD_DIAG_FRAME++ % 600) != 1) return;

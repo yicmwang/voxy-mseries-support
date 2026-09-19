@@ -680,12 +680,29 @@ public class MetalRenderBackend implements RenderBackend {
                     && nColors > 0 && desc.depthAttachment() != null
                     && (passTraceCount++ % 60) == 1) {
                 var c0 = desc.colorAttachments().get(0);
+                // Report the attachment's REAL pixel formats (Metal-native values off the textures)
+                // and what the pipeline declares. createGraphicsPipeline hardcodes the depth format
+                // to Depth32Float; if the frame's depth attachment is anything else, the pipeline
+                // state is incompatible with the pass and Metal drops the draws while every counter
+                // still reports them. The P0 probe read both formats off the textures instead of
+                // assuming, which is why it worked.
+                // Read the formats straight off the live MTLTexture handles -- works for any
+                // texture, and needs no access to the pipeline's attachment objects.
+                int realColorFmt = colorHandle == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(colorHandle);
+                int realDepthFmt = depthHandle == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(depthHandle);
                 me.cortex.voxy.common.Logger.info("[Metal-PASS] colors=" + nColors
                         + " colorHandle=0x" + Long.toHexString(colorHandle)
                         + " depthHandle=0x" + Long.toHexString(depthHandle)
                         + " load0=" + c0.loadAction()
-                        + " clear=(" + c0.clearR() + "," + c0.clearG() + "," + c0.clearB() + "," + c0.clearA() + ")"
-                        + " size=" + desc.viewportWidth() + "x" + desc.viewportHeight());
+                        + " size=" + desc.viewportWidth() + "x" + desc.viewportHeight()
+                        + " | realColorFmt=" + realColorFmt + " realDepthFmt=" + realDepthFmt
+                        // Does Metallum still have a clear queued for the texture we are about to
+                        // draw into? Our borrow path bypasses createRenderPass, which is where
+                        // those are consumed -- so if one is queued, MC's next pass applies it and
+                        // erases this frame's LOD. Measured, not assumed.
+                        + " | pendingColorClear=" + MetallumBridge.hasPendingColorClear(colorHandle)
+                        + " pendingDepthClear=" + MetallumBridge.hasPendingDepthClear(depthHandle)
+                        + " pendingTotal=" + MetallumBridge.pendingColorClearCount());
             }
 
             // Pending stream copies must land before the pass's encoder opens
@@ -733,6 +750,19 @@ public class MetalRenderBackend implements RenderBackend {
                 if (encoder == 0) {
                     throw new RuntimeException("mtlCommandBufferNewRenderEncoder returned NULL");
                 }
+            }
+
+            // The borrow result must be attributed to THIS pass. A depth-only pass (chunk-bound,
+            // depth export) legitimately has colorHandle==0, and acquireRenderEncoder returns 0 for
+            // it by design -- reading such a line as "the LOD pass failed to borrow" is wrong twice
+            // over, and I made that mistake. Only a colour+depth pass is the LOD pass.
+            if ("1".equals(System.getenv("VOXY_ATTACH_TRACE")) && nColors > 0
+                    && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
+                me.cortex.voxy.common.Logger.info("[Metal-BORROW] colors=" + nColors
+                        + " borrowed=" + borrowed
+                        + (borrowed
+                            ? "  (Metallum's encoder reused -- its pending clear is already materialised)"
+                            : "  <-- Voxy opened its OWN; Metallum's pending clear can wipe it"));
             }
         } finally {
             // The render encoder retains a reference to the descriptor; we can drop ours.

@@ -23,6 +23,45 @@ import org.joml.Matrix4f;
 public final class MetalMvpUtil {
     /** Opt-in flag for the remap ({@code VOXY_LOD_METAL_NDC=1}). Callers gate on this AND a non-GL backend. */
     public static final boolean METAL_NDC_REMAP = "1".equals(System.getenv("VOXY_LOD_METAL_NDC"));
+
+    /**
+     * Opt-in reverse-Z remap ({@code VOXY_LOD_REVERSE_Z=1}).
+     *
+     * <p>Metallum's frame depth buffer is REVERSE-Z: near maps to 1, far to 0, and the pass's
+     * compare function is GreaterEqual. The P0 probe reads this straight off the live pass and
+     * reports {@code compare=GreaterEqual reverseZ=true}.
+     *
+     * <p>Voxy's LOD pipeline instead used {@link me.cortex.voxy.client.core.gpu.PipelineState.DepthState#DEFAULT}
+     * (LessEqual) and a GL-convention projection. Against a reverse-Z buffer that combination
+     * rejects every fragment: over sky the buffer holds 0 (far) while a Voxy fragment's depth is a
+     * large positive number in its own convention, so {@code fragDepth <= 0} is false everywhere.
+     * The draws execute, every fragment is discarded, and the LOD contributes no pixels at all.
+     *
+     * <p>Fixing it needs both halves: the depth VALUES must be in reverse-Z space (this remap,
+     * {@code z' = 0.5 - 0.5*z}, mapping NDC z -1..1 to 1..0) AND the compare must be GreaterEqual.
+     * The pre-existing {@link #applyNdcRemap} maps to normal Z (near 0, far 1) and so cannot be
+     * used for this.
+     */
+    public static final boolean REVERSE_Z_REMAP = "1".equals(System.getenv("VOXY_LOD_REVERSE_Z"));
+    private static boolean reverseZLogged = false;
+
+    /**
+     * metalMVP = ZremapRev . mat, mapping NDC z [-1,1] to [1,0] -- near to 1, far to 0, i.e. the
+     * reverse-Z convention Metallum's frame buffer already uses. Row form:
+     * {@code z' = -0.5*z + 0.5*w}, {@code w' = w}. X/Y untouched. Mutates {@code mat} in place.
+     */
+    public static void applyReverseZRemap(Matrix4f mat) {
+        new Matrix4f(
+                1, 0, 0,     0,
+                0, 1, 0,     0,
+                0, 0, -0.5f, 0,
+                0, 0, 0.5f,  1).mul(mat, mat);
+        if (!reverseZLogged) {
+            reverseZLogged = true;
+            Logger.info("[Metal] VOXY_LOD_REVERSE_Z active: render MVP remapped to reverse-Z "
+                    + "(near=1, far=0); depth compare must be GreaterEqual");
+        }
+    }
     private static boolean logged = false;
 
     private MetalMvpUtil() {}

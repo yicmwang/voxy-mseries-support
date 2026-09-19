@@ -81,6 +81,23 @@ vec2 taaShift();
 // this would help alot with stuff like crops as they would look kinda weird i think,
 // same with flowers etc
 void main() {
+#ifdef VOXY_LOD_FORCE_VERTEX
+    // VOXY_LOD_FORCE_VERTEX=1 -- bisection, not a feature. Emits a fixed, huge clip-space
+    // triangle on the first three vertices of every draw, ignoring the scene uniform, quadData
+    // and positionBuffer entirely. Combined with VOXY_LOD_FORCE_MAGENTA (fragment emits solid
+    // magenta before any discard) this answers exactly one question: does the LOD vertex stage
+    // execute and rasterize at all? Magenta => the vertex stage runs and the fault is in its
+    // INPUTS (VP/scene uniform, quadData, positionBuffer, baseInstance). No magenta => the draws
+    // are not reaching the GPU as draws, and the fault is in the encoder or pipeline binding.
+    // NOTE: do NOT gate on a small gl_VertexID. These are INDEXED draws with a large baseVertex
+    // (~3.1M), and MSL's [[vertex_id]] is baseVertex + index, so `gl_VertexID < 3` is essentially
+    // never true and the test would report "nothing rasterizes" no matter what the real state is.
+    // Derive the corner from the vertex id modulo 3 so every draw emits screen-covering triangles.
+    uint k = uint(gl_VertexID) % 3u;
+    vec2 vp = vec2(float(k & 1u) * 4.0 - 1.0, float(k >> 1u) * 4.0 - 1.0);
+    gl_Position = vec4(vp, 0.5, 1.0);
+    return;
+#endif
     taaOffset = taaShift();
 
     QuadData quad;

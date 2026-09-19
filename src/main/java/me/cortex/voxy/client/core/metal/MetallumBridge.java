@@ -23,7 +23,8 @@ public final class MetallumBridge {
     private static Method mIsAvailable, mDeviceHandle, mCommandQueueHandle, mCommandBufferHandle,
             mEndCurrentEncoder, mRenderEncoderHandle, mColorAttachment, mDepthAttachment,
             mViewportWidth, mViewportHeight, mFlushFrame, mAcquireRenderEncoder, mInvalidateRenderPassState,
-            mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle;
+            mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle,
+            mHasPendingColorClear, mHasPendingDepthClear, mPendingColorClearCount;
     private static boolean resolved;
 
     private MetallumBridge() {
@@ -53,6 +54,9 @@ public final class MetallumBridge {
             mAcquireRenderEncoder = interop.getMethod("acquireRenderEncoder", long.class, long.class, int.class, int.class);
             mInvalidateRenderPassState = interop.getMethod("invalidateRenderPassState");
             mLogRenderPassCounters = interop.getMethod("logRenderPassCounters");
+            mHasPendingColorClear = interop.getMethod("hasPendingColorClear", long.class);
+            mHasPendingDepthClear = interop.getMethod("hasPendingDepthClear", long.class);
+            mPendingColorClearCount = interop.getMethod("pendingColorClearCount");
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
             Logger.info("Metallum interop not present (" + t.getClass().getSimpleName()
@@ -241,6 +245,41 @@ public final class MetallumBridge {
     }
 
     /** Marks Metallum's pass state stale after Voxy borrowed and drew on its encoder. */
+    /**
+     * Whether Metallum still has a clear queued for this texture -- i.e. whether its next render
+     * pass on it will clear it. Voxy's borrow path bypasses the bookkeeping that consumes these,
+     * so a queued clear means this frame's LOD draws get erased afterwards. Diagnostic only.
+     */
+    public static boolean hasPendingColorClear(final long textureHandle) {
+        resolve();
+        if (mHasPendingColorClear == null) return false;
+        try {
+            return (Boolean) mHasPendingColorClear.invoke(null, textureHandle);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    public static boolean hasPendingDepthClear(final long textureHandle) {
+        resolve();
+        if (mHasPendingDepthClear == null) return false;
+        try {
+            return (Boolean) mHasPendingDepthClear.invoke(null, textureHandle);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    public static int pendingColorClearCount() {
+        resolve();
+        if (mPendingColorClearCount == null) return -1;
+        try {
+            return (Integer) mPendingColorClearCount.invoke(null);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     public static void invalidateRenderPassState() {
         resolve();
         if (mInvalidateRenderPassState == null) {

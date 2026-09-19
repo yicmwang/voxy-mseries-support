@@ -154,6 +154,16 @@ vec4 computeColour(vec2 texturePos, vec4 colour) {
 
 
 void main() {
+#ifdef VOXY_LOD_FORCE_MAGENTA
+    // VOXY_LOD_FORCE_MAGENTA=1 -- bisection, not a feature. Emits solid magenta as the FIRST
+    // statement of main(), before the depth-bound test, the alpha discard, the tile clamp and
+    // every early-out, so it answers one question only: does the LOD geometry rasterize at all?
+    // Magenta on screen => the vertex stage, clipping, the pipeline state and the render encoder
+    // are all fine, and the fault is downstream in shading/discards. No magenta => no fragment
+    // of this pipeline ever reaches the framebuffer, whatever the draw counters say.
+    outColour = vec4(1.0, 0.0, 1.0, 1.0);
+    return;
+#endif
 #if defined(TRANSLUCENT) && !defined(PATCHED_SHADER)
     #ifdef VOXY_LOD_WATER_DEBUG
     // Diagnostic (VOXY_LOD_WATER_DEBUG=1): render translucent LOD water as
