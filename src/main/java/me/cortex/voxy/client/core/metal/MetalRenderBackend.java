@@ -36,6 +36,18 @@ public class MetalRenderBackend implements RenderBackend {
     private final long maxBufferLength;
     /** Lazily allocated MTLCommandBuffer for the current frame; 0 when no commands are queued. */
     private long activeCommandBuffer = 0;
+
+    /**
+     * VOXY_SUBMIT_ORDER=1 makes the guest branch of {@link #submit()} actually wait for the frame it
+     * just committed. See the block in submit() for the full trace; the short version is that
+     * flushFrame() commits without waiting, three CPU-side reads depend on the result mid-frame, and
+     * the guest branch's own comment claims a completeness it does not provide.
+     *
+     * <p>This is the switch the race audit asked to be re-run: an equivalent one was added in 4d5cbd92
+     * and reverted in 90d94c6f with no recorded result, and nothing under the log directory mentions
+     * it, so that bisection appears never to have actually been run.
+     */
+    private static final boolean SUBMIT_ORDER = "1".equals(System.getenv("VOXY_SUBMIT_ORDER"));
     /** False when the active buffer belongs to Metallum and must not be committed or released. */
     private boolean ownsActiveCommandBuffer = true;
     /** Lazily-opened MTLBlitCommandEncoder on the active buffer for stream copies; 0 when closed. */
@@ -1132,6 +1144,27 @@ public class MetalRenderBackend implements RenderBackend {
             // frame by committing a buffer we do not own.
             if (MetallumBridge.supportsFlushFrame()) {
                 MetallumBridge.flushFrame();
+                if (SUBMIT_ORDER) {
+                    // flushFrame() COMMITS the frame; it does not wait for it, and the comment above
+                    // claiming the work is "committed and complete, making it CPU-visible for the draw
+                    // path's baseInstance read" is therefore false. Only this wait makes it true.
+                    //
+                    // The gap, traced: Metallum's MetalCommandEncoder commits with a completion block
+                    // and then awaits `currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT`, i.e. three submits
+                    // BACK; and its counter STARTS at 3, so the first three submits wait for nothing at
+                    // all. Meanwhile the owned branch immediately below really does waitUntilCompleted,
+                    // which is exactly why this read looked safe for so long.
+                    //
+                    // What the un-ordered window exposes: MetalRenderEncoder reads `baseInstance` out
+                    // of drawCallBuffer on the CPU, per draw, and pushes it as the per-draw constant. A
+                    // stale read yields the WRONG SECTION'S ORIGIN while the draw keeps its own quads
+                    // and their baked light -- which is bug 3's description almost word for word,
+                    // including the preserved lighting. It also explains the timing dependence: how
+                    // stale the read is depends on how far the CPU has run ahead of the GPU, so frame
+                    // pacing moves the rate, and a frame-END GPU sync cannot help because these reads
+                    // happen MID-frame.
+                    this.waitForGpuIdle();
+                }
             }
             this.activeCommandBuffer = 0;
             return;
