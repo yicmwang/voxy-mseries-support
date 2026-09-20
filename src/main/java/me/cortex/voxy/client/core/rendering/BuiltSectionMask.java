@@ -109,10 +109,13 @@ public final class BuiltSectionMask {
         // assuming the camera is on an even column.
         final int parity = ((camSecX % 2) + 2) % 2;
         int partial = 0, wronglyRemoved = 0, wronglyKept = 0;
+        int removedOld = 0, removedNew = 0;
         for (int oz = -parity; oz + 2 <= side; oz += 2) {
             for (int ox = -parity; ox + 2 <= side; ox += 2) {
                 final boolean centre = nodeCentreCovered(bits, side, ox, oz, 2);
                 final boolean full = nodeFullyCovered(bits, side, ox, oz, 2);
+                if (centre) removedOld++;
+                if (full) removedNew++;
                 if (centre == full) continue;
                 if (centre) wronglyRemoved++; else wronglyKept++;
                 partial++;
@@ -139,13 +142,17 @@ public final class BuiltSectionMask {
                 "[Metal-VMASK f=%d] built=%d maxBuilt=%d bits=%d/%d side=%d cam=%d,%d uploads=%d%s",
                 VMASK_FRAME, builtSize, maxBuilt, setBits, side * side, side, camSecX, camSecZ, uploads,
                 grid));
-        // The count the grid cannot give: how many detail-0 nodes the centre-only rule decides
-        // differently from "every column covered". wronglyRemoved is the hole ring -- each of those
-        // nodes had LOD removed while up to three of its four columns were never drawn by vanilla,
-        // and nothing else draws them. wronglyKept is the mirror image, LOD left on top of vanilla.
+        // What the build DOES, so the fix is legible from a log rather than only from a frame:
+        // removedOld is how many detail-0 nodes the centre-only rule would remove, removedNew is how
+        // many the every-column rule does. removedOld - removedNew is the hole ring the fix closes,
+        // and it does not change when the fix lands on its own -- which is why the first version of
+        // this line was useless as evidence: wronglyRemoved is a comparison of two RULES over the
+        // same mask, not a count of holes in the running build, and it reads 9 before and after.
+        // Read removedNew against removedOld to see the fix; read the two together to see the defect.
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-VMASK2 f=%d] detail0Nodes partial=%d  wronglyRemoved=%d  wronglyKept=%d  <- centre-only rule vs every-column rule",
-                VMASK_FRAME, partial, wronglyRemoved, wronglyKept));
+                "[Metal-VMASK2 f=%d] detail0Nodes partial=%d  removedOld=%d (centre rule)  removedNew=%d (every-column rule)  closing=%d  |  wronglyRemoved=%d wronglyKept=%d",
+                VMASK_FRAME, partial, removedOld, removedNew, removedOld - removedNew,
+                wronglyRemoved, wronglyKept));
     }
 
     /** The mask buffer, or null before the first {@link #update}. */
