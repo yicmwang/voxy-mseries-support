@@ -1303,7 +1303,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     /** Raw (unclamped) value at the opaque draw-count offset, or -1 if unreadable. */
     private static int rawOpaqueCount(MDICViewport viewport, long countOffset) {
-        if (viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
+        // CONSUME slot: the counts belonging to the commands the draws will actually issue. Reading the
+        // write slot here would describe frame N while frame N-1 is drawn.
+        if (viewport.drawCountConsume(viewport.frameId) instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
             long p = mb.getContentsPtr();
             if (p != 0) {
                 return MemoryUtil.memGetInt(p + countOffset);
@@ -1313,7 +1315,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     }
 
     private static int metalDrawCount(MDICViewport viewport, long countOffset, int upperBound) {
-        if (viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
+        // CONSUME slot, and this is the load-bearing one: the value returned here becomes
+        // maxDrawCount, the CPU-side bound on how many draws are issued. Taking it from the write slot
+        // would bound frame N-1's commands by frame N's count.
+        if (viewport.drawCountConsume(viewport.frameId) instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
             long p = mb.getContentsPtr();
             if (p != 0) {
                 int actual = MemoryUtil.memGetInt(p + countOffset);
@@ -2178,7 +2183,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // M13 chunk 1: bindBuffers now also wires up the model atlas texture +
         // cross-backend sampler at binding 0 (blockModelAtlas in quads.frag).
         this.modelStore.bindBuffers(encoder, 3, 4, 0);
-        encoder.setBuffer(5, viewport.positionScratch(viewport.frameId), 0);
+        // CONSUME slot, NOT the current frame -- this is the coupling that would otherwise re-create
+        // bug 3. The vertex shader indexes this buffer by `baseInstance`, and that value comes from the
+        // command in the indirect buffer bound at the draw below, which is the consume slot. Give the
+        // shader frame N's positions and frame N-1's index and every draw is placed at another
+        // section's origin, keeping its own quads and baked light -- the exact symptom just fixed.
+        encoder.setBuffer(5, viewport.positionScratch(viewport.frameId - 1), 0);
         // Texture / sampler binding 1 — MC's 16×16 RGBA8 lightmap, mirrored
         // into a Shared-storage Metal texture each frame (M13 chunk 2).
         LightMapHelper.bindMetal(encoder, 1);
@@ -2213,14 +2223,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // at `baseInstance * 8` instead of pushing the index as a constant.
         if ("1".equals(System.getenv("VOXY_BI_OFFSET"))
                 && encoder instanceof me.cortex.voxy.client.core.metal.MetalRenderEncoder mre) {
-            mre.setPerDrawIndexBuffer(5, viewport.positionScratchBuffer);
+            // CONSUME slot, matching the draw's indirect buffer below: the encoder derives the index
+            // from a command in THAT buffer, so it has to index the same frame's positions.
+            mre.setPerDrawIndexBuffer(5, viewport.positionScratch(viewport.frameId - 1));
         }
 
         encoder.bindIndexBuffer(me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer.INSTANCE.getBuffer(),
                 me.cortex.voxy.client.core.gpu.RenderEncoder.INDEX_TYPE_UINT16, 0);
         encoder.drawIndexedIndirect(
                 me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
-                viewport.drawCallBuffer, indirectOffset,
+                viewport.drawCallConsume(viewport.frameId), indirectOffset,
                 maxDrawCount,
                 /*stride*/ 5 * 4); // DrawElementsIndirectCommand = 5 uint32
     }
@@ -2297,7 +2309,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // cmdBuffer is unnecessary (it's zeroed once at allocation in
         // MDICViewport). VOXY_LOD_ZERO_DRAWBUF=1 restores it as a fallback.
         if (this.backend.getType() != BackendType.OPENGL && METAL_ZERO_DRAWBUF) {
-            viewport.drawCallBuffer.zero();
+            viewport.drawCallWrite(viewport.frameId).zero();
         }
 
         //Can do a sneeky trick, since the sectionRenderList is a list to things to render, it invokes the culler
@@ -2313,7 +2325,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // 3 and 4 (which DO use SceneUniform).
             try (var encoder = this.backend.beginComputePass()) {
                 encoder.setPipeline(this.prepPipeline);
-                encoder.setBuffer(1, viewport.drawCountCallBuffer, 0);
+                encoder.setBuffer(1, viewport.drawCountWrite(viewport.frameId), 0);
                 encoder.setBuffer(2, viewport.getRenderList(), 0);
                 encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
                 encoder.dispatch(1, 1, 1);
@@ -2369,7 +2381,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
                     // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
                     // matching this shader's local_size_x=128.
-                    encoder.dispatchIndirect(viewport.drawCountCallBuffer, 0);
+                    encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
                     encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
                 }
             }
@@ -2405,8 +2417,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 }
                 encoder.setPipeline(this.commandGenPipeline);
                 encoder.setBuffer(0, this.uniformFor(viewport), 0);
-                encoder.setBuffer(1, viewport.drawCallBuffer, 0);
-                encoder.setBuffer(2, viewport.drawCountCallBuffer, 0);
+                encoder.setBuffer(1, viewport.drawCallWrite(viewport.frameId), 0);
+                encoder.setBuffer(2, viewport.drawCountWrite(viewport.frameId), 0);
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
                 encoder.setBuffer(4, viewport.visibilityBuffer, 0);
                 encoder.setBuffer(5, viewport.indirectLookupBuffer, 0);
@@ -2416,7 +2428,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     encoder.setBuffer(STATISTICS_BUFFER_BINDING, this.statisticsBuffer, 0);
                 }
                 encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
-                encoder.dispatchIndirect(viewport.drawCountCallBuffer, 0);
+                encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
                 encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
                                 ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
             }
@@ -2459,14 +2471,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             try (var encoder = this.backend.beginComputePass()) {
                 encoder.setPipeline(this.translucentGenPipeline);
                 encoder.setBuffer(0, this.uniformFor(viewport), 0);
-                encoder.setBuffer(1, viewport.drawCallBuffer, 0);
-                encoder.setBuffer(2, viewport.drawCountCallBuffer, 0);
+                encoder.setBuffer(1, viewport.drawCallWrite(viewport.frameId), 0);
+                encoder.setBuffer(2, viewport.drawCountWrite(viewport.frameId), 0);
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
                 encoder.setBuffer(4, viewport.indirectLookupBuffer, 0);
                 encoder.setBuffer(5, this.distanceCountBuffer, 0);
                 encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
                                 ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-                encoder.dispatchIndirect(viewport.drawCountCallBuffer, 0);
+                encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
                 encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
                                 ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
             }
