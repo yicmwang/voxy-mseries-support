@@ -22,9 +22,14 @@ import java.util.Arrays;
  * so this asks it, and the cull becomes a membership test rather than a guess.
  *
  * <p>The mask is a bit per chunk COLUMN, indexed relative to the camera's column. A column is set
- * if any section in it has geometry. The query in {@code cmdgen.comp} uses a LOD node's centre
- * column, which is exact for the fine LOD levels that exist near the camera; coarse levels only
- * exist far away, where their centre falls outside the square and they are simply not culled.
+ * if any section in it has geometry. The query in {@code cmdgen.comp} removes a node only when
+ * <b>every column the node covers</b> is set — see {@link #nodeFullyCovered}, which is mirrored
+ * there and unit-tested. It used to test the node's centre column alone, and that is the defect
+ * this file's history should not lose: at detail 0 a node is 2x2 columns, so one bit decided four,
+ * and a node whose centre was covered but whose other columns were not was removed whole — a hole
+ * up to 32 blocks across, repeated around the rim of vanilla's coverage, which is "LOD chunks near
+ * the player are completely empty". The earlier claim that the centre is "exact for the fine LOD
+ * levels" was simply wrong: the fine levels are exactly where nodes straddle the rim.
  *
  * <p>Cost is a bit test in the existing cmdgen pass — no rasterization, no depth blit, no
  * readback, no depth precision to reason about.
@@ -89,6 +94,22 @@ public final class BuiltSectionMask {
         int setBits = 0;
         for (final int w : bits) setBits += Integer.bitCount(w);
 
+        // Detail-0 nodes are aligned to EVEN world section coordinates, and the mask's column 0 is
+        // the camera's column, so the node grid starts at an offset that depends on the camera's
+        // parity. Getting that wrong would count the wrong 2x2 blocks, so derive it rather than
+        // assuming the camera is on an even column.
+        final int parity = ((camSecX % 2) + 2) % 2;
+        int partial = 0, wronglyRemoved = 0, wronglyKept = 0;
+        for (int oz = -parity; oz + 2 <= side; oz += 2) {
+            for (int ox = -parity; ox + 2 <= side; ox += 2) {
+                final boolean centre = nodeCentreCovered(bits, side, ox, oz, 2);
+                final boolean full = nodeFullyCovered(bits, side, ox, oz, 2);
+                if (centre == full) continue;
+                if (centre) wronglyRemoved++; else wronglyKept++;
+                partial++;
+            }
+        }
+
         // The grid is the mask itself, drawn in the frame the shader reads it in: rows are dz,
         // columns are dx, both relative to the camera column ('C'). A node is culled exactly when
         // its CENTRE section falls on a '#', so '#' is "LOD is removed here and vanilla draws it
@@ -109,11 +130,78 @@ public final class BuiltSectionMask {
                 "[Metal-VMASK f=%d] built=%d maxBuilt=%d bits=%d/%d side=%d cam=%d,%d uploads=%d%s",
                 VMASK_FRAME, builtSize, maxBuilt, setBits, side * side, side, camSecX, camSecZ, uploads,
                 grid));
+        // The count the grid cannot give: how many detail-0 nodes the centre-only rule decides
+        // differently from "every column covered". wronglyRemoved is the hole ring -- each of those
+        // nodes had LOD removed while up to three of its four columns were never drawn by vanilla,
+        // and nothing else draws them. wronglyKept is the mirror image, LOD left on top of vanilla.
+        me.cortex.voxy.common.Logger.info(String.format(
+                "[Metal-VMASK2 f=%d] detail0Nodes partial=%d  wronglyRemoved=%d  wronglyKept=%d  <- centre-only rule vs every-column rule",
+                VMASK_FRAME, partial, wronglyRemoved, wronglyKept));
     }
 
     /** The mask buffer, or null before the first {@link #update}. */
     public IGpuBuffer buffer() {
         return this.buffer;
+    }
+
+    /**
+     * Whether every chunk column a LOD node covers is drawn by vanilla, which is the only condition
+     * under which removing the node cannot leave a hole.
+     *
+     * <p>A node at LOD detail {@code d} spans {@code n = 2 << d} chunk columns per axis. The cull
+     * used to test the node's CENTRE column and remove the whole node on that one bit. At detail 0
+     * a node is 2x2 columns, so one bit decided four: a node straddling the edge of vanilla's
+     * coverage with its centre inside was removed even though up to three of its columns were never
+     * drawn by vanilla, and nothing else draws there — the LOD was the only thing that would have.
+     * That is a hole up to 32 blocks across, repeated around the whole seam, which is what "LOD
+     * chunks near the player are completely empty" is. The same rule errs the other way when the
+     * centre falls outside and the node's other columns are vanilla-drawn, which keeps LOD on top
+     * of vanilla.
+     *
+     * <p>A column outside the mask square is not covered by definition, so a node that overhangs
+     * the square can never be proven covered and is kept. That also bounds the shader's work: the
+     * per-column loop only runs for nodes that fit entirely inside the square, which for the coarse
+     * levels means almost none, since the square is 2*renderDistance+1 columns wide.
+     *
+     * <p>Mirrored exactly by {@code cmdgen.comp}; this copy exists so the rule can be unit-tested
+     * and counted rather than reasoned about, and the two must be changed together.
+     *
+     * @param bits      the packed mask, one bit per column, {@code bit = dz * side + dx}
+     * @param side      columns per axis of the mask square
+     * @param ox        the node's first column, relative to the mask's origin column (may be negative)
+     * @param oz        the node's first row, likewise
+     * @param n         columns per axis the node spans, {@code 2 << detail}
+     */
+    public static boolean nodeFullyCovered(final int[] bits, final int side,
+                                           final int ox, final int oz, final int n) {
+        if (ox < 0 || oz < 0 || ox + n > side || oz + n > side) {
+            return false;
+        }
+        for (int z = 0; z < n; z++) {
+            for (int x = 0; x < n; x++) {
+                final int bit = (oz + z) * side + (ox + x);
+                if ((bits[bit >> 5] & (1 << (bit & 31))) == 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The centre-column rule the cull used to apply, kept only so the two can be counted against
+     * each other. A node is "wrongly removed" when this says yes and {@link #nodeFullyCovered}
+     * says no, and that count is the size of the hole ring.
+     */
+    public static boolean nodeCentreCovered(final int[] bits, final int side,
+                                            final int ox, final int oz, final int n) {
+        final int cx = ox + (n >> 1);
+        final int cz = oz + (n >> 1);
+        if (cx < 0 || cz < 0 || cx >= side || cz >= side) {
+            return false;
+        }
+        final int bit = cz * side + cx;
+        return (bits[bit >> 5] & (1 << (bit & 31))) != 0;
     }
 
     /**

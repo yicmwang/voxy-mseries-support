@@ -426,15 +426,24 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_VERTEX active: LOD emits a fixed clip-space triangle");
                 }
                 // VOXY_LOD_SHOW_LIGHT=1 -- reads the LOD's own light data back out as colour:
-                // red = block light, green = sky light, both /15. Answers the one question the
-                // black-splotch investigation kept failing to settle by argument -- whether a
-                // dark patch is UNLIT geometry or ABSENT geometry -- because it bypasses every
-                // downstream term (atlas, tint, fog, brightness) and paints the raw byte that
-                // VoxelIngestService.getLightingSupplier produced for that voxel.
+                // red = SKY light, green = BLOCK light, both /15, blue pinned at 0.5 for every
+                // fragment the shader emits. Answers the one question the black-splotch
+                // investigation kept failing to settle by argument -- whether a dark patch is
+                // UNLIT geometry or ABSENT geometry -- because it bypasses every downstream term
+                // (atlas, tint, fog, brightness) and paints the raw byte that
+                // VoxelIngestService.getLightingSupplier produced for that voxel. Blue is what
+                // separates the two: a dark patch with b == 128 is drawn geometry with a zero
+                // light byte, and anything else means no fragment was emitted there at all.
                 if ("1".equals(System.getenv("VOXY_LOD_SHOW_LIGHT"))) {
                     opaqueDefines.put("VOXY_LOD_SHOW_LIGHT", "");
                     translucentDefines.put("VOXY_LOD_SHOW_LIGHT", "");
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_SHOW_LIGHT active: LOD emits raw light as colour (R=block, G=sky)");
+                    // R and G were logged the wrong way round here. The shader unpacks
+                    // `interData.w >> 24 & 0xF` as red and `>> 28 & 0xF` as green, and
+                    // quad_util.glsl puts the light byte at bits 24-31 as `(lighting & 0xFF) << 24`
+                    // where lighting is the byte the ingest wrote -- sky in the LOW nibble. So red
+                    // is sky. The old text said the opposite, which is a wrong label on the one
+                    // instrument whose whole job is to be read literally.
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_SHOW_LIGHT active: LOD emits raw light as colour (R=sky, G=block, B=128 iff a fragment was drawn)");
                 }
 
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
