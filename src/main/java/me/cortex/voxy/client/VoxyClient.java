@@ -32,6 +32,18 @@ public class VoxyClient implements ClientModInitializer {
     /** How often {@code VOXY_DEV_TIME} re-issues {@code time set} to hold the clock still. */
     private static final int REPIN_TICKS = 100;
 
+    /** An integer env var, or the default when unset, blank or unparseable. */
+    private static int parseEnvIntDefault(final String name, final int def) {
+        final String v = System.getenv(name);
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            Logger.error(name + " must be an integer; got \"" + v + "\"", e);
+            return def;
+        }
+    }
+
     public static void initVoxyClient() {
         Capabilities.init();//Ensure clinit is called
 
@@ -361,6 +373,91 @@ public class VoxyClient implements ClientModInitializer {
             });
         }
 
+
+        //
+        // VOXY_DEV_TP="<p1>;<p2>[;...]" where each point is "x,y,z" or "x,y,z,yaw,pitch": teleport the
+        // eye between two fixed points on a cycle and screenshot the FIRST frame at each arrival.
+        //
+        // Movement is the trigger for the black splotches, and a pinned camera cannot reproduce it --
+        // but free movement makes every frame incomparable, because the camera differs between any two
+        // captures. A teleport is the one form of movement that is both real and repeatable: it forces
+        // the full re-traversal and re-anchor that a moving camera does, yet it lands on a known
+        // position, so every "arrival at point A" frame shows the same scene and can be compared with
+        // every other. Give both points the same yaw/pitch and the sky band is identical too, which
+        // keeps the screenshot catcher's camera gate satisfied rather than splitting every frame into
+        // its own group.
+        //
+        // VOXY_DEV_TP_TICKS (default 40) is how long to hold at each point; VOXY_DEV_TP_SHOT_DELAY
+        // (default 2) is how many ticks after the teleport to grab, since the client's position and
+        // the rendered frame both lag the command by a tick.
+        String devTp = System.getenv("VOXY_DEV_TP");        if (devTp != null && !devTp.isBlank()) {
+            final String[] points = devTp.trim().split("\\s*;\\s*");
+            if (points.length < 2) {
+                throw new IllegalStateException("VOXY_DEV_TP needs at least two ';'-separated points");
+            }
+            for (String p : points) {
+                int n = p.split("\\s*,\\s*").length;
+                if (n != 3 && n != 5) {
+                    throw new IllegalStateException(
+                            "VOXY_DEV_TP point must be \"x,y,z\" or \"x,y,z,yaw,pitch\"; got \"" + p + "\"");
+                }
+            }
+            final int holdTicks = Math.max(4, parseEnvIntDefault("VOXY_DEV_TP_TICKS", 40));
+            final int shotDelay = Math.max(1, parseEnvIntDefault("VOXY_DEV_TP_SHOT_DELAY", 2));
+            final boolean takeShots = !"0".equals(System.getenv("VOXY_DEV_TP_SHOT"));
+            Logger.info("VOXY_DEV_TP active: cycling " + points.length + " point(s) every "
+                    + holdTicks + " ticks, screenshot " + shotDelay + " tick(s) after each arrival");
+
+            final int[] ticksUntilApply = {40};
+            final int[] hold = {0};
+            final int[] shotIn = {-1};
+            final int[] idx = {0};
+            final boolean[] applied = {false};
+            net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                if (client.level == null) return;
+                var server = client.getSingleplayerServer();
+                if (server == null) return;
+                var players = server.getPlayerList().getPlayers();
+                if (players.isEmpty()) return;
+                var source = server.createCommandSourceStack().withEntity(players.get(0))
+                        .withSuppressedOutput();
+                var commands = server.getCommands();
+                try {
+                    if (!applied[0]) {
+                        if (ticksUntilApply[0]-- > 0) return;
+                        applied[0] = true;
+                        commands.performPrefixedCommand(source, "gamemode spectator");
+                    }
+                    // The grab lands a fixed number of ticks after the teleport, so it is the first
+                    // frame the new eye position could have produced.
+                    if (shotIn[0] > 0 && --shotIn[0] == 0 && takeShots
+                            && client.gameRenderer.mainRenderTarget() != null) {
+                        Logger.info("[Metal-TP-SHOT] point=" + ((idx[0] + points.length - 1) % points.length)
+                                + " args=" + points[(idx[0] + points.length - 1) % points.length]);
+                        net.minecraft.client.Screenshot.grab(client.gameDirectory,
+                                client.gameRenderer.mainRenderTarget(), component -> {});
+                    }
+                    if (hold[0]-- > 0) return;
+                    hold[0] = holdTicks;
+                    final String pos = points[idx[0] % points.length];
+                    idx[0]++;
+                    commands.performPrefixedCommand(source, "tp @s " + pos);
+                    Logger.info("[Metal-TP] -> point " + ((idx[0] - 1) % points.length) + " args=" + pos);
+                    shotIn[0] = shotDelay;
+                } catch (Throwable t) {
+                    Logger.error("VOXY_DEV_TP failed", t);
+                    applied[0] = true;
+                }
+            });
+        }
+
+        //
+        // NOTE: tagging screen-open intervals here would let the capture tools exclude pause-menu
+        // frames, which are a large near-black frame and therefore indistinguishable to any pixel
+        // metric from the artefact under investigation. It is not implemented: 26.2's `Minecraft` has
+        // no `Screen`-typed field or accessor in this mapping, so there is nothing to read. Menu frames
+        // are currently excluded by hand, from the log's own shutdown markers.
+        //
 
         //
         // Voxy's frame-rate diagnostic (Metal-RING) only exists when Voxy's render system is
