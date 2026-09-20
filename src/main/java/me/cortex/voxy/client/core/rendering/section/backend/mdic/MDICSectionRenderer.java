@@ -59,15 +59,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     /** cmdgen binding for the built-section mask. 0-7 are the draw/metadata table, 8 is statistics. */
     private static final int BUILT_MASK_BINDING = 9;
     /**
-     * Fragment-stage binding for the same mask, for the per-chunk-column cull in {@code quads.frag}.
-     *
-     * <p>9 is taken on the graphics path by the Metal chunk-bound depth buffer, so the mask rides at
-     * 10. The two stages need it at different granularity: cmdgen decides for a whole LOD node,
-     * which is 2x2 chunk columns at detail 0 and larger above, and the fragment decides for the one
-     * column it is actually in.
-     */
-    private static final int BUILT_MASK_CHUNK_BINDING = 10;
-    /**
      * Terrain shaders. Two paths:
      *   - Iris-patched (legacy {@link Shader.Builder}, GL-only by definition since
      *     the Iris pipeline is GL-gated in RenderPipelineFactory).
@@ -195,21 +186,17 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return "1".equals(System.getenv("VOXY_CMDGEN_NOCLAMP"));
     }
 
-    /** True when the built-section cull runs at all; VOXY_LOD_BUILT_MASK=0 turns it off. */
-    private static final boolean CULL_ENABLED = !"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
-
-    /**
-     * VOXY_LOD_CHUNK_CULL=0 disables the fragment-stage per-section cull, leaving the mask built and
-     * uploaded but unread. Exists for a three-way A/B: full cull, mask built but unread, nothing.
-     */
-    private static final boolean CHUNK_CULL = CULL_ENABLED
-            && !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"));
-
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
-        // NOTE: no built-section mask define here any more. The cull is per 16x16x16 SECTION and is
-        // taken in quads.frag; cmdgen.comp no longer declares the buffer, because a node-granular
-        // pass cannot express a three-dimensional decision. See CULL_ENABLED / CHUNK_CULL.
+        // Cull LOD exactly where vanilla has geometry, using Sodium's built-section set rather
+        // than a render-distance box. The box is a proxy for "where vanilla drew" and is wrong in
+        // both directions -- it culls over chunks Sodium has not built (holes at the seam) and
+        // keeps LOD over chunks it did build (z-fighting). BuiltSectionMask carries the real set.
+        // VOXY_LOD_BUILT_MASK=0 omits the define for an A/B.
+        if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+            m.put("VOXY_LOD_BUILT_MASK", "");
+            m.put("BUILT_MASK_BINDING", Integer.toString(BUILT_MASK_BINDING));
+        }
         m.put("TRANSLUCENT_WRITE_BASE", "1024");
         m.put("TEMPORAL_OFFSET", Integer.toString(TEMPORAL_OFFSET));
         m.put("TRANSLUCENT_DISTANCE_BUFFER_BINDING", "7");
@@ -239,60 +226,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return 0;
     }
 
-    /**
-     * The scene uniform, RING-BUFFERED one slot per frame in flight.
-     *
-     * <p>It used to be a single 1024-byte buffer rewritten every frame, and that is a race on Metal:
-     * {@code MAX_SUBMITS_IN_FLIGHT} is 3, so frame N+1's upload can land before frame N's draws have
-     * read theirs, and frame N then draws with frame N+1's {@code baseSectionPos} and MVP. GL would
-     * rename the buffer behind the caller; Metal does not, which makes this port-specific.
-     *
-     * <p>It fits every symptom: pinning the camera makes {@code viewport.section} and the MVP identical
-     * every frame, so a stale read is invisible -- which is exactly why the artifact needs movement;
-     * and {@code baseSectionPos} enters the vertex path as
-     * {@code (extractLoDPosition(sPos)*(1<<lodLevel)) - baseSectionPos}, so a one-frame-stale value
-     * displaces a detail-0 section by 32 blocks and a detail-4 one by 512, i.e. scattered debris at
-     * different scales rather than a uniform offset.
-     *
-     * <p>A ring of UNIFORM_RING slots, indexed by the frame id, keeps a frame's uniform alive until
-     * well after its draws have retired.
-     */
-    // Sized for the CPU AHEAD of the GPU, not for MAX_SUBMITS_IN_FLIGHT. The ring's job is to keep a
-    // frame's uniform alive until that frame's draws have retired, and the CPU does not block on the
-    // GPU: it can be many frames ahead of what has executed, so 4 slots (just past the 3 submits in
-    // flight) is not enough. 32 costs 32 KB and covers any lead this renderer produces.
-    //
-    // VOXY_UNIFORM_RING makes the slot count switchable so the A/B is ONE BUILD with one variable, and
-    // DEFAULTS TO 1 -- i.e. upstream's single rewritten buffer. Two reasons it must default to 1:
-    // `voxy/src/.../mdic/MDICSectionRenderer.java:89` is exactly `new GlBuffer(1024)` rewritten every
-    // frame, so 1 is the faithful port; and my two previous "ring" runs were compared against a
-    // different build running a different second flag, which is not an A/B. Defaulting to the port
-    // means an unset run reproduces the baseline, and only an explicit value tests the ring.
-    private static final int UNIFORM_RING = parseUniformRing();
-
-    private static int parseUniformRing() {
-        String v = System.getenv("VOXY_UNIFORM_RING");
-        if (v == null || v.isEmpty()) return 1;
-        try {
-            int n = Integer.parseInt(v.trim());
-            // A power of two keeps the modulus a mask; anything <=0 would be a divide by zero.
-            return Integer.bitCount(n) == 1 && n >= 1 ? n : 1;
-        } catch (NumberFormatException e) {
-            return 1;
-        }
-    }
-
-    private final IGpuBuffer[] uniformRing = new IGpuBuffer[UNIFORM_RING];
-    {
-        for (int i = 0; i < UNIFORM_RING; i++) {
-            this.uniformRing[i] = RenderBackendFactory.get().createBuffer(1024).zero();
-        }
-    }
-
-    /** This frame's uniform slot. */
-    private IGpuBuffer uniformFor(MDICViewport viewport) {
-        return this.uniformRing[(viewport.frameId & 0x7fffffff) % UNIFORM_RING];
-    }
+    private final IGpuBuffer uniform = RenderBackendFactory.get().createBuffer(1024).zero();//TODO move to viewport?
 
     // Far-water alpha ramp (2026-07-03, Metal translucent shader only —
     // see the VOXY_WATER_FAR_ALPHA injection + quads.frag). Target alpha at
@@ -332,16 +266,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (v == null || v.isBlank()) return def;
         try {
             return Float.parseFloat(v.trim());
-        } catch (NumberFormatException e) {
-            return def;
-        }
-    }
-
-    private static int parseEnvInt(String name, int def) {
-        String v = System.getenv(name);
-        if (v == null || v.isBlank()) return def;
-        try {
-            return Integer.parseInt(v.trim());
         } catch (NumberFormatException e) {
             return def;
         }
@@ -502,24 +426,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_VERTEX active: LOD emits a fixed clip-space triangle");
                 }
                 // VOXY_LOD_SHOW_LIGHT=1 -- reads the LOD's own light data back out as colour:
-                // red = SKY light, green = BLOCK light, both /15, blue pinned at 0.5 for every
-                // fragment the shader emits. Answers the one question the black-splotch
-                // investigation kept failing to settle by argument -- whether a dark patch is
-                // UNLIT geometry or ABSENT geometry -- because it bypasses every downstream term
-                // (atlas, tint, fog, brightness) and paints the raw byte that
-                // VoxelIngestService.getLightingSupplier produced for that voxel. Blue is what
-                // separates the two: a dark patch with b == 128 is drawn geometry with a zero
-                // light byte, and anything else means no fragment was emitted there at all.
+                // red = block light, green = sky light, both /15. Answers the one question the
+                // black-splotch investigation kept failing to settle by argument -- whether a
+                // dark patch is UNLIT geometry or ABSENT geometry -- because it bypasses every
+                // downstream term (atlas, tint, fog, brightness) and paints the raw byte that
+                // VoxelIngestService.getLightingSupplier produced for that voxel.
                 if ("1".equals(System.getenv("VOXY_LOD_SHOW_LIGHT"))) {
                     opaqueDefines.put("VOXY_LOD_SHOW_LIGHT", "");
                     translucentDefines.put("VOXY_LOD_SHOW_LIGHT", "");
-                    // R and G were logged the wrong way round here. The shader unpacks
-                    // `interData.w >> 24 & 0xF` as red and `>> 28 & 0xF` as green, and
-                    // quad_util.glsl puts the light byte at bits 24-31 as `(lighting & 0xFF) << 24`
-                    // where lighting is the byte the ingest wrote -- sky in the LOW nibble. So red
-                    // is sky. The old text said the opposite, which is a wrong label on the one
-                    // instrument whose whole job is to be read literally.
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_SHOW_LIGHT active: LOD emits raw light as colour (R=sky, G=block, B=128 iff a fragment was drawn)");
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_SHOW_LIGHT active: LOD emits raw light as colour (R=block, G=sky)");
                 }
 
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
@@ -930,27 +845,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             m.put("X_AXIS_FACE_TINT",   Float.toString(level.cardinalLighting().byFace(Direction.EAST)) + "f");
         }
         if (taa != null) m.put("TAA_PATCH", "");
-        // Per-chunk-column cull of the LOD against vanilla's built sections. Lives in the COMMON
-        // defines so both LOD passes get it: the cull has to apply to the translucent surface too,
-        // or LOD water survives over vanilla water and nowhere else, which is a far more visible
-        // artifact than a terrain seam.
-        if (CHUNK_CULL) {
-            m.put("VOXY_LOD_CHUNK_CULL", "");
-            m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
-        }
-        // VOXY_LOD_SHOW_DRAWID=1: paint the per-draw section index the vertex stage received. Injected
-        // into the TERRAIN defines so quads3.vert/quads.frag see it, and into the common map so both LOD
-        // passes get it -- they read the same pushed constant. Metal-specific concern: on GL the index
-        // arrives via gl_BaseInstance.
-        if ("1".equals(System.getenv("VOXY_LOD_SHOW_DRAWID"))) {
-            m.put("VOXY_LOD_SHOW_DRAWID", "");
-        }
-        // VOXY_BI_OFFSET=1: take the per-draw section index from a buffer offset instead of the pushed
-        // constant. The shader and the encoder must agree, so this define and the encoder's env read are
-        // the same variable.
-        if ("1".equals(System.getenv("VOXY_BI_OFFSET"))) {
-            m.put("VOXY_BI_OFFSET", "");
-        }
         return m;
     }
 
@@ -972,7 +866,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     }
 
     private void uploadUniformBuffer(MDICViewport viewport) {
-        long ptr = UploadStream.INSTANCE.upload(this.uniformFor(viewport), 0, 1024);
+        long ptr = UploadStream.INSTANCE.upload(this.uniform, 0, 1024);
         long base = ptr;
 
         var mat = this.lodMvp(viewport);
@@ -1091,7 +985,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private void bindRenderingBuffers(MDICViewport viewport) {
         // SceneUniform is now an SSBO (see bindings.glsl); bind it to the
         // GL_SHADER_STORAGE_BUFFER target so the in-shader binding=0 matches.
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniformFor(viewport).id());
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniform.id());
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, this.geometryManager.getGeometryBuffer().id());
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, this.geometryManager.getMetadataBuffer().id());
         this.modelStore.bind(3, 4, 0);
@@ -1186,9 +1080,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     public void renderOpaqueMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
-        pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad
-                = pfModelUnbaked = pfFaceZero = pfWrongSection = pfWrongChecked = pfStaleEntry = 0;
-        pfWrongExamples = 0;
         // SceneUniform was already uploaded by buildDrawCalls this frame
         // (runPipelineMetal always pairs them); no re-upload.
         if (this.terrainPipeline == null) {
@@ -1202,18 +1093,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         lodDrawDiag(this.geometryManager.getSectionCount(), rawCount, maxDrawCount);
         if (maxDrawCount != 0) {
             this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
-        }
-        // One line per frame, aligned to the screenshot burst by wall clock: a captured frame's
-        // filename (2026-09-20_01.02.50.png) carries the same timestamp as these log lines
-        // ([01:02:50]), so the catcher's verdicts can be read against the renderer's state.
-        if (DRAWCHK != 0) {
-            Logger.info("[Metal-PF] draws=" + maxDrawCount + " sampled=" + pfSampled
-                    + " lightZero=" + pfLightZero + " modelOob=" + pfModelOob
-                    + " modelUnbaked=" + pfModelUnbaked + " faceZero=" + pfFaceZero
-                    + " emptyQuad=" + pfEmptyQuad
-                    + " WRONGSEC=" + pfWrongSection + "/" + pfWrongChecked + " staleTable=" + pfStaleEntry
-                    + " coarseDetail=" + pfCoarse + " orphan=" + pfOrphan + " straddle=" + pfStraddle
-                    + " allocs=" + drawchkTableSize);
         }
         // Encoder-sequencing test, drawn AFTER the LOD so the LOD cannot hide it. Deliberately
         // outside the maxDrawCount guard: the question is whether this encoder accepts a draw at
@@ -1353,525 +1232,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     org.lwjgl.system.MemoryUtil.memGetInt(a + 16)));
         }
         me.cortex.voxy.common.Logger.info("[Metal-CMD " + tag + "] maxDrawCount=" + maxDrawCount + sb);
-    }
-
-    // ---------------------------------------------------------------------------------------------
-    // CPU validation of the draw commands about to be submitted (VOXY_DRAWCHK).
-    // ---------------------------------------------------------------------------------------------
-
-    /**
-     * How thoroughly {@link #validateDrawCommands} walks the command list. {@code 0} off, {@code 1}
-     * sampled on a rotating stride (the default — the full walk is ~450k commands a frame across the
-     * three slices and the frame is only a few ms), {@code 2} every command.
-     */
-    private static final int DRAWCHK = parseEnvInt("VOXY_DRAWCHK", 1);
-    private static final int DRAWCHK_STRIDE = Math.max(1, parseEnvInt("VOXY_DRAWCHK_STRIDE", 16));
-    /**
-     * Whether to build the live-allocation table and run the orphan/straddle checks against it.
-     *
-     * <p><b>Off by default, and it must stay that way for anything interactive.</b> The table is built
-     * by scanning the whole metadata buffer -- {@code maxSectionCount} entries, 1,048,576 of them, at
-     * three calls per frame. That was measured as "a few ms" when it was written and is nothing of the
-     * kind: it is tens of megabytes of reads per frame, and with it on the client is visibly slow. The
-     * per-quad counters below need no table and cost a handful of reads per sampled command, so this
-     * is the only part worth gating.
-     */
-    private static final boolean DRAWCHK_TABLE =
-            "1".equals(System.getenv("VOXY_DRAWCHK_TABLE"));
-
-    /**
-     * How often the allocation table is rebuilt from the metadata buffer, in validate calls, when it is
-     * enabled. A longer interval lags the streaming state, and then `orphan` counts commands whose
-     * allocation appeared after the table was built -- a counter moving for the wrong reason, which is
-     * the failure mode this whole investigation keeps rediscovering. Sampling honestly is better than
-     * sampling fast.
-     */
-    private static final int DRAWCHK_TABLE_EVERY = Math.max(1, parseEnvInt("VOXY_DRAWCHK_TABLE_EVERY", 30));
-
-    /**
-     * [0]=checked [1]=orphan [2]=straddle [3]=overlap [4]=sidOob [5]=noGroup [6]=posMismatch
-     * [7]=listStale(depth) — 1 while the CPU's render-list read is not the frame cmdgen ran on.
-     */
-    private static final long[] DRAWCHK_TOT = new long[8];
-    private static final long[] DRAWCHK_LAST = new long[8];
-    private static final String[] DRAWCHK_NAMES =
-            {"checked", "orphan", "straddle", "overlap", "sidOob", "noGroup", "posMismatch", "listStale"};
-    private static long drawchkCalls = 0;
-    private static int drawchkExamples = 0;
-
-    /**
-     * Per-frame counters, reset at the start of each opaque render and logged at the end of it.
-     *
-     * <p>Screenshot filenames carry the same wall clock as the log's own timestamps
-     * ({@code 2026-09-20_01.02.50.png} against {@code [01:02:50]}), so a per-frame line is enough to
-     * line a captured frame up with the renderer's state at that instant. That is the piece every
-     * previous round was missing: the catcher can say *which* frames have the artefact, but without
-     * this there is nothing to compare them against.
-     */
-    private static long pfDraws, pfLightZero, pfModelOob, pfCoarse, pfOrphan, pfStraddle;
-    private static long pfSampled, pfEmptyQuad, pfModelUnbaked, pfFaceZero;
-    private static long pfWrongSection, pfWrongChecked, pfStaleEntry;
-    private static int pfExamples = 0;
-    private static int pfWrongExamples = 0;
-
-    /** Live geometry allocations, flat {@code [start, endExclusive, sectionId]} sorted by start. */
-    private static long[] drawchkTable = null;
-    private static int drawchkTableSize = 0;
-    private static int drawchkTableAge = Integer.MAX_VALUE;
-    /** Live section count when the table was built; the ownership check is gated on it not moving. */
-    private static int drawchkTableSectionCount = -1;
-
-    /**
-     * Validate, on the CPU, every draw command this slice is about to submit against the geometry
-     * allocations the sections it may draw actually own.
-     *
-     * <p>A section's 32-byte metadata is all that is needed to reconstruct its allocation. The manager
-     * allocates {@code upsized = (itemCount + 1023) & ~1023} elements from a 1024-aligned arena and
-     * stores {@code geometryPtr + offsets[0]} in the metadata, while {@code RenderDataFactory} always
-     * starts {@code offsets[0]} at 0 — so {@code quadStart} <b>is</b> the allocation address, and the
-     * eight packed group counts sum to {@code itemCount}. So the allocation is
-     * {@code [quadStart, quadStart + ceil1024(sum(counts)))} and the table can be built by scanning
-     * the metadata buffer, which is the same bytes the GPU reads.
-     *
-     * <p><b>Deliberately does not use the render list.</b> {@code HierarchicalOcclusionTraverser} zeroes
-     * that buffer's count with a CPU {@code memset} at the start of the frame and the traversal then
-     * writes it on the GPU; the CPU reading it at draw time sees the zeroed value while the entries
-     * still hold the previous frame's ids. Measured here: {@code listCount=0} against
-     * {@code cmdGenDispatch=(88,1,1)}, i.e. prep computed ~11k sections from that same uint on the
-     * GPU. Using it would compare one frame's commands against another frame's section ids and
-     * manufacture mismatches — the first version of this check did exactly that and reported
-     * {@code posMismatch=35674}, which is that artifact and not a finding. The table below comes from
-     * one buffer, written by one pass, so it is internally consistent.
-     *
-     * <p>What each counter means, none of which needs the render list:
-     *
-     * <ul>
-     *   <li><b>orphan</b> — the command's quad range lies inside no live allocation. The draw reads
-     *       geometry no section owns, i.e. arbitrary shared-buffer contents.</li>
-     *   <li><b>straddle</b> — the range starts in one allocation and ends in another. The draw
-     *       stitches two unrelated sections' quads into one mesh: geometry shaped nothing like the
-     *       section it is drawn as. Cannot be reached by any shading fault.</li>
-     *   <li><b>overlap</b> — two live sections were given overlapping allocations. Then one section's
-     *       metadata points at memory holding another's quads, and which one the buffer holds changes
-     *       as uploads land. This is the allocator-level version of the reported symptom, and the one
-     *       a per-command check is otherwise structurally blind to.</li>
-     *   <li><b>sidOob / noGroup / posMismatch</b> — need the render list, so they are only counted
-     *       while {@code listStale == 0} and are meaningless otherwise.</li>
-     * </ul>
-     */
-    private void validateDrawCommands(final String tag, MDICViewport viewport,
-                                      long indirectOffset, int maxDrawCount) {
-        if (DRAWCHK == 0 || maxDrawCount <= 0) return;
-        if (!(viewport.drawCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer cmds)) return;
-        if (!(viewport.positionScratchBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer pos)) return;
-        if (!(viewport.indirectLookupBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer list)) return;
-        if (!(this.geometryManager.getMetadataBuffer() instanceof me.cortex.voxy.client.core.metal.MetalBuffer md)) return;
-        if (!(this.geometryManager.getGeometryBuffer() instanceof me.cortex.voxy.client.core.metal.MetalBuffer geo)) return;
-        long cp = cmds.getContentsPtr();
-        long pp = pos.getContentsPtr();
-        long lp = list.getContentsPtr();
-        long mp = md.getContentsPtr();
-        final long gpp = geo.getContentsPtr();
-        final long modelPtr = this.modelStore.getModelBuffer()
-                instanceof me.cortex.voxy.client.core.metal.MetalBuffer mmb ? mmb.getContentsPtr() : 0;
-        if (cp == 0 || pp == 0 || lp == 0 || mp == 0) return;
-
-        final long posEntries = pos.size() / 8L;//uvec2 per entry
-        final long heapElements = geo.size() / 8L;//8 bytes per quad
-        final int maxSections = this.geometryManager.getMaxSectionCount();
-        long avail = Math.max(0, (cmds.size() - indirectOffset) / 20L);
-        int n = (int) Math.min(maxDrawCount, avail);
-
-        // Rebuild the allocation table periodically rather than every call, and also whenever the live
-        // section count moves. The count gate matters for correctness, not freshness: the ownership
-        // check below asks "which section owns this address", and a table built before a section was
-        // freed and its address reused answers with the PREVIOUS owner -- a false positive that would
-        // be worse than no reading at all. Skipped entirely unless opted into -- see DRAWCHK_TABLE.
-        final int sectionCount = this.geometryManager.getSectionCount();
-        if (DRAWCHK_TABLE) {
-            if (drawchkTableAge >= DRAWCHK_TABLE_EVERY || sectionCount != drawchkTableSectionCount) {
-                drawchkTableAge = 0;
-                rebuildAllocationTable(mp, maxSections, heapElements);
-                drawchkTableSectionCount = sectionCount;
-            }
-            drawchkTableAge += 3;// opaque + temporal + translucent per frame
-        }
-        final long[] table = DRAWCHK_TABLE ? drawchkTable : null;
-        final int tableSize = DRAWCHK_TABLE ? drawchkTableSize : 0;
-
-        // Is the CPU's render list the frame cmdgen actually ran on? prep.comp derives the same
-        // dispatch size from the same uint, so a count that cannot produce this dispatch is stale.
-        // NOTE the pointer must stay a long: an earlier version of this line narrowed it with
-        // `(int) dcb.getContentsPtr()`, which truncates a 64-bit address to 32 bits and sends
-        // memGetInt to an unmapped page -- a SIGSEGV in the render thread, not a wrong reading.
-        final long listCount = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp));
-        long dispatchPtr = 0;
-        if (viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer dcb) {
-            dispatchPtr = dcb.getContentsPtr();
-        }
-        final int cmdGenDispatchX = dispatchPtr == 0 ? 0 : MemoryUtil.memGetInt(dispatchPtr);
-        final boolean listFresh = listCount > 0 && cmdGenDispatchX > 0
-                && listCount <= (long) cmdGenDispatchX * 128L;
-
-        int d0 = 0, d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0, d6 = 0, d7 = listFresh ? 0 : 1;
-
-        for (int i = 0; i < n; i++) {
-            if (DRAWCHK == 1 && DRAWCHK_STRIDE > 1 && (i % DRAWCHK_STRIDE) != 0) continue;
-            long a = cp + indirectOffset + (long) i * 20L;
-            int indexCount = MemoryUtil.memGetInt(a);
-            int baseVertex = MemoryUtil.memGetInt(a + 12);
-            long baseInstance = Integer.toUnsignedLong(MemoryUtil.memGetInt(a + 16));
-            d0++;
-            if (indexCount <= 0) continue;
-
-            // The range this draw reads, in geometry-heap elements (one element is one quad).
-            final long qs = Integer.toUnsignedLong(baseVertex) >> 2;
-            final long qe = qs + indexCount / 6L;
-
-            final int slot = (table == null || tableSize == 0) ? -1 : findContaining(table, tableSize, qs);
-            if (table != null && slot < 0) {
-                d1++;
-                pfOrphan++;
-                drawchkExample(tag, i, "orphan", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
-                        + " end=" + qe + " table=" + tableSize + " heapElems=" + heapElements);
-                continue;
-            }
-            if (table != null) {
-                final long allocEnd = table[slot * 3 + 1];
-                if (qe > allocEnd) {
-                    d2++;
-                    pfStraddle++;
-                    drawchkExample(tag, i, "straddle", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
-                            + " end=" + qe + " allocEnd=" + allocEnd + " sid=" + table[slot * 3 + 2]);
-                    continue;
-                }
-
-                // THE OWNERSHIP CHECK -- "is this geometry in the right place?"
-                //
-                // Each section's quads live in one contiguous allocation, so the allocation table
-                // answers "which section owns the quads at baseVertex" without the render list. The
-                // vertex shader places that geometry using positionBuffer[baseInstance], which cmdgen
-                // wrote from the metadata of whatever section it built the command for. So if the
-                // owning section and the position the draw uses disagree, the draw is rendering one
-                // section's quads at another section's position -- trees with their trunks in open
-                // sky, kelp over dry ground, water at the wrong height, terrain slices detached.
-                //
-                // This is the one form of the fault that a per-command check CAN see, and it is
-                // deliberately independent of the render list: both sides of the comparison come from
-                // buffers written by the same pass, so a stale CPU read of a GPU-written list cannot
-                // manufacture a mismatch the way it did for posMismatch.
-                final long ownerSid = table[slot * 3 + 2];
-                // SELF-VALIDATION, which is what makes this check trustworthy rather than merely
-                // suggestive. The table can be stale: a section replaced since it was built leaves
-                // the live COUNT unchanged (a replace frees one id and allocates another), so no
-                // count-based gate catches it, and a stale entry would name the previous owner --
-                // a false positive that would look exactly like the bug.
-                //
-                // But a stale entry is detectable for free: if the section the table names no longer
-                // owns that address, its CURRENT metadata will not claim it either. So compare the
-                // table's recorded start against the section's live quadStart and skip the entry when
-                // they disagree. A removed section's record is zeroed, so that case is covered too.
-                // The cost is one read per checked command, against three million-entry scans a frame
-                // for the alternative (rebuilding every call).
-                final long ownerStart = ownerSid < maxSections
-                        ? Integer.toUnsignedLong(MemoryUtil.memGetInt(mp + ownerSid * 32L + 12L)) : -1;
-                if (ownerStart != table[slot * 3]) {
-                    pfStaleEntry++;
-                    continue;
-                }
-                if (ownerSid < maxSections && baseInstance < posEntries) {
-                    final long om = mp + ownerSid * 32L;
-                    final int ownerHi = MemoryUtil.memGetInt(om);
-                    final int ownerLo = MemoryUtil.memGetInt(om + 4);
-                    final int useHi = MemoryUtil.memGetInt(pp + baseInstance * 8L);
-                    final int useLo = MemoryUtil.memGetInt(pp + baseInstance * 8L + 4);
-                    if (ownerHi != useHi || ownerLo != useLo) {
-                        pfWrongSection++;
-                        if (pfWrongExamples++ < 8) {
-                            Logger.warn("[Metal-WRONGSEC! " + tag + "] cmd#" + i
-                                    + " quads[" + qs + "," + qe + ") owned by sid=" + ownerSid
-                                    + " at " + pprintRawPos(ownerHi, ownerLo)
-                                    + " but drawn with baseInstance=" + baseInstance
-                                    + " at " + pprintRawPos(useHi, useLo)
-                                    + " quads=" + (indexCount / 6L));
-                        }
-                    } else {
-                        pfWrongChecked++;
-                    }
-                }
-            }
-
-            // The quad the vertex shader will actually read for this command (baseVertex>>2 is the
-            // first quad's index). Two properties of it decide whether the quad can draw as a flat
-            // black rectangle: a fully dark light byte, and a model id past the 65536-entry model
-            // table, which reads out of bounds and yields a garbage face -- and therefore a garbage
-            // UV, a garbage tint and no texture. Both are cheap to decode here (quad_format.glsl:
-            // face = q0&7, light = (q1>>>23)&0xFF with sky low, modelId = ((q0>>>26)&0x3F)|((q1&0x3FFF)<<6)).
-            if (gpp != 0 && qs * 8L + 8L <= geo.size()) {
-                final long qa = gpp + qs * 8L;
-                final int q0 = MemoryUtil.memGetInt(qa);
-                final int q1 = MemoryUtil.memGetInt(qa + 4);
-                final int light = (q1 >>> 23) & 0xFF;
-                final int modelId = ((q0 >>> 26) & 0x3F) | ((q1 & 0x3FFF) << 6);
-                if (light == 0) pfLightZero++;
-                // A zero quad inside a drawn range can never be legitimate: the mesher writes real
-                // quads, and cmdgen only emits a command for a group whose count is non-zero. So a
-                // zero quad here means the geometry at this range is not what the section uploaded --
-                // either the upload has not landed yet or the range belongs to someone else. This is
-                // the one signature that separates "wrong metadata" from "right metadata, wrong
-                // geometry", and nothing so far has tested the latter.
-                if (q0 == 0 && q1 == 0) pfEmptyQuad++;
-                // The model this quad points at: is it actually populated? `ModelFactory` allocates
-                // `modelId = modelTexture2id.size()` and maps the state to it, but the model is only
-                // written into this buffer later, after an async GPU bake and readback. A quad that
-                // carries an id allocated but not yet uploaded reads a zeroed BlockModel, whose
-                // `faceData[face]` of 0 means a zero UV rect, tint 0, no cutout and no indentation --
-                // a flat, textureless, unlit-looking rectangle the size of the LOD cell. Nothing is
-                // corrupt here: every index and every byte the other checks look at is valid.
-                if (modelPtr != 0) {
-                    final long modelAt = modelPtr + (long) modelId * 64L;
-                    final int face = q0 & 0x7;
-                    int allZero = 0;
-                    for (int f = 0; f < 6; f++) {
-                        allZero |= MemoryUtil.memGetInt(modelAt + f * 4L);
-                    }
-                    if (allZero == 0) {
-                        pfModelUnbaked++;
-                        if (pfExamples++ < 6) {
-                            drawchkExample(tag, i, "modelUnbaked", "modelId=" + modelId
-                                    + " face=" + face + " light=" + light);
-                        }
-                    } else if (face < 6 && MemoryUtil.memGetInt(modelAt + face * 4L) == 0) {
-                        pfFaceZero++;
-                    }
-                }
-                if (modelId >= 65536) {
-                    pfModelOob++;
-                    if (pfExamples++ < 6) {
-                        drawchkExample(tag, i, "modelOob", "modelId=" + modelId + " light=" + light
-                                + " quad=[" + Integer.toUnsignedString(q0) + ","
-                                + Integer.toUnsignedString(q1) + "] quads=" + (indexCount / 6L));
-                    }
-                }
-                // Detail lives in the top nibble of the positionBuffer entry the vertex shader reads.
-                final long rawPosHi = Integer.toUnsignedLong(MemoryUtil.memGetInt(pp + baseInstance * 8L));
-                if ((rawPosHi >>> 28) >= 3) pfCoarse++;
-                pfSampled++;
-            }
-
-            if (!listFresh || baseInstance >= posEntries) continue;
-            long sid = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp + 4 + baseInstance * 4L));
-            if (sid >= maxSections) { d4++; continue; }
-            long m = mp + sid * 32L;
-            int metaPosHi = MemoryUtil.memGetInt(m);
-            int metaPosLo = MemoryUtil.memGetInt(m + 4);
-            if (metaPosHi != MemoryUtil.memGetInt(pp + baseInstance * 8L)
-                    || metaPosLo != MemoryUtil.memGetInt(pp + baseInstance * 8L + 4)) {
-                d6++;
-                continue;
-            }
-            long quadStart = Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 12));
-            long[] cnt = unpackQuadGroups(
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 16)),
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 20)),
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 24)),
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 28)));
-            if (!matchesQuadGroup(quadStart, cnt, qs, indexCount / 6L)) d5++;
-        }
-
-        DRAWCHK_TOT[0] += d0; DRAWCHK_TOT[1] += d1; DRAWCHK_TOT[2] += d2;
-        DRAWCHK_TOT[4] += d4; DRAWCHK_TOT[5] += d5; DRAWCHK_TOT[6] += d6;
-        DRAWCHK_TOT[7] = d7;
-
-        if ((drawchkCalls++ % 600) == 1) {
-            StringBuilder sb = new StringBuilder();
-            for (int k = 0; k < DRAWCHK_NAMES.length; k++) {
-                sb.append(' ').append(DRAWCHK_NAMES[k]).append('=').append(DRAWCHK_TOT[k])
-                  .append("(+").append(DRAWCHK_TOT[k] - DRAWCHK_LAST[k]).append(')');
-                DRAWCHK_LAST[k] = DRAWCHK_TOT[k];
-            }
-            Logger.info("[Metal-DRAWCHK " + tag + "] mode=" + DRAWCHK + " stride=" + DRAWCHK_STRIDE
-                    + " draws=" + n + " allocs=" + tableSize
-                    + " listCount=" + listCount + " cmdGenDispatchX=" + cmdGenDispatchX
-                    + " maxSections=" + maxSections + " heapElems=" + heapElements + sb);
-        }
-    }
-
-    /**
-     * Rebuild the live-allocation table from the metadata buffer, and count overlaps while it is
-     * sorted.
-     *
-     * <p>An entry is live if it claims any geometry at all. A freed slot is written as 32 zero bytes
-     * by {@code BasicAsyncGeometryManager.writeMetadata}, so {@code quadStart == 0 && no counts} is
-     * the empty marker — with the one exception of a genuinely live section allocated at address 0,
-     * which is kept by testing the counts as well.
-     *
-     * <p>Sorting by start makes the overlap scan a single linear pass over neighbours: the arena
-     * hands out 1024-aligned, non-overlapping ranges, so any two live entries whose ranges intersect
-     * means the allocator gave the same memory to two sections.
-     */
-    private static void rebuildAllocationTable(final long mp, final int maxSections, final long heapElements) {
-        long[] scratch = new long[Math.max(1024, maxSections / 4) * 3];
-        int count = 0;
-        for (int sid = 0; sid < maxSections; sid++) {
-            long m = mp + (long) sid * 32L;
-            long quadStart = Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 12));
-            long[] cnt = unpackQuadGroups(
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 16)),
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 20)),
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 24)),
-                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 28)));
-            long len = quadEnd(0L, cnt);
-            if (len == 0) continue;
-            if (quadStart + len > heapElements) continue;// not a usable allocation; orphan catches it
-            if (count * 3 + 3 > scratch.length) {
-                long[] bigger = new long[scratch.length * 2];
-                System.arraycopy(scratch, 0, bigger, 0, scratch.length);
-                scratch = bigger;
-            }
-            scratch[count * 3] = quadStart;
-            scratch[count * 3 + 1] = quadStart + ((len + 1023L) & ~1023L);
-            scratch[count * 3 + 2] = sid;
-            count++;
-        }
-        // Sort the triples by start (insertion-free: sort an index-free copy via a simple merge on
-        // the flat array, which is small enough that a boxed sort would dominate the scan).
-        sortAllocations(scratch, count);
-
-        long overlaps = countOverlaps(scratch, count);
-        DRAWCHK_TOT[3] = overlaps;
-        drawchkTable = scratch;
-        drawchkTableSize = count;
-    }
-
-    /**
-     * Count pairs of adjacent (post-sort) live allocations that intersect. The arena hands out
-     * 1024-aligned, non-overlapping ranges, so a non-zero result means it gave the same memory to
-     * two sections — and whichever section's geometry was uploaded last is what both draws read.
-     */
-    static long countOverlaps(final long[] table, final int count) {
-        long overlaps = 0;
-        for (int i = 1; i < count; i++) {
-            if (table[i * 3] < table[(i - 1) * 3 + 1]) {
-                overlaps++;
-                if (overlaps <= 4) {
-                    Logger.warn("[Metal-DRAWCHK! alloc] OVERLAP sid=" + table[(i - 1) * 3 + 2]
-                            + " [" + table[(i - 1) * 3] + "," + table[(i - 1) * 3 + 1] + ") and sid="
-                            + table[i * 3 + 2] + " [" + table[i * 3] + "," + table[i * 3 + 1] + ")");
-                }
-            }
-        }
-        return overlaps;
-    }
-
-    /** In-place merge sort of flat {@code [start, end, sid]} triples by start. */
-    private static void sortAllocations(final long[] a, final int count) {
-        if (count < 2) return;
-        long[] tmp = new long[count * 3];
-        for (int width = 1; width < count; width *= 2) {
-            for (int lo = 0; lo < count; lo += 2 * width) {
-                final int mid = Math.min(lo + width, count);
-                final int hi = Math.min(lo + 2 * width, count);
-                int l = lo, r = mid, o = lo;
-                while (l < mid && r < hi) {
-                    final int pick = a[l * 3] <= a[r * 3] ? l++ : r++;
-                    tmp[o * 3] = a[pick * 3]; tmp[o * 3 + 1] = a[pick * 3 + 1]; tmp[o * 3 + 2] = a[pick * 3 + 2];
-                    o++;
-                }
-                while (l < mid) { tmp[o * 3] = a[l * 3]; tmp[o * 3 + 1] = a[l * 3 + 1]; tmp[o * 3 + 2] = a[l * 3 + 2]; l++; o++; }
-                while (r < hi) { tmp[o * 3] = a[r * 3]; tmp[o * 3 + 1] = a[r * 3 + 1]; tmp[o * 3 + 2] = a[r * 3 + 2]; r++; o++; }
-            }
-            System.arraycopy(tmp, 0, a, 0, count * 3);
-        }
-    }
-
-    /**
-     * Index of the allocation containing element {@code q}, or {@code -1}. Binary search over the
-     * sorted table; {@code -1} means the quad belongs to no live section.
-     */
-    static int findContaining(final long[] table, final int tableSize, final long q) {
-        int lo = 0, hi = tableSize - 1, best = -1;
-        while (lo <= hi) {
-            final int mid = (lo + hi) >>> 1;
-            if (table[mid * 3] <= q) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
-        }
-        if (best < 0) return -1;
-        return q < table[best * 3 + 1] ? best : -1;
-    }
-
-    /** Rate-limited detail for the first few offenders, so the counters come with a concrete case. */
-    private static void drawchkExample(String tag, int i, String kind, String detail) {
-        if (drawchkExamples++ >= 8) return;
-        Logger.warn("[Metal-DRAWCHK! " + tag + "] cmd#" + i + " " + kind + " " + detail);
-    }
-
-    /**
-     * A section's raw position as {@code "detail L<x,y,z>"} -- the top nibble is the LOD level and the
-     * rest decodes exactly as {@code extractLoDPosition} does in quad_util.glsl. Printed instead of hex
-     * so a WRONGSEC line can be read without hand-decoding the packing, which is error-prone enough
-     * that doing it by hand is how a same-detail mismatch and a level mismatch get confused.
-     */
-    private static String pprintRawPos(final int hi, final int lo) {
-        final int d = hi >>> 28;
-        final int y = (hi >> 20) & 0xFF;
-        final int x = (lo >> 4) & 0xFFFFFF;
-        final int z = (((hi & 0xFFFFF) << 4) | (lo >>> 28)) & 0xFFFFFF;
-        // Sign-extend x and z from 24 bits, y from 8, matching bitfieldExtract on a signed int.
-        final int sx = (x << 8) >> 8;
-        final int sz = (z << 8) >> 8;
-        final int sy = (byte) y;
-        return "d" + d + " L" + sx + "," + sy + "," + sz;
-    }
-
-    /**
-     * Unpack a section's 32-byte metadata into the eight quad-group counts, in the order
-     * {@code cmdgen.comp} walks them: translucent, double-sided, down, up, north, south, west, east.
-     * Mirrors {@code BasicAsyncGeometryManager.SectionMeta.writeMetadataSplitParts}, which packs
-     * {@code (offsets[b+1]-offsets[b])} into the low half of each uint and the next delta into the
-     * high half, with the final group's high half being {@code itemCount - offsets[7]}.
-     *
-     * @param c0 first packed uint (metadata byte 16), through {@code c3} (byte 28)
-     */
-    static long[] unpackQuadGroups(final long c0, final long c1, final long c2, final long c3) {
-        return new long[] {c0 & 0xFFFFL, c0 >>> 16, c1 & 0xFFFFL, c1 >>> 16,
-                           c2 & 0xFFFFL, c2 >>> 16, c3 & 0xFFFFL, c3 >>> 16};
-    }
-
-    /**
-     * One past the last quad index this section's metadata claims, i.e. where the geometry heap
-     * allocation must extend to. {@code quadStart} is the metadata's {@code geometryPtr +
-     * offsets[0]}, so this is {@code geometryPtr + itemCount}.
-     *
-     * <p>This is the number the existing {@code verifyBuiltSectionOffsets} guard does NOT cover: it
-     * checks the deltas <i>between</i> offsets, but the final segment runs to {@code itemCount},
-     * which {@code BuiltSection} does not know (it is the geometry buffer's element count). The last
-     * group's count is packed as {@code itemCount - offsets[7]}, so if that difference is ever
-     * negative it wraps to a count near 65535 and the draw reads far past its own allocation.
-     */
-    static long quadEnd(final long quadStart, final long[] groups) {
-        long end = quadStart;
-        for (long c : groups) end += c;
-        return end;
-    }
-
-    /**
-     * Is {@code (baseVertex>>2, indexCount/6)} one of the eight {@code (ptr, count)} groups this
-     * section's metadata encodes? A draw command is only legitimate if it is — this is the check
-     * that a command's quad range lies inside its own section's allocation, since the groups tile
-     * exactly {@code [quadStart, quadEnd)}.
-     *
-     * <p>Empty groups are skipped rather than matched, because {@code cmdgen.comp} emits nothing for
-     * them ({@code if (count != 0)}): a command claiming a zero-quad group is as wrong as one
-     * claiming a range that does not exist.
-     */
-    static boolean matchesQuadGroup(final long quadStart, final long[] groups,
-                                    final long baseVertexQuads, final long quads) {
-        long ptr = quadStart;
-        for (int g = 0; g < 8; g++) {
-            if (groups[g] != 0 && baseVertexQuads == ptr && quads == groups[g]) return true;
-            ptr += groups[g];
-        }
-        return false;
     }
 
     /**
@@ -2159,14 +1519,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         var gb = this.geometryManager.getGeometryBuffer();
         traceGeometry(viewport, indirectOffset, maxDrawCount,
                 gb instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb ? mb : null);
-        validateDrawCommands(
-                indirectOffset == 0L ? "opaque"
-                        : indirectOffset == (long) TEMPORAL_OFFSET * 5L * 4L ? "temporal" : "translucent",
-                viewport, indirectOffset, maxDrawCount);
         encoder.setPipeline(pipeline);
         // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
         // SSBO post-chunk-3 SceneUniform flip.
-        encoder.setBuffer(0, this.uniformFor(viewport), 0);
+        encoder.setBuffer(0, this.uniform, 0);
         encoder.setBuffer(1, this.geometryManager.getGeometryBuffer(), 0);
         encoder.setBuffer(2, this.geometryManager.getMetadataBuffer(), 0);
         // M13 chunk 1: bindBuffers now also wires up the model atlas texture +
@@ -2195,19 +1551,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // format textures read zeros through texture2d<float> declarations).
         if (viewport.metalBoundReadBuffer != null) {
             encoder.setBuffer(9, viewport.metalBoundReadBuffer, 0);
-        }
-        // Buffer binding 10 — the built-section mask again, for the per-chunk-column cull. The same
-        // upload cmdgen read this frame; the compute pass that maintains it runs before the draws.
-        // Bound for all three draws (this method is shared), because the cull has to apply to the
-        // translucent surface too or water is culled over vanilla water and nowhere else.
-        if (CHUNK_CULL && this.builtSectionMask.buffer() != null) {
-            encoder.setBuffer(BUILT_MASK_CHUNK_BINDING, this.builtSectionMask.buffer(), 0);
-        }
-        // VOXY_BI_OFFSET=1: hand the encoder the buffer its per-draw reads come from, so it can bind it
-        // at `baseInstance * 8` instead of pushing the index as a constant.
-        if ("1".equals(System.getenv("VOXY_BI_OFFSET"))
-                && encoder instanceof me.cortex.voxy.client.core.metal.MetalRenderEncoder mre) {
-            mre.setPerDrawIndexBuffer(5, viewport.positionScratchBuffer);
         }
 
         encoder.bindIndexBuffer(me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer.INSTANCE.getBuffer(),
@@ -2329,7 +1672,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 }
                 glBindVertexArray(RenderBackendFactory.get().getStaticVAO());
                 // SceneUniform is an SSBO now (see bindings.glsl).
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniformFor(viewport).id());
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniform.id());
                 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, this.geometryManager.getMetadataBuffer().id());
                 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, viewport.visibilityBuffer.id());
                 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, viewport.indirectLookupBuffer.id());
@@ -2355,7 +1698,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // chunk 6's IGpuRenderTarget work.
                 try (var encoder = this.backend.beginComputePass()) {
                     encoder.setPipeline(this.forceAllVisiblePipeline);
-                    encoder.setBuffer(0, this.uniformFor(viewport), 0);
+                    encoder.setBuffer(0, this.uniform, 0);
                     encoder.setBuffer(2, viewport.visibilityBuffer, 0);
                     encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
                     encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
@@ -2390,15 +1733,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // diagnostics at all — a single sample, cause unproven, but the mask-off arm is
                 // the only path this touched, so it goes back to doing nothing there rather than
                 // being left as an unexplained behaviour change for a diagnostic that is moot.
-                // Maintained here because the compute encoder is already open, but READ by
-                // quads.frag now, not by cmdgen: the cull moved to a per-16x16x16-section test in
-                // the fragment stage, so cmdgen.comp no longer declares the buffer and the
-                // BUILT_MASK_BINDING bind that used to follow this is gone with it.
-                if (CULL_ENABLED) {
+                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
                     this.builtSectionMask.update(viewport, this.backend);
+                    if (this.builtSectionMask.buffer() != null) {
+                        encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
+                    }
                 }
                 encoder.setPipeline(this.commandGenPipeline);
-                encoder.setBuffer(0, this.uniformFor(viewport), 0);
+                encoder.setBuffer(0, this.uniform, 0);
                 encoder.setBuffer(1, viewport.drawCallBuffer, 0);
                 encoder.setBuffer(2, viewport.drawCountCallBuffer, 0);
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
@@ -2452,7 +1794,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // but pre-existing read-then-dispatch pattern).
             try (var encoder = this.backend.beginComputePass()) {
                 encoder.setPipeline(this.translucentGenPipeline);
-                encoder.setBuffer(0, this.uniformFor(viewport), 0);
+                encoder.setBuffer(0, this.uniform, 0);
                 encoder.setBuffer(1, viewport.drawCallBuffer, 0);
                 encoder.setBuffer(2, viewport.drawCountCallBuffer, 0);
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
@@ -2498,9 +1840,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     @Override
     public void free() {
-        for (IGpuBuffer u : this.uniformRing) {
-            u.free();
-        }
+        this.uniform.free();
         this.distanceCountBuffer.free();
         if (this.translucentTerrainShader != null) this.translucentTerrainShader.free();
         if (this.terrainShader != null) this.terrainShader.free();
