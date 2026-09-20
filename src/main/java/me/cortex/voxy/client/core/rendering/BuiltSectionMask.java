@@ -45,12 +45,27 @@ public final class BuiltSectionMask {
     private static final LongOpenHashSet BUILT = new LongOpenHashSet();
 
     public static synchronized void add(final long sectionPos) {
+        added++;
         BUILT.add(sectionPos);
     }
 
     public static synchronized void remove(final long sectionPos) {
+        removed++;
         BUILT.remove(sectionPos);
     }
+
+    /**
+     * Feeder call counts, split by which way {@code isBuilt()} sent them.
+     *
+     * <p>These exist because the set size alone cannot say which half of the feeder is broken, and a
+     * pinned run measured {@code built=2 maxBuilt=2} over its whole length -- a loaded, rendering
+     * world that reported two sections. If {@code removed} runs far ahead of {@code added}, the
+     * feeder is being handed sections whose build has not been marked yet at the injection point
+     * (HEAD of the region manager's {@code uploadResults}, which does not itself touch {@code
+     * isBuilt}), and every section is being retracted instead of claimed. If both are near zero, the
+     * funnel itself is not being reached.
+     */
+    private static long added, removed;
 
     /** How many sections the set holds. Package-private: the tests and the diagnostics both read it. */
     static synchronized int builtCount() {
@@ -325,9 +340,10 @@ public final class BuiltSectionMask {
             }
         }
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-VMASK f=%d] built=%d maxBuilt=%d columns=%d/%d sections=%d  anchor=%d,%d cam=%d,%d camSecY=%d uploads=%d resets=%d kept=%d%s",
+                "[Metal-VMASK f=%d] built=%d maxBuilt=%d columns=%d/%d sections=%d  anchor=%d,%d cam=%d,%d camSecY=%d uploads=%d resets=%d kept=%d added=%d removed=%d%s",
                 VMASK_FRAME, builtSize, maxBuilt, columns, side * side, sections,
-                anchorSecX, anchorSecZ, camSecX, camSecZ, camSecY, uploads, resets, resetsSkipped, grid));
+                anchorSecX, anchorSecZ, camSecX, camSecZ, camSecY, uploads, resets, resetsSkipped,
+                added, removed, grid));
         me.cortex.voxy.common.Logger.info(String.format(
                 "[Metal-VMASK2 f=%d] vertical span: bits %d..%d of 64 (bias %d => sections %d..%d relative to the camera's)",
                 VMASK_FRAME, minBit < 64 ? minBit : -1, maxBit, Y_BIAS,
