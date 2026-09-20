@@ -126,12 +126,21 @@ public class WorldConversionFactory {
         var biomes = cache.biomeCache;
         var data = section.section;
 
-        var vp = blockContainer.data.palette;
+        // Read `data` ONCE. It is volatile and its owner can swap it (that is what a palette or storage
+        // resize does) while this conversion is running, and this method used to read it FOUR separate
+        // times -- at the palette, at the GlobalPalette test, at the storage test, and at the
+        // ZeroBitStorage test. A swap landing between those reads pairs one version's palette with
+        // another's storage, so the storage is decoded through the wrong palette. In the
+        // ZeroBitStorage branch that fills 4096 cells with old-palette entry 0, which renders as black
+        // with a correct silhouette, and it is sticky because the light and blocks are snapshotted with
+        // the section.
+        final var secData = blockContainer.data;
+        var vp = secData.palette;
         var pc = cache.getPaletteCache(vp.getSize());
         GlobalPalette<BlockState> bps = null;
 
         int pcc = 0;
-        if (blockContainer.data.palette instanceof GlobalPalette<BlockState> _bps) {
+        if (secData.palette instanceof GlobalPalette<BlockState> _bps) {
             bps = _bps;
             pcc = bps.getSize();
         } else {
@@ -152,7 +161,7 @@ public class WorldConversionFactory {
 
 
         int nonZeroCnt = 0;
-        if (blockContainer.data.storage instanceof SimpleBitStorage bStor) {
+        if (secData.storage instanceof SimpleBitStorage bStor) {
             var bDat = bStor.getRaw();
             int iterPerLong = (64 / bStor.getBits()) - 1;
 
@@ -180,7 +189,7 @@ public class WorldConversionFactory {
                 data[i] = Mapper.composeMappingId(light, bId, biomes[Integer.compress(i,0b1100_1100_1100)]);
             }
         } else {
-            if (!(blockContainer.data.storage instanceof ZeroBitStorage)) {
+            if (!(secData.storage instanceof ZeroBitStorage)) {
                 throw new IllegalStateException();
             }
             int bId = pc[0];
