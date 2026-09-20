@@ -1724,15 +1724,20 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 this.statisticsBuffer.zero();
             }
             try (var encoder = this.backend.beginComputePass()) {
-                // Maintain the set in BOTH arms of the VOXY_LOD_BUILT_MASK A/B. With the cull on,
-                // the buffer is what the shader tests; with it off, the CPU-side set is the only
-                // record of what the cull WOULD have removed, and without it the two arms cannot
-                // be compared on anything except pixels — which is the weakest evidence available
-                // for a cull whose failure mode is "nothing was drawn here".
-                this.builtSectionMask.update(viewport, this.backend);
-                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))
-                        && this.builtSectionMask.buffer() != null) {
-                    encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
+                // Back to gating update() itself, not just the bind. This had been made
+                // unconditional so the CPU-side set stayed inspectable in both arms of the
+                // VOXY_LOD_BUILT_MASK A/B, and that was a real behaviour change on the arm where
+                // the cull is OFF: update() allocates a buffer and does an UploadStream upload,
+                // and it runs from inside an open compute encoder. With the cull off it did none
+                // of that before. One run on that arm hung during load having emitted no render
+                // diagnostics at all — a single sample, cause unproven, but the mask-off arm is
+                // the only path this touched, so it goes back to doing nothing there rather than
+                // being left as an unexplained behaviour change for a diagnostic that is moot.
+                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+                    this.builtSectionMask.update(viewport, this.backend);
+                    if (this.builtSectionMask.buffer() != null) {
+                        encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
+                    }
                 }
                 encoder.setPipeline(this.commandGenPipeline);
                 encoder.setBuffer(0, this.uniform, 0);
