@@ -36,25 +36,35 @@ layout(binding = 9, std430) readonly restrict buffer BoundDepthBuffer {
 #endif
 
 #ifdef VOXY_LOD_CHUNK_CULL
-// Per-chunk-column cull of the LOD against the set of sections vanilla has drawn.
+// Per-SECTION cull of the LOD against the set of sections vanilla has drawn.
 //
-// This is the SAME set cmdgen.comp tests, applied one chunk column at a time instead of one LOD
-// node at a time, and the difference is the whole fix. A node at detail d spans 2<<d chunk columns
-// (2x2 at detail 0), so deciding for a node decides for several columns at once -- it removes
-// columns vanilla never drew, which is a hole, or keeps columns it did, which is a doubled
-// surface. A fragment knows its own position, so it can decide for exactly one column and be right
-// at every detail level.
+// Three dimensions, deliberately. Sodium enforces a vertical render distance as well as a
+// horizontal one, so "this chunk column has geometry" does not mean the section above or below it
+// does -- and a cull that believes otherwise removes LOD sections vanilla never drew, which is a
+// hole in the air. Two earlier versions got this wrong in different ways: one tested a LOD node's
+// centre column (a node is 2x2 columns at detail 0, so one bit decided four, leaving a hole ring
+// around the rim of vanilla's coverage), and the next tested every column of the node but was
+// still two-dimensional. A fragment knows its own position in all three axes, so it can ask about
+// its own 16x16x16 section and be exact at every detail level.
 //
 // Bindings: 0-5 are the terrain draw's buffer table, 6 is quads3.vert's per-draw UBO, 9 is the
 // Metal chunk-bound depth buffer, so 10 is free for this.
+//
+// Header is EIGHT uints so the uvec2 array starts at byte 32 and is 8-byte aligned, which std430
+// requires for a vec2 array. Must match BuiltSectionMask.HEADER_UINTS exactly.
 layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer BuiltMaskChunkBuffer {
     uint chunkMaskSide;
     int chunkMaskCamSecX;
+    int chunkMaskCamSecY;
     int chunkMaskCamSecZ;
     int chunkMaskCamBlockX;
+    int chunkMaskCamBlockY;
     int chunkMaskCamBlockZ;
     uint _chunkMaskPad;
-    uint chunkMaskBits[];
+    // One 64-bit vertical bitmask per column, bit (secY - camSecY) + 32. Two uints rather than a
+    // uint64_t because MSL translation of 64-bit GLSL integers is a risk not worth taking for a
+    // value that is only ever shifted and tested.
+    uvec2 chunkMaskColumnY[];
 };
 #endif
 
@@ -90,6 +100,12 @@ layout(location = 2) in float voxyFogDist;
 #endif
 #ifdef VOXY_NEEDS_CAM_REL_XZ
 layout(location = 3) in vec2 voxyCamRelXZ;
+#endif
+#ifdef VOXY_LOD_CHUNK_CULL
+// The full 3D camera-relative offset, for the per-section cull: it asks about a 16x16x16 section,
+// and Sodium's vertical render distance means the horizontal column is not enough to answer it.
+// Must mirror quads3.vert's guard and location exactly.
+layout(location = 4) in vec3 voxyCamRelPos;
 #endif
 
 #ifdef DEBUG_RENDER
@@ -189,20 +205,28 @@ void main() {
     // column costs one buffer read and nothing else. Placed above the magenta/debug early-outs so
     // a forced-colour bisection still shows exactly what survives the cull.
     {
-        // Integer floor, not a truncating cast: the world extends either side of the origin and
-        // `>>` on a negative int floors, which is what the mask's own indexing assumes.
-        int colX = (chunkMaskCamBlockX + int(floor(voxyCamRelXZ.x))) >> 4;
-        int colZ = (chunkMaskCamBlockZ + int(floor(voxyCamRelXZ.y))) >> 4;
-        int cx = (colX - (chunkMaskCamBlockX >> 4)) + int(chunkMaskSide >> 1);
-        int cz = (colZ - (chunkMaskCamBlockZ >> 4)) + int(chunkMaskSide >> 1);
+        // The fragment's own world section, in all three axes. Integer floor via an arithmetic
+        // shift, not a truncating cast: the world extends either side of the origin and `>>` floors
+        // a negative int, which is what BuiltSectionMask's own indexing assumes.
+        int secX = (chunkMaskCamBlockX + int(floor(voxyCamRelPos.x))) >> 4;
+        int secY = (chunkMaskCamBlockY + int(floor(voxyCamRelPos.y))) >> 4;
+        int secZ = (chunkMaskCamBlockZ + int(floor(voxyCamRelPos.z))) >> 4;
         int sd = int(chunkMaskSide);
+        int cx = (secX - chunkMaskCamSecX) + int(sd >> 1);
+        int cz = (secZ - chunkMaskCamSecZ) + int(sd >> 1);
+        // Outside the square, or outside the +/-512 blocks the per-column bitmask spans, is NOT
+        // covered: keep the LOD. An over-drawn LOD z-fights, an under-drawn one shows the void.
         if (cx >= 0 && cz >= 0 && cx < sd && cz < sd) {
-            uint bit = uint(cz * sd + cx);
-            if ((chunkMaskBits[bit >> 5] & (1u << (bit & 31u))) != 0u) {
-                // Vanilla draws this exact chunk column. Removing only this fragment's column is
-                // what keeps a neighbouring column's LOD intact -- which a node-level cull cannot
-                // do, and which is why the holes ringed the rim of vanilla's coverage.
-                discard;
+            int bit = (secY - chunkMaskCamSecY) + 32;
+            if (bit >= 0 && bit < 64) {
+                uvec2 col = chunkMaskColumnY[cz * sd + cx];
+                uint word = bit < 32 ? col.x : col.y;
+                if ((word & (1u << uint(bit & 31))) != 0u) {
+                    // Vanilla draws this exact 16x16x16 section. Removing only this section is what
+                    // keeps the section above it -- which vanilla may not draw at all -- intact,
+                    // and that vertical case is what the missing LOD chunks turned out to be.
+                    discard;
+                }
             }
         }
     }

@@ -81,7 +81,14 @@ layout(location = 2) out float voxyFogDist;
 #define VOXY_NEEDS_CAM_REL_XZ
 #endif
 #ifdef VOXY_NEEDS_CAM_REL_XZ
+// location 3: the horizontal-only offset the near-cull needs.
 layout(location = 3) out vec2 voxyCamRelXZ;
+#endif
+#ifdef VOXY_LOD_CHUNK_CULL
+// location 4: the full 3D offset, because the cull asks about a 16x16x16 SECTION and Sodium
+// enforces a vertical render distance -- a horizontal column is not enough to answer it. Kept as a
+// separate varying rather than widening location 3 so the near-cull's existing path is untouched.
+layout(location = 4) out vec3 voxyCamRelPos;
 #endif
 
 vec2 taaShift();
@@ -160,7 +167,7 @@ void main() {
     //Note: other data is automatically discarded as it is undefiend and has not been generated
     interData = quad.attributeData;
 
-    #if defined(VOXY_NEEDS_FOG_DIST) || defined(VOXY_NEEDS_CAM_REL_XZ)
+    #if defined(VOXY_NEEDS_FOG_DIST) || defined(VOXY_NEEDS_CAM_REL_XZ) || defined(VOXY_LOD_CHUNK_CULL)
     // Reconstruct the corner's world-relative point in the same way
     // getQuadCornerPos does (kept inline rather than refactoring quad_util
     // to avoid touching the GL path's hot vertex code). cameraSubPos comes
@@ -174,6 +181,9 @@ void main() {
     #endif
     #ifdef VOXY_NEEDS_CAM_REL_XZ
     voxyCamRelXZ = cornerPoint.xz - cameraSubPos.xz;
+    #endif
+    #ifdef VOXY_LOD_CHUNK_CULL
+    voxyCamRelPos = cornerPoint - cameraSubPos;
     #endif
     #endif
 

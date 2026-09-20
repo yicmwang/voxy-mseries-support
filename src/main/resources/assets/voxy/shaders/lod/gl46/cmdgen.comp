@@ -3,25 +3,6 @@
 
 layout(local_size_x = 128) in;
 
-#ifdef VOXY_LOD_BUILT_MASK
-// Header: side (chunk columns per axis), then the camera's chunk column, then a pad. Bits follow,
-// one per column, row-major in (z, x), indexed relative to the camera's column. Filled by
-// BuiltSectionMask.update from Sodium's built-section set.
-layout(binding = BUILT_MASK_BINDING, std430) readonly restrict buffer BuiltMaskBuffer {
-    uint builtMaskSide;
-    int builtMaskCamX;
-    int builtMaskCamZ;
-    // Camera position in BLOCKS, floored. Unused here -- this pass decides per node from the chunk
-    // columns directly -- but present because quads.frag reads the same buffer at the same layout
-    // and needs it to turn a fragment's camera-relative offset into an absolute chunk column. Two
-    // different struct declarations over one buffer is how a silent field-shift bug happens, so
-    // both shaders declare all six header words.
-    int builtMaskCamBlockX;
-    int builtMaskCamBlockZ;
-    uint _builtMaskPad;
-    uint builtMaskBits[];
-};
-#endif
 
 #define DRAW_BUFFER_BINDING 1
 #define DRAW_COUNT_BUFFER_BINDING 2
@@ -104,56 +85,6 @@ void main() {
 
         uint ptr = extractQuadStart(meta);
         ivec3 relative = ipos-(baseSectionPos>>detail);
-#ifdef VOXY_LOD_BUILT_MASK
-        // Cull exactly where vanilla has geometry, by asking Sodium rather than guessing.
-        //
-        // The alternative -- culling by the render-distance BOX -- is a proxy for "where vanilla
-        // drew", and it is wrong in both directions: it culls LOD over chunks Sodium has not built
-        // yet, which leaves holes at the seam, and it keeps LOD over chunks vanilla did build,
-        // which z-fights. BuiltSectionMask carries the real set, so this is a membership test
-        // instead of arithmetic.
-        //
-        // The query is EVERY chunk column the node covers, not just its centre. A node is removed
-        // only when all of them are in the built set, which is the only condition under which
-        // removing it cannot expose the void.
-        //
-        // This replaced a centre-column test, and the reason is worth keeping: a node at level
-        // `detail` spans (32 << detail) blocks, i.e. n = (2 << detail) 16-block sections per axis,
-        // with its origin section at ipos << (detail+1). At detail 0 that is 2x2 columns, so one
-        // bit decided four: a node straddling the edge of vanilla's coverage with its centre inside
-        // was removed whole while up to three of its columns were never drawn by vanilla -- and the
-        // LOD was the only thing that would have drawn them. That is a hole up to 32 blocks across,
-        // repeated all round the seam, i.e. "LOD chunks near the player are completely empty". The
-        // old rule erred the other way too, keeping a node whose centre was outside while its other
-        // columns were vanilla-drawn, which leaves LOD on top of vanilla.
-        //
-        // Columns outside the square are not covered by definition, so a node that overhangs the
-        // square cannot be proven covered and is kept -- which also bounds the loop below to nodes
-        // that fit entirely inside, and the square is only 2*renderDistance+1 columns wide.
-        //
-        // Mirrored by BuiltSectionMask.nodeFullyCovered, which is unit-tested; change both together.
-        {
-            int sd = int(builtMaskSide);
-            int n = 2 << detail;
-            int ox = (ipos.x << (detail + 1)) - builtMaskCamX;
-            int oz = (ipos.z << (detail + 1)) - builtMaskCamZ;
-            if (ox >= 0 && oz >= 0 && ox + n <= sd && oz + n <= sd) {
-                bool allCovered = true;
-                for (int z = 0; z < n && allCovered; z++) {
-                    for (int x = 0; x < n; x++) {
-                        uint bit = uint((oz + z) * sd + (ox + x));
-                        if ((builtMaskBits[bit >> 5] & (1u << (bit & 31u))) == 0u) {
-                            allCovered = false;
-                            break;
-                        }
-                    }
-                }
-                if (allCovered) {
-                    return;
-                }
-            }
-        }
-#endif
         uint drawId = gl_GlobalInvocationID.x;
 
         positionBuffer[drawId] = extractRawPos(meta);

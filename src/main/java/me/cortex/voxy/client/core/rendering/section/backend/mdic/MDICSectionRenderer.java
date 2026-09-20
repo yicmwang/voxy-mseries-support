@@ -195,53 +195,21 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return "1".equals(System.getenv("VOXY_CMDGEN_NOCLAMP"));
     }
 
+    /** True when the built-section cull runs at all; VOXY_LOD_BUILT_MASK=0 turns it off. */
+    private static final boolean CULL_ENABLED = !"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
+
     /**
-     * {@code VOXY_LOD_CHUNK_CULL=0} disables the fragment-stage per-chunk-column cull.
-     *
-     * <p>On by default because the node-level cull alone is decided at the wrong granularity: a LOD
-     * node spans 2x2 chunk columns at detail 0 and more above, so removing or keeping the node
-     * decides for columns that were not asked about. That is a hole where vanilla never drew, and a
-     * doubled surface where it did.
+     * VOXY_LOD_CHUNK_CULL=0 disables the fragment-stage per-section cull, leaving the mask built and
+     * uploaded but unread. Exists for a three-way A/B: full cull, mask built but unread, nothing.
      */
-    private static final boolean CHUNK_CULL = !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"))
-            // The fragment cull reads the same buffer the node cull does; with the mask switched off
-            // there is nothing bound at that slot and the shader would read an unbound buffer.
-            // Keyed on the SAME condition the mask is enabled by, so the two cannot disagree.
-            && "1".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
+    private static final boolean CHUNK_CULL = CULL_ENABLED
+            && !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"));
 
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
-        // Cull LOD exactly where vanilla has geometry, using Sodium's built-section set rather
-        // than a render-distance box. The box is a proxy for "where vanilla drew" and is wrong in
-        // both directions -- it culls over chunks Sodium has not built (holes at the seam) and
-        // keeps LOD over chunks it did build (z-fighting). BuiltSectionMask carries the real set.
-        // VOXY_LOD_BUILT_MASK=0 omits the define for an A/B.
-        // DEFAULT OFF, 2026-09-19. The mask is 2D -- one bit per chunk COLUMN, Y dropped -- and
-        // Sodium enforces a vertical render distance, so "this column is built" is false at
-        // altitude: vanilla renders the sections it has, not every Y in the column. The cull
-        // therefore removes LOD sections that vanilla never draws, and because the square is
-        // indexed relative to the camera the holes FOLLOW THE PLAYER. Measured by the user: with
-        // the cull fully off the missing chunks do not appear; with it on they do, and their
-        // positions track the camera.
-        //
-        // Off rather than deleted because the mechanism is sound and the set is already 3D
-        // internally (BUILT holds full SectionPos); what is wrong is the projection to columns and
-        // the per-column query. The fix is to keep a Y bitmask per column and test each fragment's
-        // own 16x16x16 section, so the LOD draws every section vanilla does not, vertically
-        // included. Until that lands, VOXY_LOD_BUILT_MASK=1 opts back into the known-broken cull.
-        if ("1".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
-            m.put("VOXY_LOD_BUILT_MASK", "");
-            m.put("BUILT_MASK_BINDING", Integer.toString(BUILT_MASK_BINDING));
-            // The fragment-stage half, at chunk-column granularity. Its own switch so the two
-            // granularities can be A/B'd against each other and against neither: the node-level cull
-            // is now only the fast path (it fires when EVERY column of a node is covered, which is
-            // equivalent to the per-chunk answer for that node), and the fragment cull is what makes
-            // a partially covered node correct instead of a hole or a doubled surface.
-            if (CHUNK_CULL) {
-                m.put("VOXY_LOD_CHUNK_CULL", "");
-                m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
-            }
-        }
+        // NOTE: no built-section mask define here any more. The cull is per 16x16x16 SECTION and is
+        // taken in quads.frag; cmdgen.comp no longer declares the buffer, because a node-granular
+        // pass cannot express a three-dimensional decision. See CULL_ENABLED / CHUNK_CULL.
         m.put("TRANSLUCENT_WRITE_BASE", "1024");
         m.put("TEMPORAL_OFFSET", Integer.toString(TEMPORAL_OFFSET));
         m.put("TRANSLUCENT_DISTANCE_BUFFER_BINDING", "7");
@@ -1802,11 +1770,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // diagnostics at all — a single sample, cause unproven, but the mask-off arm is
                 // the only path this touched, so it goes back to doing nothing there rather than
                 // being left as an unexplained behaviour change for a diagnostic that is moot.
-                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+                // Maintained here because the compute encoder is already open, but READ by
+                // quads.frag now, not by cmdgen: the cull moved to a per-16x16x16-section test in
+                // the fragment stage, so cmdgen.comp no longer declares the buffer and the
+                // BUILT_MASK_BINDING bind that used to follow this is gone with it.
+                if (CULL_ENABLED) {
                     this.builtSectionMask.update(viewport, this.backend);
-                    if (this.builtSectionMask.buffer() != null) {
-                        encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
-                    }
                 }
                 encoder.setPipeline(this.commandGenPipeline);
                 encoder.setBuffer(0, this.uniform, 0);
