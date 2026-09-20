@@ -275,6 +275,39 @@ public class VoxyClient implements ClientModInitializer {
             final int[] ticksUntilApply = {40};
             final boolean[] applied = {false};
             final int[] reapplyCountdown = {20};
+            // VOXY_DEV_CAM_DRIFT=<blocks per second>: translate the pinned camera continuously instead
+            // of holding it still. Added because the splotches are reported to come back as soon as
+            // the camera moves at all, and a pinned camera cannot reproduce that -- but a *rotating*
+            // one breaks every screenshot comparison, since the sky band changes and the catcher uses
+            // it to decide which frames may be compared. Translation only: the sky is a uniform
+            // gradient, so it stays pixel-identical while the terrain moves underneath, which keeps
+            // the capture metric valid while the camera is genuinely in motion.
+            final double drift;
+            {
+                String d = System.getenv("VOXY_DEV_CAM_DRIFT");
+                double parsed = 0;
+                if (d != null && !d.isBlank()) {
+                    try {
+                        parsed = Double.parseDouble(d.trim());
+                    } catch (NumberFormatException e) {
+                        Logger.error("VOXY_DEV_CAM_DRIFT must be a number of blocks per second", e);
+                    }
+                }
+                drift = parsed;
+            }
+            final double baseX;
+            try {
+                baseX = Double.parseDouble(parts[0]);
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("VOXY_DEV_CAM x must be a number; got \"" + parts[0] + "\"", e);
+            }
+            final String tail = parts.length >= 5
+                    ? " " + parts[3] + " " + parts[4]
+                    : "";
+            final int[] driftTicks = {0};
+            if (drift != 0) {
+                Logger.info("VOXY_DEV_CAM_DRIFT active: translating " + drift + " blocks/sec, no rotation");
+            }
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
                 if (client.level == null) return;
                 var server = client.getSingleplayerServer();
@@ -306,6 +339,18 @@ public class VoxyClient implements ClientModInitializer {
                     }
                     // Re-assert periodically: the first tp can land before the world finishes loading
                     // the chunks under it, and MC will nudge a player that ends up inside geometry.
+                    // Under drift it re-asserts every tick, which is what makes the motion continuous
+                    // rather than a one-block step per second.
+                    if (drift != 0) {
+                        driftTicks[0]++;
+                        if (reapplyCountdown[0]-- > 0) return;
+                        reapplyCountdown[0] = 1;
+                        String x = String.format(java.util.Locale.ROOT, "%.4f",
+                                baseX + drift * (driftTicks[0] / 20.0));
+                        commands.performPrefixedCommand(source,
+                                "tp @s " + x + " " + parts[1] + " " + parts[2] + tail);
+                        return;
+                    }
                     if (reapplyCountdown[0]-- > 0) return;
                     reapplyCountdown[0] = 20;
                     commands.performPrefixedCommand(source, "tp @s " + tpArgs);

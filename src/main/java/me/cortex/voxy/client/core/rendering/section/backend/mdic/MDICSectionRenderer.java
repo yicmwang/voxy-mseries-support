@@ -1120,7 +1120,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     public void renderOpaqueMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
-        pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad = 0;
+        pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad
+                = pfModelUnbaked = pfFaceZero = 0;
         // SceneUniform was already uploaded by buildDrawCalls this frame
         // (runPipelineMetal always pairs them); no re-upload.
         if (this.terrainPipeline == null) {
@@ -1141,6 +1142,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (DRAWCHK != 0) {
             Logger.info("[Metal-PF] draws=" + maxDrawCount + " sampled=" + pfSampled
                     + " lightZero=" + pfLightZero + " modelOob=" + pfModelOob
+                    + " modelUnbaked=" + pfModelUnbaked + " faceZero=" + pfFaceZero
                     + " emptyQuad=" + pfEmptyQuad
                     + " coarseDetail=" + pfCoarse + " orphan=" + pfOrphan + " straddle=" + pfStraddle
                     + " allocs=" + drawchkTableSize);
@@ -1320,7 +1322,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * this there is nothing to compare them against.
      */
     private static long pfDraws, pfLightZero, pfModelOob, pfCoarse, pfOrphan, pfStraddle;
-    private static long pfSampled, pfEmptyQuad;
+    private static long pfSampled, pfEmptyQuad, pfModelUnbaked, pfFaceZero;
     private static int pfExamples = 0;
 
     /** Live geometry allocations, flat {@code [start, endExclusive, sectionId]} sorted by start. */
@@ -1379,6 +1381,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         long lp = list.getContentsPtr();
         long mp = md.getContentsPtr();
         final long gpp = geo.getContentsPtr();
+        final long modelPtr = this.modelStore.getModelBuffer()
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer mmb ? mmb.getContentsPtr() : 0;
         if (cp == 0 || pp == 0 || lp == 0 || mp == 0) return;
 
         final long posEntries = pos.size() / 8L;//uvec2 per entry
@@ -1463,6 +1467,30 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // the one signature that separates "wrong metadata" from "right metadata, wrong
                 // geometry", and nothing so far has tested the latter.
                 if (q0 == 0 && q1 == 0) pfEmptyQuad++;
+                // The model this quad points at: is it actually populated? `ModelFactory` allocates
+                // `modelId = modelTexture2id.size()` and maps the state to it, but the model is only
+                // written into this buffer later, after an async GPU bake and readback. A quad that
+                // carries an id allocated but not yet uploaded reads a zeroed BlockModel, whose
+                // `faceData[face]` of 0 means a zero UV rect, tint 0, no cutout and no indentation --
+                // a flat, textureless, unlit-looking rectangle the size of the LOD cell. Nothing is
+                // corrupt here: every index and every byte the other checks look at is valid.
+                if (modelPtr != 0) {
+                    final long modelAt = modelPtr + (long) modelId * 64L;
+                    final int face = q0 & 0x7;
+                    int allZero = 0;
+                    for (int f = 0; f < 6; f++) {
+                        allZero |= MemoryUtil.memGetInt(modelAt + f * 4L);
+                    }
+                    if (allZero == 0) {
+                        pfModelUnbaked++;
+                        if (pfExamples++ < 6) {
+                            drawchkExample(tag, i, "modelUnbaked", "modelId=" + modelId
+                                    + " face=" + face + " light=" + light);
+                        }
+                    } else if (face < 6 && MemoryUtil.memGetInt(modelAt + face * 4L) == 0) {
+                        pfFaceZero++;
+                    }
+                }
                 if (modelId >= 65536) {
                     pfModelOob++;
                     if (pfExamples++ < 6) {
