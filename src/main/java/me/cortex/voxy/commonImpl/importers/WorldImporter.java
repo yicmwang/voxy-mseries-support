@@ -518,7 +518,14 @@ public class WorldImporter implements IDataImporter {
                 biomes,
                 (bx, by, bz) -> {
                     int block = 0;
-                    int sky = 0;
+                    // 15, not 0, when there is no SkyLight array. A section with none is the
+                    // uniformly-sky-lit open-sky case -- and older and non-overworld saves -- so
+                    // defaulting to 0 imports all 4096 cells unlit, and mipSection then propagates
+                    // that darkness up all four LOD levels. Such a section is black by construction,
+                    // with no race and no timing involved, which is why this is worth fixing before
+                    // anything subtle: it is the same defect 324d7250 fixed in
+                    // VoxelIngestService.lightingSupplier, and the fix never reached this path.
+                    int sky = 15;
                     if (blockLight != null) {
                         block = blockLight.get(bx, by, bz);
                     }
