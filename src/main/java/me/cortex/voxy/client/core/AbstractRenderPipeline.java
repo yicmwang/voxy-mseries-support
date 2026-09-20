@@ -588,14 +588,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.metallumColor.refresh();
             this.metallumDepth.refresh();
         }
-        // NOTE: both attachments are only ever ASSIGNED inside `if (metallumTarget)` above, so when
-        // the target is not available on a frame they are still null -- and the diag block below used
-        // to dereference them unconditionally. It fired on the first five frames, which is exactly
-        // when the target can be missing, so the client died with
-        //   NullPointerException: "this.metallumColor" is null
-        // on the very first rendered frame with "Render Frame" as the crash description, before
-        // anything had drawn. The short-circuit in the line below is why it survived review: with the
-        // target false, `metallumColor.id()` is never evaluated there, so the null passed unnoticed.
+        // Both attachments are only ASSIGNED inside the `if` above, so on a frame where the target is
+        // unavailable they are still null -- and the diag line below dereferences them. Guarding here
+        // rather than relying on the short-circuit: with `metallumTarget` false the `&&` never
+        // evaluates `metallumColor.id()`, so a null would slip through this line and only surface in
+        // the diag block, on the first frames, which is exactly when the target can be missing.
         this.useMetallumTarget = metallumTarget
                 && this.metallumColor != null && this.metallumDepth != null
                 && this.metallumColor.id() != -1 && this.metallumDepth.id() != -1;
@@ -825,15 +822,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_CHUNK.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_HALF.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get()));
-            Logger.info(String.format(
-                    "[Metal-LITGATE f=%d] notLit raw=%d/%d  chunk=%d/%d   skyEmpty raw=%d  chunk=%d  <- isLightCorrect() was FALSE at ingest",
-                    this.metalFrame,
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_INGEST_NOT_LIT_RAW.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_RAW_INGEST_COUNT.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_INGEST_NOT_LIT_CHUNK.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_SKY_EMPTY_RAW.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_SKY_EMPTY_CHUNK.get()));
             if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get() > 0) {
                 Logger.info(String.format(
                         "[Metal-CMP   f=%d] samples=%d  agree=%.2f%%  MCbrighter=%.2f%%  voxyBrighter=%.2f%%",
@@ -892,23 +880,12 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                         this.metalFrame,
                         me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_AIR.get(),
                         me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_SOLID.get()));
-            }
-            if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get() > 0) {
                 Logger.info(String.format(
                         "[Metal-VOXEL2 f=%d] groundAir=%d  dark=%.2f%%   <- the cells a surface face takes its light from",
                         this.metalFrame,
                         me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get(),
                         100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK.get()
                                 / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get())));
-                Logger.info(String.format(
-                        "[Metal-VOXEL3 f=%d] groundAir raw=%d dark=%.2f%%  |  chunk=%d dark=%.2f%%",
-                        this.metalFrame,
-                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_RAW.get(),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK_RAW.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_RAW.get()),
-                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_CHUNK.get(),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK_CHUNK.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_CHUNK.get())));
             }
             Logger.info(String.format(
                     "[Metal-TICK  f=%d] tickWithResults=%d  tickWithUploads=%d  lastResultSectionCount=%d  basicSectionCount=%d",
@@ -956,15 +933,12 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.client.core.model.ModelFactory.DIAG_PROCESS_MODEL_RESULTS.get(),
                     me.cortex.voxy.client.core.model.ModelFactory.DIAG_ATLAS_UPLOADS.get()));
             Logger.info(String.format(
-                    "[Metal-REQ   f=%d] last=%d  total=%d  directRead=%d  downloadRead=%d  validated=%d INVALID=%d batchOverflow=%d",
+                    "[Metal-REQ   f=%d] last=%d  total=%d  directRead=%d  downloadRead=%d",
                     this.metalFrame,
                     me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_LAST_REQUEST_COUNT.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_TOTAL_REQUEST_COUNT.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DIRECT_READ_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DOWNLOAD_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_REQ_VALIDATED.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_REQ_INVALID.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_REQ_BATCH_OVERFLOW.get()));
+                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DOWNLOAD_COUNT.get()));
         }
     }
 
