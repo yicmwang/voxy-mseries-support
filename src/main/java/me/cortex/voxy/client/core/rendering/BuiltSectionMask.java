@@ -80,6 +80,29 @@ public final class BuiltSectionMask {
      */
     private static final int Y_BIAS = 32;
 
+    /**
+     * How much slack the square carries beyond the render distance, in chunks, so it can be
+     * anchored to a WORLD grid instead of being re-centred on the camera every time the camera
+     * crosses a chunk.
+     *
+     * <p>This is the user's observation, and it is the right way round: with the square centred on
+     * the camera, its edge moves at exactly camera speed, so the culled region's boundary slides
+     * with the player and the LOD edge appears to be dragged along behind the terrain edge — worst
+     * when moving fast, which is exactly when the LOD's own streaming is furthest behind. Anchoring
+     * to a world grid makes the boundary static in world space; it steps once per ANCHOR_STEP chunks
+     * of travel instead of continuously, and a step is a one-frame discontinuity rather than a drag.
+     *
+     * <p>Set equal to the render distance, so the square is (4*rd+1) columns on a side — 33 at RD 8,
+     * which is 8.7 KB of column bitmasks. Any camera position leaves at least rd columns of margin
+     * on every side, and the anchor only moves when the camera crosses a multiple of the step.
+     */
+    private static final int ANCHOR_SLACK = -1;   // -1 = "same as the render distance", resolved in update()
+
+    /** Largest multiple of {@code step} that is <= {@code v}, for negative {@code v} too. */
+    static int floorToStep(final int v, final int step) {
+        return Math.floorDiv(v, step) * step;
+    }
+
     private IGpuBuffer buffer;
     private int side = -1;
     private int camSecX = Integer.MIN_VALUE;
@@ -111,7 +134,7 @@ public final class BuiltSectionMask {
     private static int maxBuilt = 0;
     private long uploads = 0;
 
-    public static void logPopulation(int side, int camSecX, int camSecY, int camSecZ,
+    public static void logPopulation(int side, int anchorSecX, int camSecY, int anchorSecZ,
                                      long[] columnY, long uploads) {
         if (!VMASK_LOG) return;
         int builtSize;
@@ -151,9 +174,9 @@ public final class BuiltSectionMask {
             }
         }
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-VMASK f=%d] built=%d maxBuilt=%d columns=%d/%d sections=%d  cam=%d,%d,%d uploads=%d%s",
+                "[Metal-VMASK f=%d] built=%d maxBuilt=%d columns=%d/%d sections=%d  anchor=%d,%d camSecY=%d uploads=%d%s",
                 VMASK_FRAME, builtSize, maxBuilt, columns, side * side, sections,
-                camSecX, camSecY, camSecZ, uploads, grid));
+                anchorSecX, anchorSecZ, camSecY, uploads, grid));
         me.cortex.voxy.common.Logger.info(String.format(
                 "[Metal-VMASK2 f=%d] vertical span: bits %d..%d of 64 (bias %d => sections %d..%d relative to the camera's)",
                 VMASK_FRAME, minBit < 64 ? minBit : -1, maxBit, Y_BIAS,
@@ -197,10 +220,13 @@ public final class BuiltSectionMask {
      * @param secZ      likewise
      */
     public static boolean sectionCovered(final long[] columnY, final int side,
-                                         final int camSecX, final int camSecY, final int camSecZ,
+                                         final int anchorSecX, final int camSecY, final int anchorSecZ,
                                          final int secX, final int secY, final int secZ) {
-        final int cx = (secX - camSecX) + (side >> 1);
-        final int cz = (secZ - camSecZ) + (side >> 1);
+        // Indices are 0-based from the WORLD-anchored origin, so a section's index does not change
+        // as the camera moves within an anchor cell. That is the whole point: nothing about the
+        // answer moves with the player.
+        final int cx = secX - anchorSecX;
+        final int cz = secZ - anchorSecZ;
         if (cx < 0 || cz < 0 || cx >= side || cz >= side) {
             return false;
         }
@@ -218,9 +244,9 @@ public final class BuiltSectionMask {
      * floors and a cast truncates, and the difference is the whole negative half of the world.
      */
     public static boolean blockCovered(final long[] columnY, final int side,
-                                       final int camSecX, final int camSecY, final int camSecZ,
+                                       final int anchorSecX, final int camSecY, final int anchorSecZ,
                                        final int blockX, final int blockY, final int blockZ) {
-        return sectionCovered(columnY, side, camSecX, camSecY, camSecZ,
+        return sectionCovered(columnY, side, anchorSecX, camSecY, anchorSecZ,
                 blockX >> 4, blockY >> 4, blockZ >> 4);
     }
 
@@ -231,7 +257,12 @@ public final class BuiltSectionMask {
      */
     public void update(final Viewport<?> viewport, final RenderBackend backend) {
         final int rd = Math.max(2, net.minecraft.client.Minecraft.getInstance().options.renderDistance().get());
-        final int newSide = rd * 2 + 1;
+        final int slack = ANCHOR_SLACK < 0 ? rd : ANCHOR_SLACK;
+        final int newSide = rd * 2 + 1 + slack * 2;
+        // The anchor step is what keeps the camera inside the square with at least rd of margin:
+        // the valid anchor positions are exactly one step apart, so the anchor is a deterministic
+        // function of the camera and does not depend on where it has been.
+        final int anchorStep = newSide - rd * 2;
         final int camBlockX = net.minecraft.util.Mth.floor(viewport.cameraX);
         final int camBlockY = net.minecraft.util.Mth.floor(viewport.cameraY);
         final int camBlockZ = net.minecraft.util.Mth.floor(viewport.cameraZ);
@@ -240,6 +271,10 @@ public final class BuiltSectionMask {
         final int newCamX = camBlockX >> 4;
         final int newCamY = camBlockY >> 4;
         final int newCamZ = camBlockZ >> 4;
+        // A WORLD-anchored origin, not the camera's column. The camera keeps its own section Y,
+        // because the vertical window is a window and not an edge.
+        final int anchorX = floorToStep(newCamX - rd, anchorStep);
+        final int anchorZ = floorToStep(newCamZ - rd, anchorStep);
 
         // One 64-bit mask per COLUMN, bit (secY - camSecY + Y_BIAS). The column is the horizontal
         // index and the mask is the vertical extent -- which is the whole difference from the
@@ -251,8 +286,8 @@ public final class BuiltSectionMask {
         final long[] columnY = new long[newSide * newSide];
         synchronized (BuiltSectionMask.class) {
             for (final long pos : BUILT) {
-                final int dx = SectionPos.x(pos) - newCamX + rd;
-                final int dz = SectionPos.z(pos) - newCamZ + rd;
+                final int dx = SectionPos.x(pos) - anchorX;
+                final int dz = SectionPos.z(pos) - anchorZ;
                 if (dx < 0 || dz < 0 || dx >= newSide || dz >= newSide) continue;
                 final int bit = SectionPos.y(pos) - newCamY + Y_BIAS;
                 if (bit < 0 || bit > 63) continue;   // outside the representable span: not covered
@@ -260,10 +295,10 @@ public final class BuiltSectionMask {
             }
         }
 
-        logPopulation(newSide, newCamX, newCamY, newCamZ, columnY, this.uploads);
+        logPopulation(newSide, anchorX, newCamY, anchorZ, columnY, this.uploads);
 
         if (this.buffer != null && this.side == newSide
-                && this.camSecX == newCamX && this.camSecY == newCamY && this.camSecZ == newCamZ
+                && this.camSecX == anchorX && this.camSecY == newCamY && this.camSecZ == anchorZ
                 && Arrays.equals(this.shadow, columnY)) {
             return;   // nothing moved
         }
@@ -274,17 +309,17 @@ public final class BuiltSectionMask {
             this.buffer = backend.createBuffer(size);
         }
         this.side = newSide;
-        this.camSecX = newCamX;
+        this.camSecX = anchorX;
         this.camSecY = newCamY;
-        this.camSecZ = newCamZ;
+        this.camSecZ = anchorZ;
         this.shadow = columnY;
         this.uploads++;
 
         final long ptr = UploadStream.INSTANCE.upload(this.buffer, 0, size);
         MemoryUtil.memPutInt(ptr, newSide);
-        MemoryUtil.memPutInt(ptr + 4, newCamX);
+        MemoryUtil.memPutInt(ptr + 4, anchorX);
         MemoryUtil.memPutInt(ptr + 8, newCamY);
-        MemoryUtil.memPutInt(ptr + 12, newCamZ);
+        MemoryUtil.memPutInt(ptr + 12, anchorZ);
         MemoryUtil.memPutInt(ptr + 16, camBlockX);
         MemoryUtil.memPutInt(ptr + 20, camBlockY);
         MemoryUtil.memPutInt(ptr + 24, camBlockZ);

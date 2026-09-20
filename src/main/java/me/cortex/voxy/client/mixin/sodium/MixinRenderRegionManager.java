@@ -39,7 +39,17 @@ public class MixinRenderRegionManager {
             if (section == null) continue;
             SectionPos pos = section.getPosition();
             long key = SectionPos.asLong(pos.x(), pos.y(), pos.z());
-            if (section.isBuilt() && section.getLastMeshResultSize() > 0) {
+            // isBuilt() ALONE, including sections that meshed to nothing.
+            //
+            // The original criterion also required getLastMeshResultSize() > 0, on the reasoning
+            // that a section which meshed to nothing must not be allowed to claim vanilla covers
+            // empty air. That is backwards for this cull, and the user found it by eye: "LODs above
+            // me aren't culled at all". An air section above the terrain is a section vanilla HAS
+            // and renders as nothing -- so the LOD drawing geometry there is drawing where vanilla
+            // has already decided there is nothing, and it must be culled like anywhere else.
+            // Excluding empty sections left every air section unculled, which is a shell of LOD
+            // geometry around and above the vanilla-rendered world.
+            if (section.isBuilt()) {
                 BuiltSectionMask.add(key);
             } else {
                 BuiltSectionMask.remove(key);

@@ -2,6 +2,7 @@ package me.cortex.voxy.client.core.rendering;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -28,13 +29,14 @@ class BuiltSectionMaskTest {
     private static final int SIDE = 17;
     private static final int C = SIDE / 2;   // the camera's own column in the square's indices
 
-    /** The camera sits at section (0, 0, 0) in these tests, so world section coords are absolute. */
+    /** The square is anchored so that world sections -C..C land on indices 0..2C. */
+    private static final int ANCHOR = -C;
     private static long[] empty() {
         return new long[SIDE * SIDE];
     }
 
     private static void mark(long[] columnY, int secX, int secY, int secZ) {
-        int cx = secX + C, cz = secZ + C;
+        int cx = secX - ANCHOR, cz = secZ - ANCHOR;
         if (cx < 0 || cz < 0 || cx >= SIDE || cz >= SIDE) return;
         int bit = secY + 32;
         if (bit < 0 || bit > 63) return;
@@ -42,7 +44,7 @@ class BuiltSectionMaskTest {
     }
 
     private static boolean covered(long[] columnY, int secX, int secY, int secZ) {
-        return BuiltSectionMask.sectionCovered(columnY, SIDE, 0, 0, 0, secX, secY, secZ);
+        return BuiltSectionMask.sectionCovered(columnY, SIDE, ANCHOR, 0, ANCHOR, secX, secY, secZ);
     }
 
     @Test
@@ -98,14 +100,14 @@ class BuiltSectionMaskTest {
         // of the world.
         long[] m = empty();
         mark(m, -1, 0, 0);   // section -1 covers blocks -16..-1
-        assertTrue(BuiltSectionMask.blockCovered(m, SIDE, 0, 0, 0, -1, 0, 0));
-        assertTrue(BuiltSectionMask.blockCovered(m, SIDE, 0, 0, 0, -16, 0, 0));
-        assertFalse(BuiltSectionMask.blockCovered(m, SIDE, 0, 0, 0, 0, 0, 0));
+        assertTrue(BuiltSectionMask.blockCovered(m, SIDE, ANCHOR, 0, ANCHOR, -1, 0, 0));
+        assertTrue(BuiltSectionMask.blockCovered(m, SIDE, ANCHOR, 0, ANCHOR, -16, 0, 0));
+        assertFalse(BuiltSectionMask.blockCovered(m, SIDE, ANCHOR, 0, ANCHOR, 0, 0, 0));
 
         long[] v = empty();
         mark(v, 0, -1, 0);   // section -1 covers blocks -16..-1 vertically
-        assertTrue(BuiltSectionMask.blockCovered(v, SIDE, 0, 0, 0, 0, -1, 0));
-        assertFalse(BuiltSectionMask.blockCovered(v, SIDE, 0, 0, 0, 0, 0, 0));
+        assertTrue(BuiltSectionMask.blockCovered(v, SIDE, ANCHOR, 0, ANCHOR, 0, -1, 0));
+        assertFalse(BuiltSectionMask.blockCovered(v, SIDE, ANCHOR, 0, ANCHOR, 0, 0, 0));
     }
 
     @Test
@@ -129,7 +131,7 @@ class BuiltSectionMaskTest {
         long[] m = empty();
         assertFalse(covered(m, 0, 32, 0), "bit 64 does not exist");
         assertFalse(covered(m, 0, -33, 0), "bit -1 does not exist");
-        assertTrue(BuiltSectionMask.sectionCovered(new long[] {0}, 1, 0, 0, 0, 0, 31, 0) == false,
+        assertFalse(BuiltSectionMask.sectionCovered(new long[] {0}, 1, 0, 0, 0, 0, 31, 0),
                 "and a 1x1 square with no bits covers nothing at all");
     }
 
@@ -153,6 +155,46 @@ class BuiltSectionMaskTest {
                 }
             }
         }
+    }
+
+    @Test
+    void theAnchorStepKeepsTheCameraInsideWithMargin() {
+        // The anchor must be a deterministic function of the camera and leave at least the render
+        // distance of margin on every side, or the square would not cover the region the cull is
+        // asked about and the far edge would read as "not covered" everywhere.
+        int rd = 8;
+        int side = rd * 2 + 1 + rd * 2;          // slack == rd, as ANCHOR_SLACK resolves to
+        int step = side - rd * 2;
+        for (int cam = -100; cam <= 100; cam++) {
+            int anchor = BuiltSectionMask.floorToStep(cam - rd, step);
+            assertTrue(anchor <= cam - rd, "anchor must be at or before cam-rd");
+            assertTrue(cam + rd < anchor + side, "and the far margin must fit inside the square");
+        }
+    }
+
+    @Test
+    void floorToStepFloorsNegativesRatherThanTruncating() {
+        // floorDiv, not integer division: -17 / 16 truncates to -1 in Java but floors to -2, and the
+        // difference anchors the square on the wrong side of the camera for half the world.
+        assertEquals(-32, BuiltSectionMask.floorToStep(-17, 16));
+        assertEquals(-16, BuiltSectionMask.floorToStep(-16, 16));
+        assertEquals(-16, BuiltSectionMask.floorToStep(-1, 16));
+        assertEquals(0, BuiltSectionMask.floorToStep(0, 16));
+        assertEquals(16, BuiltSectionMask.floorToStep(16, 16));
+        assertEquals(16, BuiltSectionMask.floorToStep(31, 16));
+    }
+
+    @Test
+    void theAnswerDoesNotDependOnTheCamera() {
+        // The point of a world-anchored origin: the predicate takes no camera argument at all, so a
+        // world section's answer cannot change as the player moves within an anchor cell. The lag
+        // the user saw -- "I feel like I'm dragging the LOD edge with me" -- is impossible by
+        // construction rather than merely made smaller by re-uploading faster.
+        long[] m = empty();
+        mark(m, 4, 3, -2);
+        assertTrue(covered(m, 4, 3, -2));
+        assertTrue(BuiltSectionMask.sectionCovered(m, SIDE, ANCHOR, 0, ANCHOR, 4, 3, -2),
+                "the same question from any caller gives the same answer");
     }
 
     @Test

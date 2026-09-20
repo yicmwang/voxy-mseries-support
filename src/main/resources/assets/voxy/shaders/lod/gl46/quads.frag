@@ -54,9 +54,12 @@ layout(binding = 9, std430) readonly restrict buffer BoundDepthBuffer {
 // requires for a vec2 array. Must match BuiltSectionMask.HEADER_UINTS exactly.
 layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer BuiltMaskChunkBuffer {
     uint chunkMaskSide;
-    int chunkMaskCamSecX;
+    // The square's origin is WORLD-anchored, not the camera's column: it only moves when the
+    // camera crosses a multiple of the anchor step. Indexing from a fixed world origin is what
+    // stops the culled region's edge sliding along with the player.
+    int chunkMaskAnchorSecX;
     int chunkMaskCamSecY;
-    int chunkMaskCamSecZ;
+    int chunkMaskAnchorSecZ;
     int chunkMaskCamBlockX;
     int chunkMaskCamBlockY;
     int chunkMaskCamBlockZ;
@@ -212,8 +215,10 @@ void main() {
         int secY = (chunkMaskCamBlockY + int(floor(voxyCamRelPos.y))) >> 4;
         int secZ = (chunkMaskCamBlockZ + int(floor(voxyCamRelPos.z))) >> 4;
         int sd = int(chunkMaskSide);
-        int cx = (secX - chunkMaskCamSecX) + int(sd >> 1);
-        int cz = (secZ - chunkMaskCamSecZ) + int(sd >> 1);
+        // 0-based from the world-anchored origin. No centre bias, and nothing here depends on where
+        // the camera is inside the square -- which is what stops the boundary being dragged.
+        int cx = secX - chunkMaskAnchorSecX;
+        int cz = secZ - chunkMaskAnchorSecZ;
         // Outside the square, or outside the +/-512 blocks the per-column bitmask spans, is NOT
         // covered: keep the LOD. An over-drawn LOD z-fights, an under-drawn one shows the void.
         if (cx >= 0 && cz >= 0 && cx < sd && cz < sd) {
