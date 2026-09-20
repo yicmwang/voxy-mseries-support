@@ -7,6 +7,8 @@ import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
+import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
+import net.caffeinemc.mods.sodium.client.gpu.device.context.DrawContext;
 import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderListIterable;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.DefaultTerrainRenderPasses;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
@@ -16,6 +18,7 @@ import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
@@ -42,6 +45,37 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  */
 @Mixin(value = DefaultChunkRenderer.class, remap = false)
 public abstract class MixinDefaultChunkRenderer {
+    /**
+     * VOXY_NO_VANILLA=1 suppresses Sodium's terrain draws entirely, so the LOD can be inspected in
+     * isolation -- its exact shape, with no vanilla terrain in the way.
+     *
+     * <p>Why it has to be done HERE, at the batch draw, rather than by cancelling
+     * {@code DefaultChunkRenderer.render}: Voxy's own LOD render is driven from inside that method,
+     * by {@link #voxy$injectRender} just before {@code ShaderChunkRenderer.end}. Cancelling the whole
+     * method would cancel Voxy with it. Suppressing only the batch draws leaves {@code begin} and
+     * {@code end} to bracket the pass as usual, so the injection still fires on a live pass.
+     *
+     * <p>The cull is deliberately NOT disabled alongside this. Sections where vanilla drew are still
+     * culled, which is correct -- the question this view answers is what the LOD does where it is
+     * ALLOWED to draw, not what it would draw if unculled.
+     *
+     * <p>Live risk, from the comment below: Metallum is said to open its render encoder lazily on
+     * Sodium's first draw. If that is literally at the draw rather than at {@code begin}/{@code setContext},
+     * suppressing draws leaves no live encoder and Voxy has nothing to render into, which reads as a
+     * blank screen rather than as a clean view. That is the thing to look for first if this comes up empty.
+     */
+    private static final boolean NO_VANILLA = "1".equals(System.getenv("VOXY_NO_VANILLA"));
+
+    @Redirect(method = "render", at = @At(value = "INVOKE",
+            target = "Lnet/caffeinemc/mods/sodium/client/gpu/device/batch/MultiDrawBatch;draw(Lnet/caffeinemc/mods/sodium/client/gpu/device/context/DrawContext;)V"),
+            remap = false)
+    private void voxy$suppressVanillaTerrain(MultiDrawBatch batch, DrawContext context) {
+        if (NO_VANILLA) {
+            return;
+        }
+        batch.draw(context);
+    }
+
     // Injected at the TAIL of the pass (just before Sodium ends it), not HEAD.
     //
     // Under whole-frame Metal this matters: Metallum opens its render encoder lazily on Sodium's
