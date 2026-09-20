@@ -45,9 +45,31 @@ public class BasicSectionGeometryData implements IGeometryData {
         }
         IGpuBuffer buffer = null;
         if (!(Capabilities.INSTANCE.isNvidia)) {// && ThreadUtils.isWindows
-            buffer = RenderBackendFactory.get().createBuffer(geometryCapacity, 0, false);//Only do this if we are not on nvidia
-            //TODO: FIXME: TEST, see if the issue is that we are trying to zero the entire buffer, try only zeroing increments
-            // or dont zero it at all
+            // THIS IS THE ONLY BUFFER IN THE RENDERER CREATED UN-ZEROED. Every other allocation goes
+            // through RenderBackend.createBuffer, which on Metal hard-codes zero=true (MetalRenderBackend
+            // :104-111), so the `.zero()` chains elsewhere in the port are redundant there and this
+            // explicit `false` is the one place that actually leaves garbage resident.
+            //
+            // It matters because this is the buffer holding every LOD quad. A draw reads it only where
+            // metadata points, and metadata is only created when a section is meshed -- but nothing
+            // forces the geometry copy to land before that metadata becomes visible to `cmdgen`. When
+            // the two disagree for a frame, the shader reads never-written memory and decodes it as
+            // quads: arbitrary positions, arbitrary model ids, arbitrary light. The user's description
+            // of the expected shape of this is exact -- "an unzeroed buffer renders something random
+            // for one frame, and then gets written over".
+            //
+            // The log line above already claims "Creating and zeroing ... geometry buffer", which is
+            // false; and the upstream TODO here shows the zeroing was removed deliberately, to avoid
+            // paying for it at startup, with the consequence never re-tested.
+            //
+            // VOXY_GEOMETRY_ZERO=1 restores the zeroing, so that can be tested as one variable on one
+            // build. Default off, i.e. today's behaviour, so an unset run is the control.
+            final boolean zeroGeometry = "1".equals(System.getenv("VOXY_GEOMETRY_ZERO"));
+            buffer = RenderBackendFactory.get().createBuffer(geometryCapacity, 0, zeroGeometry);//Only do this if we are not on nvidia
+            if (zeroGeometry) {
+                Logger.info("VOXY_GEOMETRY_ZERO=1: zero-filled the " + (geometryCapacity / (1024 * 1024))
+                        + "MB geometry buffer (upstream skips this; expect a startup pause)");
+            }
         } else {
             Logger.info("Running on nvidia, using workaround sparse buffer allocation");
         }
