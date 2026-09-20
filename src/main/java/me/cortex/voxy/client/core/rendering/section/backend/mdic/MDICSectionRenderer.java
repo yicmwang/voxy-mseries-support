@@ -1285,47 +1285,62 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static final int DRAWCHK = parseEnvInt("VOXY_DRAWCHK", 1);
     private static final int DRAWCHK_STRIDE = Math.max(1, parseEnvInt("VOXY_DRAWCHK_STRIDE", 16));
+    /** How often the allocation table is rebuilt from the metadata buffer, in validate calls. */
+    private static final int DRAWCHK_TABLE_EVERY = Math.max(1, parseEnvInt("VOXY_DRAWCHK_TABLE_EVERY", 30));
 
-    /** [0]=checked [1]=posMismatch [2]=sidOob [3]=rangeOob [4]=noGroup [5]=drawIdOob [6]=listOver */
-    private static final long[] DRAWCHK_TOT = new long[7];
-    private static final long[] DRAWCHK_LAST = new long[7];
+    /**
+     * [0]=checked [1]=orphan [2]=straddle [3]=overlap [4]=sidOob [5]=noGroup [6]=posMismatch
+     * [7]=listStale(depth) — 1 while the CPU's render-list read is not the frame cmdgen ran on.
+     */
+    private static final long[] DRAWCHK_TOT = new long[8];
+    private static final long[] DRAWCHK_LAST = new long[8];
     private static final String[] DRAWCHK_NAMES =
-            {"checked", "posMismatch", "sidOob", "rangeOob", "noGroup", "drawIdOob", "listOver"};
+            {"checked", "orphan", "straddle", "overlap", "sidOob", "noGroup", "posMismatch", "listStale"};
     private static long drawchkCalls = 0;
     private static int drawchkExamples = 0;
 
+    /** Live geometry allocations, flat {@code [start, endExclusive, sectionId]} sorted by start. */
+    private static long[] drawchkTable = null;
+    private static int drawchkTableSize = 0;
+    private static int drawchkTableAge = Integer.MAX_VALUE;
+
     /**
-     * Validate, on the CPU, every draw command this slice is about to submit — against the two
-     * things that must agree for a draw to put the right geometry in the right place.
+     * Validate, on the CPU, every draw command this slice is about to submit against the geometry
+     * allocations the sections it may draw actually own.
      *
-     * <p>{@code cmdgen.comp} builds each command from ONE {@code SectionMeta}, but the vertex shader
-     * reconstructs the section from two separate places: the quads come from
-     * {@code quadData[gl_VertexID>>2]} via {@code cmd.baseVertex}, and the section's world position
-     * comes from {@code positionBuffer[cmd.baseInstance]} — which cmdgen wrote as
-     * {@code extractRawPos(meta)} for that same draw index. So for every command:
+     * <p>A section's 32-byte metadata is all that is needed to reconstruct its allocation. The manager
+     * allocates {@code upsized = (itemCount + 1023) & ~1023} elements from a 1024-aligned arena and
+     * stores {@code geometryPtr + offsets[0]} in the metadata, while {@code RenderDataFactory} always
+     * starts {@code offsets[0]} at 0 — so {@code quadStart} <b>is</b> the allocation address, and the
+     * eight packed group counts sum to {@code itemCount}. So the allocation is
+     * {@code [quadStart, quadStart + ceil1024(sum(counts)))} and the table can be built by scanning
+     * the metadata buffer, which is the same bytes the GPU reads.
+     *
+     * <p><b>Deliberately does not use the render list.</b> {@code HierarchicalOcclusionTraverser} zeroes
+     * that buffer's count with a CPU {@code memset} at the start of the frame and the traversal then
+     * writes it on the GPU; the CPU reading it at draw time sees the zeroed value while the entries
+     * still hold the previous frame's ids. Measured here: {@code listCount=0} against
+     * {@code cmdGenDispatch=(88,1,1)}, i.e. prep computed ~11k sections from that same uint on the
+     * GPU. Using it would compare one frame's commands against another frame's section ids and
+     * manufacture mismatches — the first version of this check did exactly that and reported
+     * {@code posMismatch=35674}, which is that artifact and not a finding. The table below comes from
+     * one buffer, written by one pass, so it is internally consistent.
+     *
+     * <p>What each counter means, none of which needs the render list:
      *
      * <ul>
-     *   <li><b>{@code positionBuffer[baseInstance]} must be the raw position of the section whose
-     *       metadata produced the command.</b> If it is not, the draw renders one section's quads at
-     *       another section's position: geometry whose shape does not match the voxels around it,
-     *       changing whenever draw indices are reassigned. That is precisely the reported splotch
-     *       signature, and no shading fault can produce it — a wrong light byte shades a correct
-     *       quad wrongly and keeps its silhouette.</li>
-     *   <li><b>{@code (baseVertex>>2, indexCount/6)} must be one of the eight {@code (ptr, count)}
-     *       groups that metadata encodes</b>, and the final group must end inside the geometry heap.
-     *       This is the quad-range check: it is the only thing standing between a corrupt count and
-     *       a draw that reads arbitrary quads out of the shared geometry buffer.</li>
-     *   <li><b>The render list's entry for {@code baseInstance} must be a real section id.</b> On
-     *       Metal that list is the traversal's output; its length is the {@code sectionCount} the
-     *       traversal wrote, which is an atomic counter that overshoots its own capacity check under
-     *       contention (see {@code traversal_dev.comp}: the {@code < renderQueueMaxSize} test is a
-     *       plain read, and many lanes pass it before any {@code atomicAdd} lands). Any command
-     *       whose index is past the capacity reads an entry the traversal never wrote.</li>
+     *   <li><b>orphan</b> — the command's quad range lies inside no live allocation. The draw reads
+     *       geometry no section owns, i.e. arbitrary shared-buffer contents.</li>
+     *   <li><b>straddle</b> — the range starts in one allocation and ends in another. The draw
+     *       stitches two unrelated sections' quads into one mesh: geometry shaped nothing like the
+     *       section it is drawn as. Cannot be reached by any shading fault.</li>
+     *   <li><b>overlap</b> — two live sections were given overlapping allocations. Then one section's
+     *       metadata points at memory holding another's quads, and which one the buffer holds changes
+     *       as uploads land. This is the allocator-level version of the reported symptom, and the one
+     *       a per-command check is otherwise structurally blind to.</li>
+     *   <li><b>sidOob / noGroup / posMismatch</b> — need the render list, so they are only counted
+     *       while {@code listStale == 0} and are meaningless otherwise.</li>
      * </ul>
-     *
-     * <p>All inputs are CPU reads of Shared buffers the Metal backend already exposes, so this costs
-     * no GPU work and does not disturb the frame. Every dereference is bounds-checked first — a
-     * corrupt section id must be reported, not used as an offset into native memory.
      */
     private void validateDrawCommands(final String tag, MDICViewport viewport,
                                       long indirectOffset, int maxDrawCount) {
@@ -1343,15 +1358,29 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
         final long posEntries = pos.size() / 8L;//uvec2 per entry
         final long heapElements = geo.size() / 8L;//8 bytes per quad
-        final int listCap = me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.MAX_QUEUE_SIZE;
         final int maxSections = this.geometryManager.getMaxSectionCount();
-        // The render list is { uint count; uint entries[]; } — the count is the array length cmdgen
-        // dispatches over, and it is what this whole check hinges on.
-        final long listCount = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp));
         long avail = Math.max(0, (cmds.size() - indirectOffset) / 20L);
         int n = (int) Math.min(maxDrawCount, avail);
 
-        int d0 = 0, d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0, d6 = 0;
+        // Rebuild the allocation table periodically rather than every call: the scan is over
+        // maxSections entries (1M * 20 bytes) and the table only moves as geometry streams in.
+        if (drawchkTableAge >= DRAWCHK_TABLE_EVERY) {
+            drawchkTableAge = 0;
+            rebuildAllocationTable(mp, maxSections, heapElements);
+        }
+        drawchkTableAge += 3;// opaque + temporal + translucent per frame
+        final long[] table = drawchkTable;
+        final int tableSize = drawchkTableSize;
+
+        // Is the CPU's render list the frame cmdgen actually ran on? prep.comp derives the same
+        // dispatch size from the same uint, so a count that cannot produce this dispatch is stale.
+        final long listCount = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp));
+        final int cmdGenDispatchX = MemoryUtil.memGetInt(viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer dcb
+                ? (int) dcb.getContentsPtr() : 0);
+        final boolean listFresh = listCount > 0 && cmdGenDispatchX > 0
+                && listCount <= (long) cmdGenDispatchX * 128L;
+
+        int d0 = 0, d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0, d6 = 0, d7 = listFresh ? 0 : 1;
 
         for (int i = 0; i < n; i++) {
             if (DRAWCHK == 1 && DRAWCHK_STRIDE > 1 && (i % DRAWCHK_STRIDE) != 0) continue;
@@ -1360,57 +1389,50 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             int baseVertex = MemoryUtil.memGetInt(a + 12);
             long baseInstance = Integer.toUnsignedLong(MemoryUtil.memGetInt(a + 16));
             d0++;
+            if (indexCount <= 0) continue;
 
-            if (baseInstance >= posEntries) { d5++; continue; }
-            long sid = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp + 4 + baseInstance * 4L));
-            if (sid >= maxSections) { d2++; continue; }
-            long m = mp + sid * 32L;
+            // The range this draw reads, in geometry-heap elements (one element is one quad).
+            final long qs = Integer.toUnsignedLong(baseVertex) >> 2;
+            final long qe = qs + indexCount / 6L;
 
-            // The two inputs the vertex shader uses. This is the check that matters: the position a
-            // draw places its geometry at must belong to the section the draw takes its quads from.
-            int metaPosHi = MemoryUtil.memGetInt(m);
-            int metaPosLo = MemoryUtil.memGetInt(m + 4);
-            int bufPosHi = MemoryUtil.memGetInt(pp + baseInstance * 8L);
-            int bufPosLo = MemoryUtil.memGetInt(pp + baseInstance * 8L + 4);
-            if (metaPosHi != bufPosHi || metaPosLo != bufPosLo) {
+            final int slot = tableSize == 0 ? -1 : findContaining(table, tableSize, qs);
+            if (slot < 0) {
                 d1++;
-                drawchkExample(tag, i, "posMismatch", "drawId=" + baseInstance + " sid=" + sid
-                        + " meta=[0x" + Integer.toHexString(metaPosHi) + ",0x" + Integer.toHexString(metaPosLo)
-                        + "] scratch=[0x" + Integer.toHexString(bufPosHi) + ",0x" + Integer.toHexString(bufPosLo) + "]");
+                drawchkExample(tag, i, "orphan", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
+                        + " end=" + qe + " table=" + tableSize + " heapElems=" + heapElements);
+                continue;
+            }
+            final long allocEnd = table[slot * 3 + 1];
+            if (qe > allocEnd) {
+                d2++;
+                drawchkExample(tag, i, "straddle", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
+                        + " end=" + qe + " allocEnd=" + allocEnd + " sid=" + table[slot * 3 + 2]);
                 continue;
             }
 
+            if (!listFresh || baseInstance >= posEntries) continue;
+            long sid = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp + 4 + baseInstance * 4L));
+            if (sid >= maxSections) { d4++; continue; }
+            long m = mp + sid * 32L;
+            int metaPosHi = MemoryUtil.memGetInt(m);
+            int metaPosLo = MemoryUtil.memGetInt(m + 4);
+            if (metaPosHi != MemoryUtil.memGetInt(pp + baseInstance * 8L)
+                    || metaPosLo != MemoryUtil.memGetInt(pp + baseInstance * 8L + 4)) {
+                d6++;
+                continue;
+            }
             long quadStart = Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 12));
             long[] cnt = unpackQuadGroups(
                     Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 16)),
                     Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 20)),
                     Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 24)),
                     Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 28)));
-            long quadEnd = quadEnd(quadStart, cnt);
-
-            if (quadEnd > heapElements) {
-                d3++;
-                drawchkExample(tag, i, "rangeOob", "sid=" + sid + " quadStart=" + quadStart
-                        + " quadEnd=" + quadEnd + " heapElems=" + heapElements);
-                continue;
-            }
-
-            // Which of the eight packed face groups does this command claim to be?
-            long bv = Integer.toUnsignedLong(baseVertex) >> 2;
-            long quads = indexCount / 6L;
-            if (indexCount != 0 && !matchesQuadGroup(quadStart, cnt, bv, quads)) {
-                d4++;
-                drawchkExample(tag, i, "noGroup", "sid=" + sid + " baseVertex>>2=" + bv
-                        + " quads=" + quads + " quadStart=" + quadStart
-                        + " groups=[" + cnt[0] + "," + cnt[1] + "," + cnt[2] + "," + cnt[3] + ","
-                        + cnt[4] + "," + cnt[5] + "," + cnt[6] + "," + cnt[7] + "]");
-            }
+            if (!matchesQuadGroup(quadStart, cnt, qs, indexCount / 6L)) d5++;
         }
 
-        if (listCount > listCap) d6 = 1;
-
-        DRAWCHK_TOT[0] += d0; DRAWCHK_TOT[1] += d1; DRAWCHK_TOT[2] += d2; DRAWCHK_TOT[3] += d3;
-        DRAWCHK_TOT[4] += d4; DRAWCHK_TOT[5] += d5; DRAWCHK_TOT[6] = d6;
+        DRAWCHK_TOT[0] += d0; DRAWCHK_TOT[1] += d1; DRAWCHK_TOT[2] += d2;
+        DRAWCHK_TOT[4] += d4; DRAWCHK_TOT[5] += d5; DRAWCHK_TOT[6] += d6;
+        DRAWCHK_TOT[7] = d7;
 
         if ((drawchkCalls++ % 600) == 1) {
             StringBuilder sb = new StringBuilder();
@@ -1420,9 +1442,112 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 DRAWCHK_LAST[k] = DRAWCHK_TOT[k];
             }
             Logger.info("[Metal-DRAWCHK " + tag + "] mode=" + DRAWCHK + " stride=" + DRAWCHK_STRIDE
-                    + " draws=" + n + " listCount=" + listCount + " listCap=" + listCap
+                    + " draws=" + n + " allocs=" + tableSize
+                    + " listCount=" + listCount + " cmdGenDispatchX=" + cmdGenDispatchX
                     + " maxSections=" + maxSections + " heapElems=" + heapElements + sb);
         }
+    }
+
+    /**
+     * Rebuild the live-allocation table from the metadata buffer, and count overlaps while it is
+     * sorted.
+     *
+     * <p>An entry is live if it claims any geometry at all. A freed slot is written as 32 zero bytes
+     * by {@code BasicAsyncGeometryManager.writeMetadata}, so {@code quadStart == 0 && no counts} is
+     * the empty marker — with the one exception of a genuinely live section allocated at address 0,
+     * which is kept by testing the counts as well.
+     *
+     * <p>Sorting by start makes the overlap scan a single linear pass over neighbours: the arena
+     * hands out 1024-aligned, non-overlapping ranges, so any two live entries whose ranges intersect
+     * means the allocator gave the same memory to two sections.
+     */
+    private static void rebuildAllocationTable(final long mp, final int maxSections, final long heapElements) {
+        long[] scratch = new long[Math.max(1024, maxSections / 4) * 3];
+        int count = 0;
+        for (int sid = 0; sid < maxSections; sid++) {
+            long m = mp + (long) sid * 32L;
+            long quadStart = Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 12));
+            long[] cnt = unpackQuadGroups(
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 16)),
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 20)),
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 24)),
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 28)));
+            long len = quadEnd(0L, cnt);
+            if (len == 0) continue;
+            if (quadStart + len > heapElements) continue;// not a usable allocation; orphan catches it
+            if (count * 3 + 3 > scratch.length) {
+                long[] bigger = new long[scratch.length * 2];
+                System.arraycopy(scratch, 0, bigger, 0, scratch.length);
+                scratch = bigger;
+            }
+            scratch[count * 3] = quadStart;
+            scratch[count * 3 + 1] = quadStart + ((len + 1023L) & ~1023L);
+            scratch[count * 3 + 2] = sid;
+            count++;
+        }
+        // Sort the triples by start (insertion-free: sort an index-free copy via a simple merge on
+        // the flat array, which is small enough that a boxed sort would dominate the scan).
+        sortAllocations(scratch, count);
+
+        long overlaps = countOverlaps(scratch, count);
+        DRAWCHK_TOT[3] = overlaps;
+        drawchkTable = scratch;
+        drawchkTableSize = count;
+    }
+
+    /**
+     * Count pairs of adjacent (post-sort) live allocations that intersect. The arena hands out
+     * 1024-aligned, non-overlapping ranges, so a non-zero result means it gave the same memory to
+     * two sections — and whichever section's geometry was uploaded last is what both draws read.
+     */
+    static long countOverlaps(final long[] table, final int count) {
+        long overlaps = 0;
+        for (int i = 1; i < count; i++) {
+            if (table[i * 3] < table[(i - 1) * 3 + 1]) {
+                overlaps++;
+                if (overlaps <= 4) {
+                    Logger.warn("[Metal-DRAWCHK! alloc] OVERLAP sid=" + table[(i - 1) * 3 + 2]
+                            + " [" + table[(i - 1) * 3] + "," + table[(i - 1) * 3 + 1] + ") and sid="
+                            + table[i * 3 + 2] + " [" + table[i * 3] + "," + table[i * 3 + 1] + ")");
+                }
+            }
+        }
+        return overlaps;
+    }
+
+    /** In-place merge sort of flat {@code [start, end, sid]} triples by start. */
+    private static void sortAllocations(final long[] a, final int count) {
+        if (count < 2) return;
+        long[] tmp = new long[count * 3];
+        for (int width = 1; width < count; width *= 2) {
+            for (int lo = 0; lo < count; lo += 2 * width) {
+                final int mid = Math.min(lo + width, count);
+                final int hi = Math.min(lo + 2 * width, count);
+                int l = lo, r = mid, o = lo;
+                while (l < mid && r < hi) {
+                    final int pick = a[l * 3] <= a[r * 3] ? l++ : r++;
+                    tmp[o * 3] = a[pick * 3]; tmp[o * 3 + 1] = a[pick * 3 + 1]; tmp[o * 3 + 2] = a[pick * 3 + 2];
+                    o++;
+                }
+                while (l < mid) { tmp[o * 3] = a[l * 3]; tmp[o * 3 + 1] = a[l * 3 + 1]; tmp[o * 3 + 2] = a[l * 3 + 2]; l++; o++; }
+                while (r < hi) { tmp[o * 3] = a[r * 3]; tmp[o * 3 + 1] = a[r * 3 + 1]; tmp[o * 3 + 2] = a[r * 3 + 2]; r++; o++; }
+            }
+            System.arraycopy(tmp, 0, a, 0, count * 3);
+        }
+    }
+
+    /**
+     * Index of the allocation containing element {@code q}, or {@code -1}. Binary search over the
+     * sorted table; {@code -1} means the quad belongs to no live section.
+     */
+    static int findContaining(final long[] table, final int tableSize, final long q) {
+        int lo = 0, hi = tableSize - 1, best = -1;
+        while (lo <= hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (table[mid * 3] <= q) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+        }
+        if (best < 0) return -1;
+        return q < table[best * 3 + 1] ? best : -1;
     }
 
     /** Rate-limited detail for the first few offenders, so the counters come with a concrete case. */
