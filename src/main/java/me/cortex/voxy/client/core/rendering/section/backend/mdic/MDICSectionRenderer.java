@@ -261,7 +261,27 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     // frame's uniform alive until that frame's draws have retired, and the CPU does not block on the
     // GPU: it can be many frames ahead of what has executed, so 4 slots (just past the 3 submits in
     // flight) is not enough. 32 costs 32 KB and covers any lead this renderer produces.
-    private static final int UNIFORM_RING = 32;
+    //
+    // VOXY_UNIFORM_RING makes the slot count switchable so the A/B is ONE BUILD with one variable, and
+    // DEFAULTS TO 1 -- i.e. upstream's single rewritten buffer. Two reasons it must default to 1:
+    // `voxy/src/.../mdic/MDICSectionRenderer.java:89` is exactly `new GlBuffer(1024)` rewritten every
+    // frame, so 1 is the faithful port; and my two previous "ring" runs were compared against a
+    // different build running a different second flag, which is not an A/B. Defaulting to the port
+    // means an unset run reproduces the baseline, and only an explicit value tests the ring.
+    private static final int UNIFORM_RING = parseUniformRing();
+
+    private static int parseUniformRing() {
+        String v = System.getenv("VOXY_UNIFORM_RING");
+        if (v == null || v.isEmpty()) return 1;
+        try {
+            int n = Integer.parseInt(v.trim());
+            // A power of two keeps the modulus a mask; anything <=0 would be a divide by zero.
+            return Integer.bitCount(n) == 1 && n >= 1 ? n : 1;
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
+
     private final IGpuBuffer[] uniformRing = new IGpuBuffer[UNIFORM_RING];
     {
         for (int i = 0; i < UNIFORM_RING; i++) {
