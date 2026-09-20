@@ -317,8 +317,46 @@ public class VoxyClient implements ClientModInitializer {
                     ? " " + parts[3] + " " + parts[4]
                     : "";
             final int[] driftTicks = {0};
+            // VOXY_DEV_CAM_SPIN=<degrees per second>: rotate the pinned camera's yaw continuously while
+            // its POSITION stays fixed. The third movement instrument, added because the first two are
+            // both measurably wrong for bug 3 in opposite directions:
+            //
+            //   VOXY_DEV_TP       reproduces nothing. 227 frames over 112 arrivals, median 714
+            //                     near-black px, nothing above 983 except the world-load overlay. The
+            //                     artefact needs CONTINUOUS motion and a teleport is one jump.
+            //   VOXY_DEV_CAM_DRIFT (translation) does reproduce, but only after the camera has flown
+            //                     far enough to leave the populated world: its counts ramp monotonically
+            //                     (+4,300 px per 2 s) and the frames show the LOD fragmenting into
+            //                     detached slabs -- which is confounded with "flew out of the data" and
+            //                     so cannot be attributed to the bug. At 6 blocks/s it is ~1,700 blocks
+            //                     out by the time it fires.
+            //
+            // Yaw rotation is the user's own description of the trigger -- "it also shows up when I move
+            // my camera too fast" -- and it moves the camera not at all, so the world stays populated
+            // and nothing is confounded. The reason it was avoided before is that rotation breaks the
+            // sky-band camera check the screenshot catcher used to decide which frames may be compared;
+            // that check existed to make pairwise DIFFING valid, and the metric in use now is a
+            // per-frame absolute near-black census, which needs no comparability at all.
+            final double spin;
+            {
+                String s = System.getenv("VOXY_DEV_CAM_SPIN");
+                double parsed = 0;
+                if (s != null && !s.isBlank()) {
+                    try {
+                        parsed = Double.parseDouble(s.trim());
+                    } catch (NumberFormatException e) {
+                        Logger.error("VOXY_DEV_CAM_SPIN must be a number of degrees per second", e);
+                    }
+                }
+                spin = parsed;
+            }
+            final String baseYaw = parts.length >= 4 ? parts[3] : "0";
+            final String basePitch = parts.length >= 5 ? parts[4] : "0";
             if (drift != 0) {
                 Logger.info("VOXY_DEV_CAM_DRIFT active: translating " + drift + " blocks/sec, no rotation");
+            }
+            if (spin != 0) {
+                Logger.info("VOXY_DEV_CAM_SPIN active: rotating " + spin + " deg/sec at a fixed position");
             }
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
                 if (client.level == null) return;
@@ -353,14 +391,24 @@ public class VoxyClient implements ClientModInitializer {
                     // the chunks under it, and MC will nudge a player that ends up inside geometry.
                     // Under drift it re-asserts every tick, which is what makes the motion continuous
                     // rather than a one-block step per second.
-                    if (drift != 0) {
+                    if (drift != 0 || spin != 0) {
                         driftTicks[0]++;
                         if (reapplyCountdown[0]-- > 0) return;
                         reapplyCountdown[0] = 1;
-                        String x = String.format(java.util.Locale.ROOT, "%.4f",
-                                baseX + drift * (driftTicks[0] / 20.0));
-                        commands.performPrefixedCommand(source,
-                                "tp @s " + x + " " + parts[1] + " " + parts[2] + tail);
+                        final String args;
+                        if (spin != 0) {
+                            // Yaw only: position and pitch are re-asserted unchanged, so the eye never
+                            // moves and the world under it stays resident.
+                            args = parts[0] + " " + parts[1] + " " + parts[2] + " "
+                                    + String.format(java.util.Locale.ROOT, "%.4f",
+                                            (Double.parseDouble(baseYaw) + spin * (driftTicks[0] / 20.0)) % 360.0)
+                                    + " " + basePitch;
+                        } else {
+                            String x = String.format(java.util.Locale.ROOT, "%.4f",
+                                    baseX + drift * (driftTicks[0] / 20.0));
+                            args = x + " " + parts[1] + " " + parts[2] + tail;
+                        }
+                        commands.performPrefixedCommand(source, "tp @s " + args);
                         return;
                     }
                     if (reapplyCountdown[0]-- > 0) return;
