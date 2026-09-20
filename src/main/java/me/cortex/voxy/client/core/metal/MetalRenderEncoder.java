@@ -250,7 +250,7 @@ public final class MetalRenderEncoder implements RenderEncoder {
      * be coalesced the same way; the shader then reads index 0. One build, one env switch, so the two
      * arms are directly comparable.
      */
-    private static final boolean BI_OFFSET = !"0".equals(System.getenv("VOXY_BI_OFFSET"));
+    private static final boolean BI_OFFSET = "1".equals(System.getenv("VOXY_BI_OFFSET"));
     private IGpuBuffer biOffsetBuffer;
     private int biOffsetBinding = -1;
 

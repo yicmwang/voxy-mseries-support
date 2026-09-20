@@ -918,13 +918,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // into the TERRAIN defines so quads3.vert/quads.frag see it, and into the common map so both LOD
         // passes get it -- they read the same pushed constant. Metal-specific concern: on GL the index
         // arrives via gl_BaseInstance.
-        if (!"0".equals(System.getenv("VOXY_LOD_SHOW_DRAWID"))) {
+        if ("1".equals(System.getenv("VOXY_LOD_SHOW_DRAWID"))) {
             m.put("VOXY_LOD_SHOW_DRAWID", "");
         }
         // VOXY_BI_OFFSET=1: take the per-draw section index from a buffer offset instead of the pushed
         // constant. The shader and the encoder must agree, so this define and the encoder's env read are
         // the same variable.
-        if (!"0".equals(System.getenv("VOXY_BI_OFFSET"))) {
+        if ("1".equals(System.getenv("VOXY_BI_OFFSET"))) {
             m.put("VOXY_BI_OFFSET", "");
         }
         return m;
@@ -1353,7 +1353,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * is the only part worth gating.
      */
     private static final boolean DRAWCHK_TABLE =
-            !"0".equals(System.getenv("VOXY_DRAWCHK_TABLE"));
+            "1".equals(System.getenv("VOXY_DRAWCHK_TABLE"));
 
     /**
      * How often the allocation table is rebuilt from the metadata buffer, in validate calls, when it is
@@ -2181,7 +2181,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         }
         // VOXY_BI_OFFSET=1: hand the encoder the buffer its per-draw reads come from, so it can bind it
         // at `baseInstance * 8` instead of pushing the index as a constant.
-        if (!"0".equals(System.getenv("VOXY_BI_OFFSET"))
+        if ("1".equals(System.getenv("VOXY_BI_OFFSET"))
                 && encoder instanceof me.cortex.voxy.client.core.metal.MetalRenderEncoder mre) {
             mre.setPerDrawIndexBuffer(5, viewport.positionScratchBuffer);
         }
