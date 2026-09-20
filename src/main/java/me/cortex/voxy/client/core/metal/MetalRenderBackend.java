@@ -1149,28 +1149,37 @@ public class MetalRenderBackend implements RenderBackend {
             // so drop our reference and let the caller see stale data rather than corrupting the
             // frame by committing a buffer we do not own.
             if (MetallumBridge.supportsFlushFrame()) {
+                // Capture the buffer Metallum is about to commit, then wait on THAT one. Waiting on it
+                // directly rather than through waitForGpuIdle() saves a commit and a CPU<->GPU round
+                // trip per frame: waitForGpuIdle() allocates a fresh buffer and waits on that, which
+                // covers the same work (on a serial queue, waiting for the newest committed buffer
+                // already implies every older one) at strictly higher cost.
+                //
+                // Do NOT release `committed`. It is Metallum's buffer -- Metallum holds it in its own
+                // in-flight slot and closes it in a later submit(); releasing it here would be a
+                // use-after-free. waitForGpuIdle() releases only because that buffer is its own.
+                // waitUntilCompleted is safe to call as a second waiter on a buffer that also carries a
+                // completion block; it neither consumes nor invalidates anything.
+                final long committed = this.activeCommandBuffer;
                 MetallumBridge.flushFrame();
-                if (SUBMIT_ORDER) {
-                    // flushFrame() COMMITS the frame; it does not wait for it, and the comment above
-                    // claiming the work is "committed and complete, making it CPU-visible for the draw
-                    // path's baseInstance read" is therefore false. Only this wait makes it true.
+                this.activeCommandBuffer = 0;
+                if (SUBMIT_ORDER && committed != 0L) {
+                    // Why this wait is load-bearing at all: flushFrame() COMMITS the frame but does not
+                    // wait, and the comment above claiming the work is "committed and complete, making
+                    // it CPU-visible for the draw path's baseInstance read" is false without this.
                     //
-                    // The gap, traced: Metallum's MetalCommandEncoder commits with a completion block
-                    // and then awaits `currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT`, i.e. three submits
-                    // BACK; and its counter STARTS at 3, so the first three submits wait for nothing at
-                    // all. Meanwhile the owned branch immediately below really does waitUntilCompleted,
-                    // which is exactly why this read looked safe for so long.
+                    // Metallum's encoder commits with a completion block and then awaits
+                    // `currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT`, i.e. three submits BACK, from a
+                    // counter that STARTS at 3 -- so the first three submits wait for nothing. The owned
+                    // branch below really does waitUntilCompleted, which is why this looked safe.
                     //
-                    // What the un-ordered window exposes: MetalRenderEncoder reads `baseInstance` out
-                    // of drawCallBuffer on the CPU, per draw, and pushes it as the per-draw constant. A
-                    // stale read yields the WRONG SECTION'S ORIGIN while the draw keeps its own quads
-                    // and their baked light -- which is bug 3's description almost word for word,
-                    // including the preserved lighting. It also explains the timing dependence: how
-                    // stale the read is depends on how far the CPU has run ahead of the GPU, so frame
-                    // pacing moves the rate, and a frame-END GPU sync cannot help because these reads
-                    // happen MID-frame.
-                    this.waitForGpuIdle();
+                    // Without it, MetalRenderEncoder reads `baseInstance` out of drawCallBuffer on the
+                    // CPU and pushes it as the per-draw constant, so a stale read gives the WRONG
+                    // SECTION'S ORIGIN while the draw keeps its own quads and baked light -- bug 3's
+                    // symptom exactly, including the preserved lighting. Confirmed fixed by eye.
+                    MetalNative.mtlCommandBufferWaitUntilCompleted(committed);
                 }
+                return;
             }
             this.activeCommandBuffer = 0;
             return;
