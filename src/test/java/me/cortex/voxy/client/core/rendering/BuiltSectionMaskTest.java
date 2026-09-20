@@ -240,6 +240,23 @@ class BuiltSectionMaskTest {
         assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd), "sqrt(48)=6.9 <= 8");
     }
 
+
+    @Test
+    void pruningKeepsWhatCouldComeBackAndDropsWhatCannot() {
+        // BUILT accumulates one entry per section the player has ever been near -- measured 675 ->
+        // 779 -> 1632 -> 3423 across one session -- and rebuilds walk all of it. Pruning is safe
+        // ONLY because the distance filter already excludes these from the mask, so dropping one
+        // cannot change what is claimed today. The margin keeps anything that could re-enter range
+        // without a rebuild; dropping those would under-claim and show as LOD over vanilla.
+        int rd = 8;
+        assertTrue(BuiltSectionMask.worthKeeping(0, 0, 0, rd));
+        assertTrue(BuiltSectionMask.worthKeeping(rd, 0, 0, rd), "at the radius");
+        assertTrue(BuiltSectionMask.worthKeeping(rd + 3, 0, 0, rd), "just outside, could come back");
+        assertFalse(BuiltSectionMask.worthKeeping(rd + 5, 0, 0, rd), "far outside the margin");
+        assertFalse(BuiltSectionMask.worthKeeping(0, 40, 0, rd), "left far below");
+        assertFalse(BuiltSectionMask.worthKeeping(100, 0, 0, rd), "left far behind");
+    }
+
     @Test
     void anEmptyMaskCoversNothing() {
         long[] m = empty();

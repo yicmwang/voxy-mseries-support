@@ -104,6 +104,50 @@ public final class BuiltSectionMask {
     }
 
     /**
+     * How far outside the render distance an entry is kept, in chunks, before pruning is allowed to
+     * drop it. Kept entries are the ones that could re-enter range without Sodium rebuilding them.
+     */
+    private static final int PRUNE_MARGIN = 4;
+
+    /**
+     * Whether an entry is close enough to the camera to be worth keeping.
+     *
+     * <p>{@link #BUILT} accumulates one entry per section the player has ever been near, because the
+     * mixin only ever adds (a section that leaves Sodium's storage without appearing in an upload
+     * batch is never removed). Measured across one session: built 675 -> 779 -> 1632 -> 3423 as the
+     * player travelled, and the per-frame rebuild of the column masks walks the whole thing.
+     *
+     * <p>Pruning is safe only because of the distance filter: an entry outside the render region
+     * cannot set a bit, so dropping it cannot change what the mask claims today. The margin exists
+     * for tomorrow — a section just outside the render distance may come back into range without a
+     * rebuild, and if it had been dropped the mask would under-claim until the next one, which shows
+     * as an LOD drawn over vanilla (a z-fight) rather than a hole. Anything further out is reached
+     * again only by travelling there, which reloads the chunk and re-meshes it, and the mixin adds
+     * it back.
+     */
+    static boolean worthKeeping(final int dx, final int dy, final int dz, final int rd) {
+        final long reach = (long) rd + PRUNE_MARGIN;
+        return (long) dx * dx + (long) dy * dy + (long) dz * dz <= reach * reach;
+    }
+
+    /**
+     * Drop entries the player has left far behind. Amortised, not per-frame: it walks the whole set,
+     * so it runs at most once per {@link #PRUNE_INTERVAL} mask rebuilds.
+     */
+    private void prune(final int camSecX, final int camSecY, final int camSecZ, final int rd) {
+        synchronized (BuiltSectionMask.class) {
+            BUILT.removeIf(pos -> !worthKeeping(
+                    SectionPos.x(pos) - camSecX,
+                    SectionPos.y(pos) - camSecY,
+                    SectionPos.z(pos) - camSecZ, rd));
+        }
+    }
+
+    /** Mask rebuilds between prunes. The set is small, so this only needs to bound growth. */
+    private static final long PRUNE_INTERVAL = 600;
+    private long updatesSincePrune = 0;
+
+    /**
      * Whether a section at this chunk offset from the camera is inside the region Sodium RENDERS.
      *
      * <p>Sodium renders a Euclidean cylinder of radius {@code renderDistance} centred on the
@@ -411,6 +455,14 @@ public final class BuiltSectionMask {
                 if (bit < 0 || bit > 63) continue;   // outside the representable span: not covered
                 columnY[dz * newSide + dx] |= 1L << bit;
             }
+        }
+
+        // Amortised: the set accumulates one entry per section the player has been near, and every
+        // rebuild walks all of it. Pruning cannot change what the mask claims (the distance filter
+        // already excludes anything this drops), so it only bounds the cost.
+        if (++this.updatesSincePrune >= PRUNE_INTERVAL) {
+            this.updatesSincePrune = 0;
+            prune(newCamX, newCamY, newCamZ, rd);
         }
 
         logPopulation(newSide, anchorX, newCamY, anchorZ, columnY, this.uploads);
