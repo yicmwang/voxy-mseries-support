@@ -70,10 +70,20 @@ public class Mipper {
                     (Mapper.getLightId(I100) & 0xF0) + (Mapper.getLightId(I101) & 0xF0) + (Mapper.getLightId(I110) & 0xF0) + (Mapper.getLightId(I111) & 0xF0);
             int skyLight = (Mapper.getLightId(I000) & 0x0F) + (Mapper.getLightId(I001) & 0x0F) + (Mapper.getLightId(I010) & 0x0F) + (Mapper.getLightId(I011) & 0x0F) +
                     (Mapper.getLightId(I100) & 0x0F) + (Mapper.getLightId(I101) & 0x0F) + (Mapper.getLightId(I110) & 0x0F) + (Mapper.getLightId(I111) & 0x0F);
-            blockLight = blockLight / 8;
+            // The accumulator holds 16 * sum(nibbles) because every term above is masked with 0xF0,
+            // so `blockLight / 8` is 2 * sum and not the average. `& 0xF0` is what turns it back into
+            // floor(sum / 8) already sitting in the high nibble. This is upstream's expression
+            // verbatim; the port had `blockLight / 8` then `(blockLight << 4) | skyLight`, which
+            // moved the value up into bits 8+ where withLight's `& 0xFF` discards it and left
+            // `(32 * sum) & 0xFF` instead -- zero whenever sum is a multiple of 8, i.e. no block
+            // light at all in the common uniformly-lit case. Shedding light, not the splotches:
+            // sky is summed from different bits and was never touched by the corruption, which is
+            // why the symptom was torches and lava going dark in the far LOD rather than terrain
+            // going black. Pinned by MipperTest.
+            blockLight = (blockLight / 8) & 0xF0;
             skyLight = (int) Math.ceil((double) skyLight / 8);
 
-            return withLight(I111, (blockLight << 4) | skyLight);
+            return withLight(I111, blockLight | skyLight);
         }
     }
 }
