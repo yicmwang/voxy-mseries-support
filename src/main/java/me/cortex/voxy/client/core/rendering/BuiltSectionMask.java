@@ -52,10 +52,62 @@ public final class BuiltSectionMask {
         BUILT.remove(sectionPos);
     }
 
+    /** How many sections the set holds. Package-private: the tests and the diagnostics both read it. */
+    static synchronized int builtCount() {
+        return BUILT.size();
+    }
+
     /** Sodium rebuilds its section manager on a level or render-distance change; the set starts over. */
     public static synchronized void reset() {
         BUILT.clear();
     }
+
+    /**
+     * The level whose sections this set holds, so a render-distance change can be told from a level
+     * change. Held strongly and deliberately: it is only ever replaced by the next level, so the
+     * most it retains is one already-unloaded level until the next world loads -- and comparing
+     * through a weak reference instead would let a collection turn into a spurious clear, which is
+     * the exact failure this method exists to remove.
+     */
+    private static Object maskLevel;
+    private static long resets, resetsSkipped;
+
+    /**
+     * Clear the set only when the LEVEL changed, not when Sodium merely rebuilt its section manager.
+     *
+     * <p>{@code RenderSectionManager} is constructed on a level change <i>and</i> on every
+     * render-distance change, and the mixin cleared the mask on both. Clearing on a distance change
+     * left the mask permanently empty, and that is measured rather than argued: with {@code
+     * VOXY_VMASK=1} in a run whose render distance went 3 to 2, {@code [Metal-VMASK]} reported
+     * {@code built=0 columns=0/81 sections=0 uploads=7} at frame 1202 and then the same numbers,
+     * unchanged, at every report through frame 4802 -- three thousand six hundred frames with the
+     * mask empty, in a loaded world that was rendering.
+     *
+     * <p>The reason it never came back is the feed: {@link #BUILT} only ever refills from mesh-upload
+     * deltas, and Sodium does not re-mesh a chunk that is already built, so a clear is permanent for
+     * every section that stays loaded. An empty mask means the fragment-stage discard never fires,
+     * which is the LOD drawn over vanilla everywhere -- the reported near-field overlap. The cull
+     * was not mis-shaped during that time; it was OFF.
+     *
+     * <p>Clearing is not needed for a distance change. The per-frame distance filter already refuses
+     * to claim any section outside the render region, so a section the new distance no longer covers
+     * cannot set a bit whatever the set holds, and {@link #prune} bounds what is kept. A level change
+     * is genuinely different -- the set would otherwise hold another dimension's sections -- so that
+     * still clears.
+     *
+     * @return whether the set was cleared
+     */
+    public static synchronized boolean resetForLevel(final Object level) {
+        if (maskLevel == level) {
+            resetsSkipped++;
+            return false;
+        }
+        maskLevel = level;
+        resets++;
+        BUILT.clear();
+        return true;
+    }
+
 
     /**
      * side, camSecX, camSecY, camSecZ, camBlockX, camBlockY, camBlockZ, pad.
@@ -228,7 +280,7 @@ public final class BuiltSectionMask {
     private long uploads = 0;
 
     public static void logPopulation(int side, int anchorSecX, int camSecY, int anchorSecZ,
-                                     long[] columnY, long uploads) {
+                                     int camSecX, int camSecZ, long[] columnY, long uploads) {
         if (!VMASK_LOG) return;
         int builtSize;
         synchronized (BuiltSectionMask.class) {
@@ -258,18 +310,24 @@ public final class BuiltSectionMask {
         }
 
         final StringBuilder grid = new StringBuilder();
+        // 'O' marks the CAMERA's column, which is the only column whose position says anything about
+        // centring. This used to be drawn at a fixed (side/2, side/2), which is the camera's column
+        // only when the anchor happens to land so -- one time in anchorStep -- so reading centring off
+        // the grid gave a wrong answer most of the time. The camera is the thing to compare against.
+        final int camDx = camSecX - anchorSecX;
+        final int camDz = camSecZ - anchorSecZ;
         for (int dz = 0; dz < side; dz++) {
             grid.append("\n  ");
             for (int dx = 0; dx < side; dx++) {
                 final long m = columnY[dz * side + dx];
                 final char c = m == 0 ? '.' : (Long.bitCount(m) >= 8 ? '#' : '+');
-                grid.append(dx == side / 2 && dz == side / 2 ? (m == 0 ? 'O' : 'X') : c);
+                grid.append(dx == camDx && dz == camDz ? (m == 0 ? 'O' : 'X') : c);
             }
         }
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-VMASK f=%d] built=%d maxBuilt=%d columns=%d/%d sections=%d  anchor=%d,%d camSecY=%d uploads=%d%s",
+                "[Metal-VMASK f=%d] built=%d maxBuilt=%d columns=%d/%d sections=%d  anchor=%d,%d cam=%d,%d camSecY=%d uploads=%d resets=%d kept=%d%s",
                 VMASK_FRAME, builtSize, maxBuilt, columns, side * side, sections,
-                anchorSecX, anchorSecZ, camSecY, uploads, grid));
+                anchorSecX, anchorSecZ, camSecX, camSecZ, camSecY, uploads, resets, resetsSkipped, grid));
         me.cortex.voxy.common.Logger.info(String.format(
                 "[Metal-VMASK2 f=%d] vertical span: bits %d..%d of 64 (bias %d => sections %d..%d relative to the camera's)",
                 VMASK_FRAME, minBit < 64 ? minBit : -1, maxBit, Y_BIAS,
@@ -473,7 +531,7 @@ public final class BuiltSectionMask {
             prune(newCamX, newCamY, newCamZ, rd);
         }
 
-        logPopulation(newSide, anchorX, newCamY, anchorZ, columnY, this.uploads);
+        logPopulation(newSide, anchorX, newCamY, anchorZ, newCamX, newCamZ, columnY, this.uploads);
         logBuiltExtent(newCamX, newCamY, newCamZ, rd);
 
         if (this.buffer != null && this.side == newSide

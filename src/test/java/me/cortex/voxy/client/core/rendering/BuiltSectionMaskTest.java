@@ -293,4 +293,30 @@ class BuiltSectionMaskTest {
             }
         }
     }
+
+    @Test
+    void aRenderDistanceChangeDoesNotEmptyTheMask() {
+        // The measured defect, and the reason bug A was permanent rather than occasional.
+        //
+        // Sodium constructs a new RenderSectionManager on a render-distance change as well as on a
+        // level change, and the mixin cleared the mask on both. The set only refills from mesh-upload
+        // deltas, and Sodium does not re-mesh a chunk that is already built, so the clear never came
+        // back: a live run with VOXY_VMASK=1 held built=0, columns=0/81, sections=0 for 3600
+        // consecutive frames after its render distance went 3 to 2. An empty mask means the
+        // fragment-stage discard never fires, so during all of that the LOD was drawn over vanilla
+        // everywhere -- not a mis-shaped cull, no cull.
+        //
+        // Nothing is lost by keeping it: a section the smaller distance no longer covers cannot set a
+        // bit, because the per-frame distance filter refuses it whatever the set holds.
+        final Object level = new Object();
+        assertTrue(BuiltSectionMask.resetForLevel(level), "a level the mask has not seen clears it");
+        BuiltSectionMask.add(12345L);
+        assertEquals(1, BuiltSectionMask.builtCount());
+
+        assertFalse(BuiltSectionMask.resetForLevel(level), "the same level must not clear");
+        assertEquals(1, BuiltSectionMask.builtCount(), "a section survives a render-distance change");
+
+        assertTrue(BuiltSectionMask.resetForLevel(new Object()), "a different level does clear");
+        assertEquals(0, BuiltSectionMask.builtCount(), "another dimension's sections go with it");
+    }
 }
