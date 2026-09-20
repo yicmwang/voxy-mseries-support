@@ -193,8 +193,15 @@ public final class BuiltSectionMask {
      * it back.
      */
     static boolean worthKeeping(final int dx, final int dy, final int dz, final int rd) {
+        if (Math.abs(dy) > Y_BIAS) return false;                  // outside the mask's own bit span
+        if (withinRenderDistance(dx, dy, dz, rd)) {
+            // Claimable now -- but the union claims at any horizontal distance, so bound it by what the
+            // square can address, or the set grows without limit along a journey.
+            final int addressable = 4 * rd;
+            return Math.abs(dx) <= addressable && Math.abs(dz) <= addressable;
+        }
         final long reach = (long) rd + PRUNE_MARGIN;
-        return (long) dx * dx + (long) dy * dy + (long) dz * dz <= reach * reach;
+        return (long) dx * dx + (long) dz * dz <= reach * reach;  // or it comes back as the player moves
     }
 
     /**
@@ -260,7 +267,7 @@ public final class BuiltSectionMask {
      * than what it meshes; until then, this is the shape that satisfies both reports.
      */
     static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
-        return ((long) dx * dx + (long) dz * dz) < (long) rd * rd && Math.abs(dy) < rd;
+        return withinRenderCylinder(dx, dz, rd) || Math.abs(dy) < rd;
     }
 
     private IGpuBuffer buffer;

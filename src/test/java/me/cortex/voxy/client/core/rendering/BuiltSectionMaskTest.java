@@ -221,28 +221,39 @@ class BuiltSectionMaskTest {
 
 
     @Test
-    void sectionsFarBelowTheCameraAreNotClaimed() {
-        // The user's altitude report: flying high, the top surface of NEAR LODs is absent and you
-        // see straight through, while FAR LODs are fine. Near LODs sit directly under the camera, so
-        // they are zero chunks away horizontally -- a horizontal-only test claimed them whatever
-        // their height, while vanilla (a frustum traversal limited by its build distance) was not
-        // drawing them. Far LODs are outside the horizontal radius anyway, so they were never claimed
-        // and never broke, which is why the symptom split that way.
+    void sectionsInARenderedColumnAreClaimedHoweverDeep() {
+        // THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the point: every assertion below was
+        // assertFalse for deep sections, holding a CONJUNCTION (`horizontal < rd && |dy| < rd`).
         //
-        // This is why the vertical term is a CONJUNCTION and not Sodium's disjunction: with
-        // `horizontal < rd || |dy| < rd`, the horizontal term alone would claim (0, 14, 0) and this
-        // report would come back.
+        // That conjunction refuses 90% of what Sodium builds, measured at the users's render distance:
+        // with VOXY_VMASK=1 on an unpinned ground-level camera at RD 2,
+        //   [Metal-VMASK3] built=192 outsideRenderDistance3D=173 (90.1%) maxChebyshev=6 (rd=2) secY 2..7
+        // and the mask claimed 6 columns out of the 81 addressable while Sodium's mesh set is a 5x5
+        // square of columns, d01=33 d02=52 sections. Columns at Chebyshev 2 were refused unless their
+        // dy was within 1, so most of the terrain at the camera's OWN LEVEL stayed LOD-covered on top
+        // of vanilla. That is the near-field overlap, and it is the cull's own operator, not its feed.
+        //
+        // Sodium's rule is a UNION -- OcclusionCuller.testDistance, called as
+        // testDistance(dx*dx+dz*dz, |dy|, searchDistance) from SectionTree.traverse:
+        //     (a < c*c) || (b < c)   with a = dx^2+dz^2, b = |dy|
+        // so a section passes on EITHER term. The vertical slab term is what claims the corners at the
+        // camera's own level; the horizontal term is what claims a column at any depth.
+        //
+        // The cost is the altitude report this conjunction was written for, and it is knowingly
+        // accepted here: a section far below the camera now IS claimed, so if the frustum is not
+        // looking at it the LOD is culled over nothing. No distance rule can tell -- the fix is to feed
+        // the mask from the sections Sodium actually RENDERS (cull.MD 6.1), not to pick a different
+        // operator. Do not "tighten" this back without fixing that first.
         int rd = 8;
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 0, 0, rd));
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, near ground");
-        assertFalse(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
-                "at the vertical bound, which is exclusive: 256 blocks down is not drawn");
-        assertFalse(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd),
-                "224 blocks straight down is outside 128, and vanilla does not draw it");
-        assertFalse(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
-        // Inside the horizontal radius but far in Y: still not claimed, because the cap is what holds
-        // the altitude fix.
-        assertFalse(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd), "horizontal ok, vertical not");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
+                "the horizontal term alone claims the whole column, and vanilla draws the column");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd),
+                "224 blocks straight down is still in a rendered column -- previously refused here");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
+        assertTrue(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd),
+                "inside the horizontal radius, so claimed whatever its height");
     }
 
 
@@ -257,11 +268,12 @@ class BuiltSectionMaskTest {
         // The two-axis twin: horizontal 5^2+5^2 = 50 < 64, and the sphere scored 50+16 = 66 > 64.
         assertTrue(BuiltSectionMask.withinRenderDistance(5, 4, 5, rd), "and its two-axis twin");
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 7, 0, rd), "straight down, inside the cap");
-        // Still outside: the horizontal radius is the hard edge, and it is exclusive.
-        assertFalse(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd));
-        assertFalse(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "sqrt(72) = 8.49 > 8");
-        // The old sphere accepted this one and the new rule does not: 4^2+4^2+4^2 = 48 <= 64, but
-        // |dy| = 4 < 8 so both agree here -- kept as a guard that the cap did not tighten the near field.
+        // These two were assertFalse under the conjunction, which treated the horizontal radius as the
+        // only term. Under Sodium's union the vertical slab term claims them: |dy| < rd, so they are
+        // drawn by vanilla at the camera's own level and must be culled. Refusing them is the
+        // corner-band over-draw -- see sectionsInARenderedColumnAreClaimedHoweverDeep.
+        assertTrue(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd), "the slab term claims it");
+        assertTrue(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "and this one: |dy| = 4 < 8");
         assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd));
     }
 
@@ -277,9 +289,12 @@ class BuiltSectionMaskTest {
         assertTrue(BuiltSectionMask.worthKeeping(0, 0, 0, rd));
         assertTrue(BuiltSectionMask.worthKeeping(rd, 0, 0, rd), "at the radius");
         assertTrue(BuiltSectionMask.worthKeeping(rd + 3, 0, 0, rd), "just outside, could come back");
-        assertFalse(BuiltSectionMask.worthKeeping(rd + 5, 0, 0, rd), "far outside the margin");
-        assertFalse(BuiltSectionMask.worthKeeping(0, 40, 0, rd), "left far below");
-        assertFalse(BuiltSectionMask.worthKeeping(100, 0, 0, rd), "left far behind");
+        // WAS assertFalse. It changed because the claim rule did: the union's vertical slab term claims
+        // |dy| < rd at any horizontal distance inside the square, so this section is claimed NOW and
+        // pruning it would under-claim. The addressable bound is what still holds the set in check.
+        assertTrue(BuiltSectionMask.worthKeeping(rd + 5, 0, 0, rd), "claimed by the slab term now");
+        assertFalse(BuiltSectionMask.worthKeeping(0, 40, 0, rd), "left far below, past the bit span");
+        assertFalse(BuiltSectionMask.worthKeeping(100, 0, 0, rd), "left far behind, outside the square");
     }
 
     @Test
