@@ -136,6 +136,58 @@ class LightingSupplierTest {
     }
 
     @Test
+    void unlitChunkReadsAsFullySkyLitRatherThanAsStoredZero() {
+        // The other half of the same question. "A stored all-zero layer is genuinely dark" is only
+        // true of a chunk Minecraft has finished lighting; a chunk that is not light-correct has had
+        // no light computed for it, and its layers read zero because there is nothing there yet.
+        // Baking those zeros is permanent -- the LOD has no notion of light arriving later -- and it
+        // draws the terrain as a black mass with a correct silhouette.
+        DataLayer block = new DataLayer();
+        DataLayer sky = new DataLayer();
+        ILightingSupplier supplier = VoxelIngestService.lightingSupplier(block, sky, false);
+
+        for (int y = 0; y < 16; y += 5) {
+            for (int z = 0; z < 16; z += 5) {
+                for (int x = 0; x < 16; x += 5) {
+                    byte light = supplier.supply(x, y, z);
+                    assertEquals(15, skyOf(light), "an unlit chunk must not bake a stored zero as night");
+                    assertEquals(0, blockOf(light), "and must not invent block light either");
+                }
+            }
+        }
+    }
+
+    @Test
+    void unlitChunkIgnoresEvenAPopulatedLayer() {
+        // Not just the all-zero layer: an unlit chunk's layers are not trustworthy at all, so a
+        // stray nonzero value in one must not be believed either. Otherwise a half-written layer
+        // would bake a half-lit chunk, which is the harder failure to notice.
+        DataLayer block = filled(15);
+        DataLayer sky = filled(12);
+        ILightingSupplier supplier = VoxelIngestService.lightingSupplier(block, sky, false);
+
+        byte light = supplier.supply(8, 8, 8);
+        assertEquals(15, skyOf(light));
+        assertEquals(0, blockOf(light));
+    }
+
+    @Test
+    void litChunkStillReadsItsStoredLayersVerbatim() {
+        // The gate must key on isLightCorrect() alone and not drift into "always 15": a lit chunk
+        // with a genuinely dark stored layer -- a sealed cave -- has to stay dark, which is the
+        // assertion storedAllZeroSkyLayerStaysDark makes through the two-argument overload.
+        DataLayer block = new DataLayer();
+        DataLayer sky = new DataLayer();
+        ILightingSupplier lit = VoxelIngestService.lightingSupplier(block, sky, true);
+        ILightingSupplier legacy = VoxelIngestService.lightingSupplier(block, sky);
+
+        for (int i = 0; i < 16; i++) {
+            assertEquals(legacy.supply(i, i, i), lit.supply(i, i, i),
+                    "the third argument must not change what a lit chunk reads");
+        }
+    }
+
+    @Test
     void sampledValuesAreClampedIntoTheirNibble() {
         // Defensive: getLight() is documented to return 0..15, but a nibble that overflowed its
         // half would corrupt the other channel rather than merely being too bright.
