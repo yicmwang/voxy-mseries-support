@@ -123,6 +123,27 @@ public final class BuiltSectionMask {
         return (long) chunkDx * chunkDx + (long) chunkDz * chunkDz <= (long) rd * rd;
     }
 
+    /**
+     * The same question in three dimensions, which is the one that matters when the camera is not
+     * at ground level.
+     *
+     * <p>The horizontal cylinder above is right at ground level and wrong in the air. Sodium's
+     * visible set is a frustum traversal limited by its build distance, so at altitude a section
+     * directly below the camera is far outside the drawn region while still being 0 chunks away
+     * horizontally — and the mask claimed it, so the LOD was culled there and nothing drew it. The
+     * user's report names it exactly: "when I fly up high, the top surface of LODs close to me is
+     * fully absent and I can see straight through; top surfaces for LODs far from me are just
+     * fine". Near LODs are the ones directly under the camera; far ones are outside the horizontal
+     * radius anyway, so they were never claimed and were never broken.
+     *
+     * <p>A sphere is also the safe direction if Sodium's rule is looser vertically than a sphere:
+     * under-claiming keeps the LOD where vanilla draws (a z-fight), over-claiming removes it where
+     * vanilla does not (a hole), and holes are what this whole exercise has been chasing.
+     */
+    static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
+        return (long) dx * dx + (long) dy * dy + (long) dz * dz <= (long) rd * rd;
+    }
+
     private IGpuBuffer buffer;
     private int side = -1;
     private int camSecX = Integer.MIN_VALUE;
@@ -215,7 +236,7 @@ public final class BuiltSectionMask {
      * <p>Reports the horizontal Chebyshev distance distribution of the set in chunk units. Anything
      * past the render distance is a section the mask believes is covered and Sodium will not draw.
      */
-    public static void logBuiltExtent(final int camSecX, final int camSecZ, final int rd) {
+    public static void logBuiltExtent(final int camSecX, final int camSecY, final int camSecZ, final int rd) {
         if (!VMASK_LOG) return;
         final long[] snapshot;
         synchronized (BuiltSectionMask.class) {
@@ -230,7 +251,6 @@ public final class BuiltSectionMask {
         int outsideCylinder = 0;
         int maxD = 0;
         int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
-        final long r2 = (long) rd * rd;
         for (final long pos : snapshot) {
             final int dx = Math.abs(SectionPos.x(pos) - camSecX);
             final int dz = Math.abs(SectionPos.z(pos) - camSecZ);
@@ -238,11 +258,12 @@ public final class BuiltSectionMask {
             hist[Math.min(d, BANDS)]++;
             if (d > maxD) maxD = d;
             if (d > rd) beyondRd++;
-            // Sodium renders a CYLINDER (fx*fx + fz*fz <= r*r), but it MESHES a square: it builds
-            // every section of every loaded chunk. So the square's corners are meshed and never
-            // rendered, and the mask culls the LOD there -- a hole at the four diagonal edges, which
-            // is where "holes at the edges" would be. This is the count that tests it.
-            if ((long) dx * dx + (long) dz * dz > r2) outsideCylinder++;
+            // The count that matters is the one the FILTER applies: a section outside Sodium's drawn
+            // region is meshed and never rendered, and everything the mask claims there is a hole.
+            // Reported in three dimensions, because at altitude it is the vertical component that
+            // decides -- a section directly below the camera is zero chunks away horizontally.
+            final int dy = SectionPos.y(pos) - camSecY;
+            if (!withinRenderDistance(dx, dy, dz, rd)) outsideCylinder++;
             final int y = SectionPos.y(pos);
             if (y < minY) minY = y;
             if (y > maxY) maxY = y;
@@ -254,7 +275,7 @@ public final class BuiltSectionMask {
             b.append(String.format("  d%02d%s=%d", d, d == BANDS ? "+" : " ", hist[d]));
         }
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-VMASK3 f=%d] built=%d  outsideChebyshev=%d  outsideCYLINDER=%d (%.1f%%)  maxChebyshev=%d (rd=%d)  secY %d..%d%s",
+                "[Metal-VMASK3 f=%d] built=%d  outsideChebyshev=%d  outsideRenderDistance3D=%d (%.1f%%)  maxChebyshev=%d (rd=%d)  secY %d..%d%s",
                 VMASK_FRAME, snapshot.length, beyondRd, outsideCylinder,
                 100.0 * outsideCylinder / Math.max(1, snapshot.length), maxD, rd, minY, maxY, b));
     }
@@ -377,7 +398,10 @@ public final class BuiltSectionMask {
             for (final long pos : BUILT) {
                 // Distance from the CAMERA's column, because the cylinder is centred there, while
                 // the square's origin is world-anchored.
-                if (!withinRenderCylinder(SectionPos.x(pos) - newCamX, SectionPos.z(pos) - newCamZ, rd)) {
+                // Three-dimensional, not the horizontal cylinder: at altitude the sections below the
+                // camera are the ones this must exclude, and they are zero chunks away horizontally.
+                if (!withinRenderDistance(SectionPos.x(pos) - newCamX, SectionPos.y(pos) - newCamY,
+                                          SectionPos.z(pos) - newCamZ, rd)) {
                     continue;
                 }
                 final int dx = SectionPos.x(pos) - anchorX;
@@ -390,7 +414,7 @@ public final class BuiltSectionMask {
         }
 
         logPopulation(newSide, anchorX, newCamY, anchorZ, columnY, this.uploads);
-        logBuiltExtent(newCamX, newCamZ, rd);
+        logBuiltExtent(newCamX, newCamY, newCamZ, rd);
 
         if (this.buffer != null && this.side == newSide
                 && this.camSecX == anchorX && this.camSecY == newCamY && this.camSecZ == anchorZ

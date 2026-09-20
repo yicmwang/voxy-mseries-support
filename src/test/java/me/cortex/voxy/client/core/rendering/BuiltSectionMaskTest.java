@@ -219,6 +219,27 @@ class BuiltSectionMaskTest {
         assertEquals(8, Math.max(Math.abs(8), Math.abs(8)));
     }
 
+
+    @Test
+    void sectionsFarBelowTheCameraAreNotClaimed() {
+        // The user's altitude report: flying high, the top surface of NEAR LODs is absent and you
+        // see straight through, while FAR LODs are fine. Near LODs sit directly under the camera, so
+        // they are zero chunks away horizontally -- the old horizontal-only test claimed them
+        // whatever their height, while vanilla (a frustum traversal limited by its build distance)
+        // was not drawing them. Far LODs are outside the horizontal radius anyway, so they were
+        // never claimed and never broke, which is why the symptom split that way.
+        int rd = 8;
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 0, 0, rd));
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, near ground");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, -8, 0, rd), "directly above, at the radius");
+        assertFalse(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd),
+                "224 blocks straight down is outside 128, and vanilla does not draw it");
+        assertFalse(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
+        // The corner case in three dimensions: inside the horizontal cylinder but far in Y.
+        assertFalse(BuiltSectionMask.withinRenderDistance(7, 7, 0, rd), "sqrt(49+49)=9.9 > 8");
+        assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd), "sqrt(48)=6.9 <= 8");
+    }
+
     @Test
     void anEmptyMaskCoversNothing() {
         long[] m = empty();
