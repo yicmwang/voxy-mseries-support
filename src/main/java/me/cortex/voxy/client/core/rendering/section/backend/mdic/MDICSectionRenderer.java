@@ -284,6 +284,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         }
     }
 
+    private static int parseEnvInt(String name, int def) {
+        String v = System.getenv(name);
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
     //TODO: needs to be in the viewport, since it contains the compute indirect call/values
     private final IGpuBuffer distanceCountBuffer = RenderBackendFactory.get().createBuffer(1024*4+100_000*4).zero();//TODO move to viewport?
 
@@ -1264,6 +1274,214 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         me.cortex.voxy.common.Logger.info("[Metal-CMD " + tag + "] maxDrawCount=" + maxDrawCount + sb);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // CPU validation of the draw commands about to be submitted (VOXY_DRAWCHK).
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * How thoroughly {@link #validateDrawCommands} walks the command list. {@code 0} off, {@code 1}
+     * sampled on a rotating stride (the default — the full walk is ~450k commands a frame across the
+     * three slices and the frame is only a few ms), {@code 2} every command.
+     */
+    private static final int DRAWCHK = parseEnvInt("VOXY_DRAWCHK", 1);
+    private static final int DRAWCHK_STRIDE = Math.max(1, parseEnvInt("VOXY_DRAWCHK_STRIDE", 16));
+
+    /** [0]=checked [1]=posMismatch [2]=sidOob [3]=rangeOob [4]=noGroup [5]=drawIdOob [6]=listOver */
+    private static final long[] DRAWCHK_TOT = new long[7];
+    private static final long[] DRAWCHK_LAST = new long[7];
+    private static final String[] DRAWCHK_NAMES =
+            {"checked", "posMismatch", "sidOob", "rangeOob", "noGroup", "drawIdOob", "listOver"};
+    private static long drawchkCalls = 0;
+    private static int drawchkExamples = 0;
+
+    /**
+     * Validate, on the CPU, every draw command this slice is about to submit — against the two
+     * things that must agree for a draw to put the right geometry in the right place.
+     *
+     * <p>{@code cmdgen.comp} builds each command from ONE {@code SectionMeta}, but the vertex shader
+     * reconstructs the section from two separate places: the quads come from
+     * {@code quadData[gl_VertexID>>2]} via {@code cmd.baseVertex}, and the section's world position
+     * comes from {@code positionBuffer[cmd.baseInstance]} — which cmdgen wrote as
+     * {@code extractRawPos(meta)} for that same draw index. So for every command:
+     *
+     * <ul>
+     *   <li><b>{@code positionBuffer[baseInstance]} must be the raw position of the section whose
+     *       metadata produced the command.</b> If it is not, the draw renders one section's quads at
+     *       another section's position: geometry whose shape does not match the voxels around it,
+     *       changing whenever draw indices are reassigned. That is precisely the reported splotch
+     *       signature, and no shading fault can produce it — a wrong light byte shades a correct
+     *       quad wrongly and keeps its silhouette.</li>
+     *   <li><b>{@code (baseVertex>>2, indexCount/6)} must be one of the eight {@code (ptr, count)}
+     *       groups that metadata encodes</b>, and the final group must end inside the geometry heap.
+     *       This is the quad-range check: it is the only thing standing between a corrupt count and
+     *       a draw that reads arbitrary quads out of the shared geometry buffer.</li>
+     *   <li><b>The render list's entry for {@code baseInstance} must be a real section id.</b> On
+     *       Metal that list is the traversal's output; its length is the {@code sectionCount} the
+     *       traversal wrote, which is an atomic counter that overshoots its own capacity check under
+     *       contention (see {@code traversal_dev.comp}: the {@code < renderQueueMaxSize} test is a
+     *       plain read, and many lanes pass it before any {@code atomicAdd} lands). Any command
+     *       whose index is past the capacity reads an entry the traversal never wrote.</li>
+     * </ul>
+     *
+     * <p>All inputs are CPU reads of Shared buffers the Metal backend already exposes, so this costs
+     * no GPU work and does not disturb the frame. Every dereference is bounds-checked first — a
+     * corrupt section id must be reported, not used as an offset into native memory.
+     */
+    private void validateDrawCommands(final String tag, MDICViewport viewport,
+                                      long indirectOffset, int maxDrawCount) {
+        if (DRAWCHK == 0 || maxDrawCount <= 0) return;
+        if (!(viewport.drawCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer cmds)) return;
+        if (!(viewport.positionScratchBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer pos)) return;
+        if (!(viewport.indirectLookupBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer list)) return;
+        if (!(this.geometryManager.getMetadataBuffer() instanceof me.cortex.voxy.client.core.metal.MetalBuffer md)) return;
+        if (!(this.geometryManager.getGeometryBuffer() instanceof me.cortex.voxy.client.core.metal.MetalBuffer geo)) return;
+        long cp = cmds.getContentsPtr();
+        long pp = pos.getContentsPtr();
+        long lp = list.getContentsPtr();
+        long mp = md.getContentsPtr();
+        if (cp == 0 || pp == 0 || lp == 0 || mp == 0) return;
+
+        final long posEntries = pos.size() / 8L;//uvec2 per entry
+        final long heapElements = geo.size() / 8L;//8 bytes per quad
+        final int listCap = me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.MAX_QUEUE_SIZE;
+        final int maxSections = this.geometryManager.getMaxSectionCount();
+        // The render list is { uint count; uint entries[]; } — the count is the array length cmdgen
+        // dispatches over, and it is what this whole check hinges on.
+        final long listCount = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp));
+        long avail = Math.max(0, (cmds.size() - indirectOffset) / 20L);
+        int n = (int) Math.min(maxDrawCount, avail);
+
+        int d0 = 0, d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0, d6 = 0;
+
+        for (int i = 0; i < n; i++) {
+            if (DRAWCHK == 1 && DRAWCHK_STRIDE > 1 && (i % DRAWCHK_STRIDE) != 0) continue;
+            long a = cp + indirectOffset + (long) i * 20L;
+            int indexCount = MemoryUtil.memGetInt(a);
+            int baseVertex = MemoryUtil.memGetInt(a + 12);
+            long baseInstance = Integer.toUnsignedLong(MemoryUtil.memGetInt(a + 16));
+            d0++;
+
+            if (baseInstance >= posEntries) { d5++; continue; }
+            long sid = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp + 4 + baseInstance * 4L));
+            if (sid >= maxSections) { d2++; continue; }
+            long m = mp + sid * 32L;
+
+            // The two inputs the vertex shader uses. This is the check that matters: the position a
+            // draw places its geometry at must belong to the section the draw takes its quads from.
+            int metaPosHi = MemoryUtil.memGetInt(m);
+            int metaPosLo = MemoryUtil.memGetInt(m + 4);
+            int bufPosHi = MemoryUtil.memGetInt(pp + baseInstance * 8L);
+            int bufPosLo = MemoryUtil.memGetInt(pp + baseInstance * 8L + 4);
+            if (metaPosHi != bufPosHi || metaPosLo != bufPosLo) {
+                d1++;
+                drawchkExample(tag, i, "posMismatch", "drawId=" + baseInstance + " sid=" + sid
+                        + " meta=[0x" + Integer.toHexString(metaPosHi) + ",0x" + Integer.toHexString(metaPosLo)
+                        + "] scratch=[0x" + Integer.toHexString(bufPosHi) + ",0x" + Integer.toHexString(bufPosLo) + "]");
+                continue;
+            }
+
+            long quadStart = Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 12));
+            long[] cnt = unpackQuadGroups(
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 16)),
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 20)),
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 24)),
+                    Integer.toUnsignedLong(MemoryUtil.memGetInt(m + 28)));
+            long quadEnd = quadEnd(quadStart, cnt);
+
+            if (quadEnd > heapElements) {
+                d3++;
+                drawchkExample(tag, i, "rangeOob", "sid=" + sid + " quadStart=" + quadStart
+                        + " quadEnd=" + quadEnd + " heapElems=" + heapElements);
+                continue;
+            }
+
+            // Which of the eight packed face groups does this command claim to be?
+            long bv = Integer.toUnsignedLong(baseVertex) >> 2;
+            long quads = indexCount / 6L;
+            if (indexCount != 0 && !matchesQuadGroup(quadStart, cnt, bv, quads)) {
+                d4++;
+                drawchkExample(tag, i, "noGroup", "sid=" + sid + " baseVertex>>2=" + bv
+                        + " quads=" + quads + " quadStart=" + quadStart
+                        + " groups=[" + cnt[0] + "," + cnt[1] + "," + cnt[2] + "," + cnt[3] + ","
+                        + cnt[4] + "," + cnt[5] + "," + cnt[6] + "," + cnt[7] + "]");
+            }
+        }
+
+        if (listCount > listCap) d6 = 1;
+
+        DRAWCHK_TOT[0] += d0; DRAWCHK_TOT[1] += d1; DRAWCHK_TOT[2] += d2; DRAWCHK_TOT[3] += d3;
+        DRAWCHK_TOT[4] += d4; DRAWCHK_TOT[5] += d5; DRAWCHK_TOT[6] = d6;
+
+        if ((drawchkCalls++ % 600) == 1) {
+            StringBuilder sb = new StringBuilder();
+            for (int k = 0; k < DRAWCHK_NAMES.length; k++) {
+                sb.append(' ').append(DRAWCHK_NAMES[k]).append('=').append(DRAWCHK_TOT[k])
+                  .append("(+").append(DRAWCHK_TOT[k] - DRAWCHK_LAST[k]).append(')');
+                DRAWCHK_LAST[k] = DRAWCHK_TOT[k];
+            }
+            Logger.info("[Metal-DRAWCHK " + tag + "] mode=" + DRAWCHK + " stride=" + DRAWCHK_STRIDE
+                    + " draws=" + n + " listCount=" + listCount + " listCap=" + listCap
+                    + " maxSections=" + maxSections + " heapElems=" + heapElements + sb);
+        }
+    }
+
+    /** Rate-limited detail for the first few offenders, so the counters come with a concrete case. */
+    private static void drawchkExample(String tag, int i, String kind, String detail) {
+        if (drawchkExamples++ >= 8) return;
+        Logger.warn("[Metal-DRAWCHK! " + tag + "] cmd#" + i + " " + kind + " " + detail);
+    }
+
+    /**
+     * Unpack a section's 32-byte metadata into the eight quad-group counts, in the order
+     * {@code cmdgen.comp} walks them: translucent, double-sided, down, up, north, south, west, east.
+     * Mirrors {@code BasicAsyncGeometryManager.SectionMeta.writeMetadataSplitParts}, which packs
+     * {@code (offsets[b+1]-offsets[b])} into the low half of each uint and the next delta into the
+     * high half, with the final group's high half being {@code itemCount - offsets[7]}.
+     *
+     * @param c0 first packed uint (metadata byte 16), through {@code c3} (byte 28)
+     */
+    static long[] unpackQuadGroups(final long c0, final long c1, final long c2, final long c3) {
+        return new long[] {c0 & 0xFFFFL, c0 >>> 16, c1 & 0xFFFFL, c1 >>> 16,
+                           c2 & 0xFFFFL, c2 >>> 16, c3 & 0xFFFFL, c3 >>> 16};
+    }
+
+    /**
+     * One past the last quad index this section's metadata claims, i.e. where the geometry heap
+     * allocation must extend to. {@code quadStart} is the metadata's {@code geometryPtr +
+     * offsets[0]}, so this is {@code geometryPtr + itemCount}.
+     *
+     * <p>This is the number the existing {@code verifyBuiltSectionOffsets} guard does NOT cover: it
+     * checks the deltas <i>between</i> offsets, but the final segment runs to {@code itemCount},
+     * which {@code BuiltSection} does not know (it is the geometry buffer's element count). The last
+     * group's count is packed as {@code itemCount - offsets[7]}, so if that difference is ever
+     * negative it wraps to a count near 65535 and the draw reads far past its own allocation.
+     */
+    static long quadEnd(final long quadStart, final long[] groups) {
+        long end = quadStart;
+        for (long c : groups) end += c;
+        return end;
+    }
+
+    /**
+     * Is {@code (baseVertex>>2, indexCount/6)} one of the eight {@code (ptr, count)} groups this
+     * section's metadata encodes? A draw command is only legitimate if it is — this is the check
+     * that a command's quad range lies inside its own section's allocation, since the groups tile
+     * exactly {@code [quadStart, quadEnd)}.
+     *
+     * <p>Empty groups are skipped rather than matched, because {@code cmdgen.comp} emits nothing for
+     * them ({@code if (count != 0)}): a command claiming a zero-quad group is as wrong as one
+     * claiming a range that does not exist.
+     */
+    static boolean matchesQuadGroup(final long quadStart, final long[] groups,
+                                    final long baseVertexQuads, final long quads) {
+        long ptr = quadStart;
+        for (int g = 0; g < 8; g++) {
+            if (groups[g] != 0 && baseVertexQuads == ptr && quads == groups[g]) return true;
+            ptr += groups[g];
+        }
+        return false;
+    }
+
     /**
      * The depth state both LOD passes must use — the compare OPERATOR is a property of the frame's
      * depth buffer, not of the pass, so opaque and translucent have to agree on it.
@@ -1549,6 +1767,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         var gb = this.geometryManager.getGeometryBuffer();
         traceGeometry(viewport, indirectOffset, maxDrawCount,
                 gb instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb ? mb : null);
+        validateDrawCommands(
+                indirectOffset == 0L ? "opaque"
+                        : indirectOffset == (long) TEMPORAL_OFFSET * 5L * 4L ? "temporal" : "translucent",
+                viewport, indirectOffset, maxDrawCount);
         encoder.setPipeline(pipeline);
         // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
         // SSBO post-chunk-3 SceneUniform flip.
