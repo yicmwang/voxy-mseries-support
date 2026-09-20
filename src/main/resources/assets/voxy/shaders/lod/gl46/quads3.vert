@@ -136,7 +136,13 @@ void main() {
 #else
     uint baseInstanceFix = uint(gl_BaseInstance);
 #endif
+#ifdef VOXY_BI_OFFSET
+    // The position buffer is bound at `baseInstance * 8`, so this draw's entry IS index 0. The index
+    // therefore arrives as buffer state rather than as a pushed constant -- see MetalRenderEncoder.
+    setupQuad(quad, quadData[uint(gl_VertexID)>>2], positionBuffer[0], (gl_VertexID&3) == 1);
+#else
     setupQuad(quad, quadData[uint(gl_VertexID)>>2], positionBuffer[baseInstanceFix], (gl_VertexID&3) == 1);
+#endif
 #ifdef VOXY_LOD_SHOW_DRAWID
     voxyDrawIdOut = baseInstanceFix;
 #endif

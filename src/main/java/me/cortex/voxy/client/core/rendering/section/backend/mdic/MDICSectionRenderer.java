@@ -892,6 +892,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (!"0".equals(System.getenv("VOXY_LOD_SHOW_DRAWID"))) {
             m.put("VOXY_LOD_SHOW_DRAWID", "");
         }
+        // VOXY_BI_OFFSET=1: take the per-draw section index from a buffer offset instead of the pushed
+        // constant. The shader and the encoder must agree, so this define and the encoder's env read are
+        // the same variable.
+        if (!"0".equals(System.getenv("VOXY_BI_OFFSET"))) {
+            m.put("VOXY_BI_OFFSET", "");
+        }
         return m;
     }
 
@@ -2143,6 +2149,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // translucent surface too or water is culled over vanilla water and nowhere else.
         if (CHUNK_CULL && this.builtSectionMask.buffer() != null) {
             encoder.setBuffer(BUILT_MASK_CHUNK_BINDING, this.builtSectionMask.buffer(), 0);
+        }
+        // VOXY_BI_OFFSET=1: hand the encoder the buffer its per-draw reads come from, so it can bind it
+        // at `baseInstance * 8` instead of pushing the index as a constant.
+        if (!"0".equals(System.getenv("VOXY_BI_OFFSET"))
+                && encoder instanceof me.cortex.voxy.client.core.metal.MetalRenderEncoder mre) {
+            mre.setPerDrawIndexBuffer(5, viewport.positionScratchBuffer);
         }
 
         encoder.bindIndexBuffer(me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer.INSTANCE.getBuffer(),

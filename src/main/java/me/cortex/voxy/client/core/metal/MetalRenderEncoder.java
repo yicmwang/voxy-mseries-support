@@ -215,7 +215,13 @@ public final class MetalRenderEncoder implements RenderEncoder {
         }
         for (int i = 0; i < drawCount; i++) {
             long cmdAddr = offset + (long) i * stride;
-            if (indirectContents != 0) {
+            if (BI_OFFSET && this.biOffsetBuffer != null && this.biOffsetBinding >= 0
+                    && indirectContents != 0) {
+                // The index selects WHICH entry of the position buffer is read, so binding the buffer
+                // at that entry's offset makes the read correct with no push at all.
+                int baseInstance = MemoryUtil.memGetInt(indirectContents + cmdAddr + 16);
+                this.setBuffer(this.biOffsetBinding, this.biOffsetBuffer, (long) baseInstance * 8L);
+            } else if (indirectContents != 0) {
                 int baseInstance = MemoryUtil.memGetInt(indirectContents + cmdAddr + 16);
                 MemoryUtil.memPutInt(perDrawScratchAddr, baseInstance);
                 MetalNative.mtlRenderEncoderSetVertexBytes(this.encoderHandle,
@@ -226,6 +232,32 @@ public final class MetalRenderEncoder implements RenderEncoder {
                     this.boundIndexBuffer, this.boundIndexBufferOffset,
                     indirectBuf, cmdAddr);
         }
+    }
+
+    /**
+     * VOXY_BI_OFFSET=1: deliver the per-draw section index as a BUFFER OFFSET instead of a pushed
+     * constant.
+     *
+     * The existing path pushes `cmd.baseInstance` per draw with setVertexBytes (see the workaround note
+     * above). A per-draw constant is the one place a wrong section index can reach the vertex shader,
+     * and it is the one link in this renderer no counter has ever verified. It is also UNTESTABLE by
+     * observation: if the driver coalesces the constant, the shader receives a neighbouring draw's value
+     * and then uses it consistently for both the position and everything derived from it, so the output
+     * is internally consistent and no readout can tell it from correct behaviour.
+     *
+     * So the only test it admits is removing the mechanism. Binding the position buffer at an offset of
+     * `baseInstance * 8` puts the index in core per-draw Metal state, which is not a constant and cannot
+     * be coalesced the same way; the shader then reads index 0. One build, one env switch, so the two
+     * arms are directly comparable.
+     */
+    private static final boolean BI_OFFSET = !"0".equals(System.getenv("VOXY_BI_OFFSET"));
+    private IGpuBuffer biOffsetBuffer;
+    private int biOffsetBinding = -1;
+
+    /** Register the buffer whose entry `baseInstance` selects, for the BI_OFFSET path. */
+    public void setPerDrawIndexBuffer(int binding, IGpuBuffer buffer) {
+        this.biOffsetBinding = binding;
+        this.biOffsetBuffer = buffer;
     }
 
     /** Scratch buffer for per-draw setVertexBytes uniform (16 bytes std140). */
