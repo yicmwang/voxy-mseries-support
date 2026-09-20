@@ -213,7 +213,14 @@ void main() {
     // A correctly-delivered index is piecewise-constant over each drawn section and matches the draw
     // order; a coalesced or stuck constant shows the same value over runs of draws, or values that do
     // not change where the geometry does.
-    outColour = vec4(float((voxyDrawIdOut >> 16) & 0xFFu) / 255.0,
+    // R is a MARKER, not data: exactly 1.0 means "this pixel was painted by the readout", which is what
+    // lets an analysis separate LOD-painted pixels from vanilla terrain and sky without guessing at
+    // colours. The index is the low 16 bits in G,B -- enough because a render list is at most
+    // MAX_QUEUE_SIZE = 200_000, and the valid bound for any one frame is its listCount (measured at
+    // ~5_100 here). So any marked pixel whose decoded index is >= that frame's listCount was never
+    // written by cmdgen: the shader received an index that does not exist, which is the coalesced or
+    // stale per-draw constant this readout exists to catch.
+    outColour = vec4(1.0,
                      float((voxyDrawIdOut >> 8) & 0xFFu) / 255.0,
                      float(voxyDrawIdOut & 0xFFu) / 255.0, 1.0);
     return;
