@@ -49,6 +49,9 @@ public class ModelTextureBakery {
     private final GlViewCapture capture;
     /** M13 chunk 1: Metal-side bake target + atlas mirror + renderer. Lazy. */
     private MetalViewCapture metalCapture;
+    /** Cached {@code FluidRenderer} for the fluid bake, rebuilt if MC swaps the model set. */
+    private net.minecraft.client.renderer.block.FluidRenderer fluidRenderer;
+    private net.minecraft.client.renderer.block.FluidStateModelSet fluidRendererModels;
     private final ReuseVertexConsumer vc = new ReuseVertexConsumer();
 
     private final int width;
@@ -78,7 +81,13 @@ public class ModelTextureBakery {
         return ChunkSectionLayer.CUTOUT;
     }
 
-    private static final boolean SKIP_GL_FLUID_BAKE = true;
+    /**
+     * Kept as the escape hatch it was written as. It used to be hardcoded {@code true}, which is
+     * what made {@link #bakeFluidState} a no-op and removed water from the LOD entirely; see that
+     * method. Default off so the fluid bake actually runs.
+     */
+    private static final boolean SKIP_GL_FLUID_BAKE =
+            "1".equals(System.getenv("VOXY_SKIP_FLUID_BAKE"));
 
     public static int getMetaFromLayer(ChunkSectionLayer layer) {
         // 26.2: ChunkSectionLayer no longer has TRIPWIRE (only SOLID/CUTOUT/TRANSLUCENT).
@@ -129,18 +138,107 @@ public class ModelTextureBakery {
     }
 
 
+    /**
+     * Bake one face of a fluid into {@link #vc}.
+     *
+     * <p><b>This was a no-op and water's LOD geometry did not exist.</b> The P1 port to MC 26.2 found
+     * {@code BlockRenderDispatcher#renderLiquid} gone and replaced the body with
+     * {@code if (SKIP_GL_FLUID_BAKE) return;} — which returns before emitting a single vertex. The
+     * fluid branch of {@link #renderToStreamMetal} then always saw {@code vc.isEmpty()}, skipped every
+     * face, and left the bake target at its clear, so {@code ModelFactory} marked every water face
+     * non-existent and the mesher emitted no water at all.
+     *
+     * <p>It went unnoticed because the bake readback was unsynchronised: reading a stale buffer handed
+     * the water bake some other model's pixels, which read as geometry. Fixing that race in the same
+     * round removed the mask and water disappeared, which is how the user found it.
+     *
+     * <p>The 26.2 replacement for {@code renderLiquid} is
+     * {@link net.minecraft.client.renderer.block.FluidRenderer#tesselate}, which takes the quads'
+     * destination as an {@code Output} instead of a VertexConsumer. The surrounding getter is ported
+     * from this method's own pre-P1 body (commit {@code 6152372c^}): it answers AIR for the neighbour
+     * in {@code face}'s direction so that this one face renders, which is how the six per-face bakes
+     * were isolated upstream.
+     */
     private void bakeFluidState(BlockState state, ChunkSectionLayer layer, int face) {
-        {
-            //TODO: somehow set the tint flag per quad or something?
-            int metadata = getMetaFromLayer(layer);
-            //Just assume all fluids are tinted, if they arnt it should be implicitly culled in the model baking phase
-            // since it wont have the colour provider
-            metadata |= 4;//Has tint
-            this.vc.setDefaultMeta(metadata);//Set the meta while baking
-        }
-        // P1: BlockRenderDispatcher#renderLiquid is gone at 26.2; this GL fluid bake is
-        // replaced by the Metal bakery in P2. Skipped rather than faked.
+        //TODO: somehow set the tint flag per quad or something?
+        int metadata = getMetaFromLayer(layer);
+        //Just assume all fluids are tinted, if they arnt it should be implicitly culled in the model baking phase
+        // since it wont have the colour provider
+        metadata |= 4;//Has tint
+        this.vc.setDefaultMeta(metadata);//Set the meta while baking
         if (SKIP_GL_FLUID_BAKE) { return; }
+
+        var fluidModels = Minecraft.getInstance().getModelManager().getFluidStateModelSet();
+        if (this.fluidRenderer == null || this.fluidRendererModels != fluidModels) {
+            this.fluidRenderer = new net.minecraft.client.renderer.block.FluidRenderer(fluidModels);
+            this.fluidRendererModels = fluidModels;
+        }
+
+        final FluidState fluidState = state.getFluidState();
+        this.fluidRenderer.tesselate(new BlockAndTintGetter() {
+            @Override
+            public net.minecraft.world.level.CardinalLighting cardinalLighting() {
+                return net.minecraft.world.level.CardinalLighting.DEFAULT;
+            }
+
+            @Override
+            public LevelLightEngine getLightEngine() {
+                return null;
+            }
+
+            @Override
+            public int getBrightness(LightLayer type, BlockPos pos) {
+                return 0;
+            }
+
+            @Override
+            public int getBlockTint(BlockPos pos, ColorResolver colorResolver) {
+                return 0;
+            }
+
+            @Nullable
+            @Override
+            public BlockEntity getBlockEntity(BlockPos pos) {
+                return null;
+            }
+
+            @Override
+            public BlockState getBlockState(BlockPos pos) {
+                if (shouldReturnAirForFluid(pos, face)) {
+                    return Blocks.AIR.defaultBlockState();
+                }
+
+                //Fixme:
+                // This makes it so that the top face of water is always air, if this is commented out
+                //  the up block will be a liquid state which makes the sides full
+                // if this is uncommented, that issue is fixed but e.g. stacking water layers ontop of eachother
+                //  doesnt fill the side of the block
+
+                //if (pos.getY() == 1) {
+                //    return Blocks.AIR.getDefaultState();
+                //}
+                return state;
+            }
+
+            @Override
+            public FluidState getFluidState(BlockPos pos) {
+                if (shouldReturnAirForFluid(pos, face)) {
+                    return Blocks.AIR.defaultBlockState().getFluidState();
+                }
+
+                return fluidState;
+            }
+
+            @Override
+            public int getHeight() {
+                return 0;
+            }
+
+            @Override
+            public int getMinY() {
+                return 0;
+            }
+        }, BlockPos.ZERO, l -> this.vc, state, fluidState);
         this.vc.setDefaultMeta(0);//Reset default meta
     }
 

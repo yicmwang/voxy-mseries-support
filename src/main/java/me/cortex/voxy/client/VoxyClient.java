@@ -239,9 +239,15 @@ public class VoxyClient implements ClientModInitializer {
                 // entity, so `@s` would fail and the command would report failure to nobody; the
                 // player's own stack has the entity but no op. Take the console stack and attach the
                 // player to it.
+                //
+                // withSuppressedOutput, not `gamerule sendCommandFeedback false`: that gamerule does
+                // not suppress a player's own command output, so the periodic re-tp printed
+                // "Teleported ..." five lines deep over the middle of every screenshot, covering the
+                // exact pixels under test.
                 var players = server.getPlayerList().getPlayers();
                 if (players.isEmpty()) return;
-                var source = server.createCommandSourceStack().withEntity(players.get(0));
+                var source = server.createCommandSourceStack().withEntity(players.get(0))
+                        .withSuppressedOutput();
                 var commands = server.getCommands();
                 try {
                     if (!applied[0]) {
@@ -249,9 +255,6 @@ public class VoxyClient implements ClientModInitializer {
                         applied[0] = true;
                         // Spectator: no gravity, no collision, and the LOD ring still follows the eye.
                         commands.performPrefixedCommand(source, "gamemode spectator");
-                        // The periodic re-tp prints "Teleported ..." over the middle of the frame, which
-                        // covers the very pixels under test in every screenshot. Silence it.
-                        commands.performPrefixedCommand(source, "gamerule sendCommandFeedback false");
                         commands.performPrefixedCommand(source, "tp @s " + tpArgs);
                         Logger.info("VOXY_DEV_CAM active: pinned the camera to " + tpArgs);
                         return;
