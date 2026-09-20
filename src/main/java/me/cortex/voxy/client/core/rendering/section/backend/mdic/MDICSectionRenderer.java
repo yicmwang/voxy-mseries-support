@@ -239,7 +239,36 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return 0;
     }
 
-    private final IGpuBuffer uniform = RenderBackendFactory.get().createBuffer(1024).zero();//TODO move to viewport?
+    /**
+     * The scene uniform, RING-BUFFERED one slot per frame in flight.
+     *
+     * <p>It used to be a single 1024-byte buffer rewritten every frame, and that is a race on Metal:
+     * {@code MAX_SUBMITS_IN_FLIGHT} is 3, so frame N+1's upload can land before frame N's draws have
+     * read theirs, and frame N then draws with frame N+1's {@code baseSectionPos} and MVP. GL would
+     * rename the buffer behind the caller; Metal does not, which makes this port-specific.
+     *
+     * <p>It fits every symptom: pinning the camera makes {@code viewport.section} and the MVP identical
+     * every frame, so a stale read is invisible -- which is exactly why the artifact needs movement;
+     * and {@code baseSectionPos} enters the vertex path as
+     * {@code (extractLoDPosition(sPos)*(1<<lodLevel)) - baseSectionPos}, so a one-frame-stale value
+     * displaces a detail-0 section by 32 blocks and a detail-4 one by 512, i.e. scattered debris at
+     * different scales rather than a uniform offset.
+     *
+     * <p>A ring of UNIFORM_RING slots, indexed by the frame id, keeps a frame's uniform alive until
+     * well after its draws have retired.
+     */
+    private static final int UNIFORM_RING = 4;
+    private final IGpuBuffer[] uniformRing = new IGpuBuffer[UNIFORM_RING];
+    {
+        for (int i = 0; i < UNIFORM_RING; i++) {
+            this.uniformRing[i] = RenderBackendFactory.get().createBuffer(1024).zero();
+        }
+    }
+
+    /** This frame's uniform slot. */
+    private IGpuBuffer uniformFor(MDICViewport viewport) {
+        return this.uniformRing[(viewport.frameId & 0x7fffffff) % UNIFORM_RING];
+    }
 
     // Far-water alpha ramp (2026-07-03, Metal translucent shader only —
     // see the VOXY_WATER_FAR_ALPHA injection + quads.frag). Target alpha at
@@ -919,7 +948,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     }
 
     private void uploadUniformBuffer(MDICViewport viewport) {
-        long ptr = UploadStream.INSTANCE.upload(this.uniform, 0, 1024);
+        long ptr = UploadStream.INSTANCE.upload(this.uniformFor(viewport), 0, 1024);
         long base = ptr;
 
         var mat = this.lodMvp(viewport);
@@ -1038,7 +1067,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private void bindRenderingBuffers(MDICViewport viewport) {
         // SceneUniform is now an SSBO (see bindings.glsl); bind it to the
         // GL_SHADER_STORAGE_BUFFER target so the in-shader binding=0 matches.
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniform.id());
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniformFor(viewport).id());
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, this.geometryManager.getGeometryBuffer().id());
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, this.geometryManager.getMetadataBuffer().id());
         this.modelStore.bind(3, 4, 0);
@@ -2113,7 +2142,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         encoder.setPipeline(pipeline);
         // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
         // SSBO post-chunk-3 SceneUniform flip.
-        encoder.setBuffer(0, this.uniform, 0);
+        encoder.setBuffer(0, this.uniformFor(viewport), 0);
         encoder.setBuffer(1, this.geometryManager.getGeometryBuffer(), 0);
         encoder.setBuffer(2, this.geometryManager.getMetadataBuffer(), 0);
         // M13 chunk 1: bindBuffers now also wires up the model atlas texture +
@@ -2276,7 +2305,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 }
                 glBindVertexArray(RenderBackendFactory.get().getStaticVAO());
                 // SceneUniform is an SSBO now (see bindings.glsl).
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniform.id());
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniformFor(viewport).id());
                 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, this.geometryManager.getMetadataBuffer().id());
                 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, viewport.visibilityBuffer.id());
                 glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, viewport.indirectLookupBuffer.id());
@@ -2302,7 +2331,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // chunk 6's IGpuRenderTarget work.
                 try (var encoder = this.backend.beginComputePass()) {
                     encoder.setPipeline(this.forceAllVisiblePipeline);
-                    encoder.setBuffer(0, this.uniform, 0);
+                    encoder.setBuffer(0, this.uniformFor(viewport), 0);
                     encoder.setBuffer(2, viewport.visibilityBuffer, 0);
                     encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
                     encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
@@ -2345,7 +2374,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     this.builtSectionMask.update(viewport, this.backend);
                 }
                 encoder.setPipeline(this.commandGenPipeline);
-                encoder.setBuffer(0, this.uniform, 0);
+                encoder.setBuffer(0, this.uniformFor(viewport), 0);
                 encoder.setBuffer(1, viewport.drawCallBuffer, 0);
                 encoder.setBuffer(2, viewport.drawCountCallBuffer, 0);
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
@@ -2399,7 +2428,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // but pre-existing read-then-dispatch pattern).
             try (var encoder = this.backend.beginComputePass()) {
                 encoder.setPipeline(this.translucentGenPipeline);
-                encoder.setBuffer(0, this.uniform, 0);
+                encoder.setBuffer(0, this.uniformFor(viewport), 0);
                 encoder.setBuffer(1, viewport.drawCallBuffer, 0);
                 encoder.setBuffer(2, viewport.drawCountCallBuffer, 0);
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
@@ -2445,7 +2474,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     @Override
     public void free() {
-        this.uniform.free();
+        for (IGpuBuffer u : this.uniformRing) {
+            u.free();
+        }
         this.distanceCountBuffer.free();
         if (this.translucentTerrainShader != null) this.translucentTerrainShader.free();
         if (this.terrainShader != null) this.terrainShader.free();
