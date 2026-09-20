@@ -70,13 +70,15 @@ public abstract class MixinClientLevel {
         if (x == 0 || x==15 || y==0 || y==15 || z==0||z==15) {//Update if there is a statechange on the boarder
             var csp = SectionPos.of(pos);
 
-            var section = self.getChunk(pos).getSection(csp.y()-this.bottomSectionY);
+            var chunk = self.getChunk(pos);
+            var section = chunk.getSection(csp.y()-this.bottomSectionY);
             var lp = self.getLightEngine();
 
             var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
             var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
 
-            VoxelIngestService.rawIngest(wi, section, csp.x(), csp.y(), csp.z(), blp==null?null:blp.copy(), slp==null?null:slp.copy());
+            VoxelIngestService.rawIngest(wi, section, csp.x(), csp.y(), csp.z(),
+                    blp==null?null:blp.copy(), slp==null?null:slp.copy(), chunk.isLightCorrect());
         }
     }
 }

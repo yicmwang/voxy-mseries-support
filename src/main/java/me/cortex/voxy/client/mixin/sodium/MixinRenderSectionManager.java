@@ -112,7 +112,13 @@ public class MixinRenderSectionManager {
 
                     //Note: we dont do this check and just blindly ingest, it shouldbe ok :tm:
                     //if (blp != null || slp != null)
-                    VoxelIngestService.rawIngest(vrs.getEngine(), section, x, y, z, blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
+                    // isLightCorrect() is handed over rather than acted on here: this is the site that
+                    // fires the moment Sodium meshes a section, which is the moment the standing
+                    // "ingested before it was lit" hypothesis predicts the dark ones come from. It
+                    // counts them so the hypothesis can be read off instead of argued.
+                    VoxelIngestService.rawIngest(vrs.getEngine(), section, x, y, z,
+                            blp == null ? null : blp.copy(), slp == null ? null : slp.copy(),
+                            chunk.isLightCorrect());
                 }
             }
         }

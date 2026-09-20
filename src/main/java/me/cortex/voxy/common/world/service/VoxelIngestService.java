@@ -52,7 +52,15 @@ public class VoxelIngestService {
 
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
     private final Service service;
-    private record IngestSection(int cx, int cy, int cz, WorldEngine world, LevelChunkSection section, DataLayer blockLight, DataLayer skyLight){}
+    /**
+     * @param raw whether this section came in through {@code rawIngest} (Sodium's section-info redirect
+     *            and the border-block-change path) or through {@code enqueueIngest} (the chunk-level
+     *            path). The two have different guard strengths and, more importantly, different
+     *            timing: the raw path fires the instant Sodium meshes a section, which is not
+     *            necessarily the instant its light exists. Every audit below is split by it, because
+     *            a fault that only shows up on one path needs a different fix than one on both.
+     */
+    private record IngestSection(int cx, int cy, int cz, WorldEngine world, LevelChunkSection section, DataLayer blockLight, DataLayer skyLight, boolean raw, boolean lightCorrect){}
     private final ConcurrentLinkedDeque<IngestSection> ingestQueue = new ConcurrentLinkedDeque<>();
 
     public VoxelIngestService(ServiceManager pool) {
@@ -94,7 +102,7 @@ public class VoxelIngestService {
                     section.getBiomes(),
                     getLightingSupplier(task)
             );
-            scanIngestOutput(csec);
+            scanIngestOutput(csec, task.raw);
             WorldConversionFactory.mipSection(csec, task.world.getMapper());
             WorldUpdater.insertUpdate(task.world, csec);
         }
@@ -102,7 +110,7 @@ public class VoxelIngestService {
 
     @NotNull
     private static ILightingSupplier getLightingSupplier(IngestSection task) {
-        return lightingSupplier(task.blockLight, task.skyLight);
+        return lightingSupplier(task.blockLight, task.skyLight, task.lightCorrect);
     }
 
     /**
@@ -133,6 +141,33 @@ public class VoxelIngestService {
      * That is what {@code DataLayer.isEmpty()} would have conflated with absence.
      */
     static ILightingSupplier lightingSupplier(final DataLayer blockLight, final DataLayer skyLight) {
+        return lightingSupplier(blockLight, skyLight, true);
+    }
+
+    /**
+     * The same, but told whether the section's chunk had been lit at all when it was read.
+     *
+     * <p>The paragraph above assumes a stored all-zero layer is genuinely dark. That is only true of
+     * a chunk Minecraft has finished lighting. A chunk that is <i>not</i> light-correct has had no
+     * light computed for it yet, and its layers then read all-zero for the same reason a section
+     * above the sky-light source reads all-zero-in-absence: there is nothing there yet. Baking those
+     * zeros is permanent — the LOD has no notion of light arriving later — and it draws the terrain
+     * as a black mass with a correct silhouette, which is what the black splotches are.
+     *
+     * <p>So an unlit chunk is answered as fully sky-lit, which is upstream's own rule for an absent
+     * sky layer and the same rule this method already applies when the layer is missing. It is the
+     * recoverable direction: if the light does arrive, the section is re-ingested and corrected; if it
+     * never does, the terrain is over-bright rather than black, and a guess of "open to the sky" is
+     * right for the surface of every column that has nothing above it.
+     *
+     * @param lightCorrect {@code ChunkAccess.isLightCorrect()} at the moment the layers were copied
+     */
+    static ILightingSupplier lightingSupplier(final DataLayer blockLight, final DataLayer skyLight, final boolean lightCorrect) {
+        if (!lightCorrect) {
+            // Unlit: neither layer is trustworthy, so take both defaults. Sky 15 rather than 0 —
+            // see above. Block 0 matches BlockLightSectionStorage's absent-layer answer.
+            return (x, y, z) -> (byte) 15;
+        }
         return (x, y, z) -> {
             final int block = blockLight == null ? 0 : Math.min(15, blockLight.get(x, y, z));
             final int sky = skyLight == null ? 15 : Math.min(15, skyLight.get(x, y, z));
@@ -154,11 +189,20 @@ public class VoxelIngestService {
      * <p>{@code VOXY_INGEST_SCAN=1}, read once — 4096 longs per section is cheap next to the
      * conversion itself, but there is no reason to pay it in a normal run.
      */
-    private static final boolean SCAN_INGEST = "1".equals(System.getenv("VOXY_INGEST_SCAN"));
+    /**
+     * <b>On by default, and that default is the fix to a measurement bug.</b> This was gated behind
+     * {@code VOXY_INGEST_SCAN=1}, no run ever set it, so {@link #DIAG_VOXEL_GROUND} stayed at zero and
+     * `[Metal-VOXEL2] groundAir=0` was read as "the ingest-side air above ground is never dark" when it
+     * actually meant "the audit did not run". It was cited as evidence in that direction. A counter
+     * that silently reads zero when it is switched off is worse than no counter: 4096 long reads per
+     * section is nothing next to the conversion that follows it, so it runs unless explicitly killed
+     * ({@code VOXY_INGEST_SCAN=0}).
+     */
+    private static final boolean SCAN_INGEST = !"0".equals(System.getenv("VOXY_INGEST_SCAN"));
     public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_SOLID = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_SOLID_DARK = new java.util.concurrent.atomic.AtomicLong();
 
-    private static void scanIngestOutput(VoxelizedSection csec) {
+    private static void scanIngestOutput(VoxelizedSection csec, boolean raw) {
         if (!SCAN_INGEST) return;
         long solid = 0;
         long dark = 0;
@@ -207,6 +251,11 @@ public class VoxelIngestService {
                 }
             }
         }
+        // Split by ingest path. The raw path is the one that fires the moment Sodium meshes a
+        // section, so if "ingested before it was lit" is the fault, the dark air is on THIS side and
+        // the chunk path is clean -- and a single combined number cannot say that.
+        (raw ? DIAG_VOXEL_GROUND_RAW : DIAG_VOXEL_GROUND_CHUNK).addAndGet(ground);
+        (raw ? DIAG_VOXEL_GROUND_DARK_RAW : DIAG_VOXEL_GROUND_DARK_CHUNK).addAndGet(groundDark);
         DIAG_VOXEL_GROUND.addAndGet(ground);
         DIAG_VOXEL_GROUND_DARK.addAndGet(groundDark);
 
@@ -219,6 +268,30 @@ public class VoxelIngestService {
     /** Air cells resting on solid ground — the cells that light the visible surface faces. */
     public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND_DARK = new java.util.concurrent.atomic.AtomicLong();
+    /** The same two, split by ingest path: raw = Sodium's section-info redirect, chunk = chunk load. */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND_RAW = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND_DARK_RAW = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND_CHUNK = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_GROUND_DARK_CHUNK = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Sections handed to the ingest while {@code ChunkAccess.isLightCorrect()} was <b>false</b>, split
+     * by path. This is the direct measurement of the standing hypothesis — that Voxy bakes a section
+     * before Minecraft has lit it and is never told to look again — and it separates it from the
+     * alternative, that the light was there and was lost on the way in.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_INGEST_NOT_LIT_RAW = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_INGEST_NOT_LIT_CHUNK = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Of the sections that arrived with a sky layer <i>present</i>, how many had one that is entirely
+     * zero ({@code DataLayer.isEmpty()}). A present-and-empty sky layer is the shape of a section
+     * whose light data exists as an allocation but has not been computed — as opposed to the absent
+     * layer, which {@link #lightingSupplier} already answers with 15. Split by path for the same
+     * reason as {@link #DIAG_INGEST_NOT_LIT_RAW}: the raw path is the one that fires early.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_SKY_EMPTY_RAW = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_SKY_EMPTY_CHUNK = new java.util.concurrent.atomic.AtomicLong();
 
     /** Solid voxels with air directly above — the section's exposed surface. */
     public static final java.util.concurrent.atomic.AtomicLong DIAG_VOXEL_TOP = new java.util.concurrent.atomic.AtomicLong();
@@ -248,6 +321,11 @@ public class VoxelIngestService {
      * affected, which is the pass/fail for the fix.
      */
     private static void classifyLighting(DataLayer bl, DataLayer sl, boolean raw) {
+        // Present-but-empty is the unlit signature. isEmpty() is the cheap depth value the storage
+        // itself tracks, not a 2048-byte scan.
+        if (sl != null && sl.isEmpty()) {
+            (raw ? DIAG_SKY_EMPTY_RAW : DIAG_SKY_EMPTY_CHUNK).incrementAndGet();
+        }
         if (sl == null) {
             DIAG_LIGHT_NO_SKY.incrementAndGet();
             if (bl == null) {
@@ -343,7 +421,7 @@ public class VoxelIngestService {
             for (var section : chunk.getSections()) {
                 i++;
                 if (section == null || !shouldIngestSection(section, chunk.getPos().x(), i, chunk.getPos().z())) continue;
-                this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, null, null));
+                this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, null, null, false, chunk.isLightCorrect()));
                 try {
                     this.service.execute();
                 } catch (Exception e) {
@@ -387,7 +465,8 @@ public class VoxelIngestService {
             DIAG_ENQUEUE_COUNT.incrementAndGet();
             classifyLighting(bl, sl, false);
             compareAgainstLightEngine(chunk.getLevel(), pos, bl, sl);
-            this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, bl, sl));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
+            if (!chunk.isLightCorrect()) DIAG_INGEST_NOT_LIT_CHUNK.incrementAndGet();
+            this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, bl, sl, false, chunk.isLightCorrect()));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
             try {
                 this.service.execute();
             } catch (Exception e) {
@@ -422,11 +501,11 @@ public class VoxelIngestService {
         return tryIngestChunk(WorldIdentifier.of(chunk.getLevel()), chunk);
     }
 
-    private boolean rawIngest0(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
+    private boolean rawIngest0(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, boolean lightCorrect) {
         DIAG_RAW_INGEST_COUNT.incrementAndGet();
         DIAG_ENQUEUE_COUNT.incrementAndGet();
         classifyLighting(bl, sl, true);
-        this.ingestQueue.add(new IngestSection(x, y, z, engine, section, bl, sl));
+        this.ingestQueue.add(new IngestSection(x, y, z, engine, section, bl, sl, true, lightCorrect));
         try {
             this.service.execute();
             return true;
@@ -436,17 +515,28 @@ public class VoxelIngestService {
         }
     }
 
-    public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
+    public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, boolean lightCorrect) {
         if (id == null) return false;
         var engine = id.getOrCreateEngine();
         if (engine == null) return false;
-        return rawIngest(engine, section, x, y, z, bl, sl);
+        return rawIngest(engine, section, x, y, z, bl, sl, lightCorrect);
     }
 
     public static boolean rawIngest(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
+        return rawIngest(engine, section, x, y, z, bl, sl, true);
+    }
+
+    /**
+     * @param lightCorrect the caller's {@code ChunkAccess.isLightCorrect()} for the chunk this section
+     *                     belongs to. Callers that cannot answer it pass {@code true}, which under-counts
+     *                     rather than inventing a number — see {@link #DIAG_INGEST_NOT_LIT_RAW}.
+     */
+    public static boolean rawIngest(WorldEngine engine, LevelChunkSection section, int x, int y, int z,
+                                    DataLayer bl, DataLayer sl, boolean lightCorrect) {
         if (!shouldIngestSection(section, x, y, z)) return false;
         if (engine.instanceIn == null) return false;
         if (!engine.instanceIn.isIngestEnabled(null)) return false;//TODO: dont pass in null
-        return engine.instanceIn.getIngestService().rawIngest0(engine, section, x, y, z, bl, sl);
+        if (!lightCorrect) DIAG_INGEST_NOT_LIT_RAW.incrementAndGet();
+        return engine.instanceIn.getIngestService().rawIngest0(engine, section, x, y, z, bl, sl, lightCorrect);
     }
 }

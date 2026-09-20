@@ -816,6 +816,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_CHUNK.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_HALF.get(),
                     me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get()));
+            Logger.info(String.format(
+                    "[Metal-LITGATE f=%d] notLit raw=%d/%d  chunk=%d/%d   skyEmpty raw=%d  chunk=%d  <- isLightCorrect() was FALSE at ingest",
+                    this.metalFrame,
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_INGEST_NOT_LIT_RAW.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_RAW_INGEST_COUNT.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_INGEST_NOT_LIT_CHUNK.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_SKY_EMPTY_RAW.get(),
+                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_SKY_EMPTY_CHUNK.get()));
             if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get() > 0) {
                 Logger.info(String.format(
                         "[Metal-CMP   f=%d] samples=%d  agree=%.2f%%  MCbrighter=%.2f%%  voxyBrighter=%.2f%%",
@@ -874,12 +883,23 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                         this.metalFrame,
                         me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_AIR.get(),
                         me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_SOLID.get()));
+            }
+            if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get() > 0) {
                 Logger.info(String.format(
                         "[Metal-VOXEL2 f=%d] groundAir=%d  dark=%.2f%%   <- the cells a surface face takes its light from",
                         this.metalFrame,
                         me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get(),
                         100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK.get()
                                 / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get())));
+                Logger.info(String.format(
+                        "[Metal-VOXEL3 f=%d] groundAir raw=%d dark=%.2f%%  |  chunk=%d dark=%.2f%%",
+                        this.metalFrame,
+                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_RAW.get(),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK_RAW.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_RAW.get()),
+                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_CHUNK.get(),
+                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK_CHUNK.get()
+                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_CHUNK.get())));
             }
             Logger.info(String.format(
                     "[Metal-TICK  f=%d] tickWithResults=%d  tickWithUploads=%d  lastResultSectionCount=%d  basicSectionCount=%d",
