@@ -588,7 +588,16 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.metallumColor.refresh();
             this.metallumDepth.refresh();
         }
+        // NOTE: both attachments are only ever ASSIGNED inside `if (metallumTarget)` above, so when
+        // the target is not available on a frame they are still null -- and the diag block below used
+        // to dereference them unconditionally. It fired on the first five frames, which is exactly
+        // when the target can be missing, so the client died with
+        //   NullPointerException: "this.metallumColor" is null
+        // on the very first rendered frame with "Render Frame" as the crash description, before
+        // anything had drawn. The short-circuit in the line below is why it survived review: with the
+        // target false, `metallumColor.id()` is never evaluated there, so the null passed unnoticed.
         this.useMetallumTarget = metallumTarget
+                && this.metallumColor != null && this.metallumDepth != null
                 && this.metallumColor.id() != -1 && this.metallumDepth.id() != -1;
         if (this.diagCount < 5) {
             this.diagCount++;
@@ -597,8 +606,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     + " colorHandle=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.colorAttachment())
                     + " depthHandle=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.depthAttachment())
                     + " encoder=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.renderEncoder())
-                    + " colorId=" + this.metallumColor.id()
-                    + " depthId=" + this.metallumDepth.id()
+                    + " colorId=" + (this.metallumColor == null ? "null" : this.metallumColor.id())
+                    + " depthId=" + (this.metallumDepth == null ? "null" : this.metallumDepth.id())
                     + " useMetallumTarget=" + this.useMetallumTarget);
             me.cortex.voxy.client.core.metal.MetallumBridge.logRenderPassCounters();
         }

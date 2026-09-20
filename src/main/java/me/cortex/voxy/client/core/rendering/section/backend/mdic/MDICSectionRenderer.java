@@ -1298,8 +1298,27 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static final int DRAWCHK = parseEnvInt("VOXY_DRAWCHK", 1);
     private static final int DRAWCHK_STRIDE = Math.max(1, parseEnvInt("VOXY_DRAWCHK_STRIDE", 16));
-    /** How often the allocation table is rebuilt from the metadata buffer, in validate calls. */
-    private static final int DRAWCHK_TABLE_EVERY = Math.max(1, parseEnvInt("VOXY_DRAWCHK_TABLE_EVERY", 1));
+    /**
+     * Whether to build the live-allocation table and run the orphan/straddle checks against it.
+     *
+     * <p><b>Off by default, and it must stay that way for anything interactive.</b> The table is built
+     * by scanning the whole metadata buffer -- {@code maxSectionCount} entries, 1,048,576 of them, at
+     * three calls per frame. That was measured as "a few ms" when it was written and is nothing of the
+     * kind: it is tens of megabytes of reads per frame, and with it on the client is visibly slow. The
+     * per-quad counters below need no table and cost a handful of reads per sampled command, so this
+     * is the only part worth gating.
+     */
+    private static final boolean DRAWCHK_TABLE =
+            !"0".equals(System.getenv("VOXY_DRAWCHK_TABLE"));
+
+    /**
+     * How often the allocation table is rebuilt from the metadata buffer, in validate calls, when it is
+     * enabled. A longer interval lags the streaming state, and then `orphan` counts commands whose
+     * allocation appeared after the table was built -- a counter moving for the wrong reason, which is
+     * the failure mode this whole investigation keeps rediscovering. Sampling honestly is better than
+     * sampling fast.
+     */
+    private static final int DRAWCHK_TABLE_EVERY = Math.max(1, parseEnvInt("VOXY_DRAWCHK_TABLE_EVERY", 30));
 
     /**
      * [0]=checked [1]=orphan [2]=straddle [3]=overlap [4]=sidOob [5]=noGroup [6]=posMismatch
@@ -1392,14 +1411,17 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         int n = (int) Math.min(maxDrawCount, avail);
 
         // Rebuild the allocation table periodically rather than every call: the scan is over
-        // maxSections entries (1M * 20 bytes) and the table only moves as geometry streams in.
-        if (drawchkTableAge >= DRAWCHK_TABLE_EVERY) {
-            drawchkTableAge = 0;
-            rebuildAllocationTable(mp, maxSections, heapElements);
+        // maxSections entries and the table only moves as geometry streams in. Skipped entirely unless
+        // opted into -- see DRAWCHK_TABLE.
+        if (DRAWCHK_TABLE) {
+            if (drawchkTableAge >= DRAWCHK_TABLE_EVERY) {
+                drawchkTableAge = 0;
+                rebuildAllocationTable(mp, maxSections, heapElements);
+            }
+            drawchkTableAge += 3;// opaque + temporal + translucent per frame
         }
-        drawchkTableAge += 3;// opaque + temporal + translucent per frame
-        final long[] table = drawchkTable;
-        final int tableSize = drawchkTableSize;
+        final long[] table = DRAWCHK_TABLE ? drawchkTable : null;
+        final int tableSize = DRAWCHK_TABLE ? drawchkTableSize : 0;
 
         // Is the CPU's render list the frame cmdgen actually ran on? prep.comp derives the same
         // dispatch size from the same uint, so a count that cannot produce this dispatch is stale.
@@ -1430,21 +1452,23 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             final long qs = Integer.toUnsignedLong(baseVertex) >> 2;
             final long qe = qs + indexCount / 6L;
 
-            final int slot = tableSize == 0 ? -1 : findContaining(table, tableSize, qs);
-            if (slot < 0) {
+            final int slot = (table == null || tableSize == 0) ? -1 : findContaining(table, tableSize, qs);
+            if (table != null && slot < 0) {
                 d1++;
                 pfOrphan++;
                 drawchkExample(tag, i, "orphan", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
                         + " end=" + qe + " table=" + tableSize + " heapElems=" + heapElements);
                 continue;
             }
-            final long allocEnd = table[slot * 3 + 1];
-            if (qe > allocEnd) {
-                d2++;
-                pfStraddle++;
-                drawchkExample(tag, i, "straddle", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
-                        + " end=" + qe + " allocEnd=" + allocEnd + " sid=" + table[slot * 3 + 2]);
-                continue;
+            if (table != null) {
+                final long allocEnd = table[slot * 3 + 1];
+                if (qe > allocEnd) {
+                    d2++;
+                    pfStraddle++;
+                    drawchkExample(tag, i, "straddle", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
+                            + " end=" + qe + " allocEnd=" + allocEnd + " sid=" + table[slot * 3 + 2]);
+                    continue;
+                }
             }
 
             // The quad the vertex shader will actually read for this command (baseVertex>>2 is the
