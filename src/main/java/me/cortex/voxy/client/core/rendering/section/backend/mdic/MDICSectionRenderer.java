@@ -1120,6 +1120,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     public void renderOpaqueMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
+        pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad = 0;
         // SceneUniform was already uploaded by buildDrawCalls this frame
         // (runPipelineMetal always pairs them); no re-upload.
         if (this.terrainPipeline == null) {
@@ -1133,6 +1134,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         lodDrawDiag(this.geometryManager.getSectionCount(), rawCount, maxDrawCount);
         if (maxDrawCount != 0) {
             this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
+        }
+        // One line per frame, aligned to the screenshot burst by wall clock: a captured frame's
+        // filename (2026-09-20_01.02.50.png) carries the same timestamp as these log lines
+        // ([01:02:50]), so the catcher's verdicts can be read against the renderer's state.
+        if (DRAWCHK != 0) {
+            Logger.info("[Metal-PF] draws=" + maxDrawCount + " sampled=" + pfSampled
+                    + " lightZero=" + pfLightZero + " modelOob=" + pfModelOob
+                    + " emptyQuad=" + pfEmptyQuad
+                    + " coarseDetail=" + pfCoarse + " orphan=" + pfOrphan + " straddle=" + pfStraddle
+                    + " allocs=" + drawchkTableSize);
         }
         // Encoder-sequencing test, drawn AFTER the LOD so the LOD cannot hide it. Deliberately
         // outside the maxDrawCount guard: the question is whether this encoder accepts a draw at
@@ -1286,7 +1297,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static final int DRAWCHK = parseEnvInt("VOXY_DRAWCHK", 1);
     private static final int DRAWCHK_STRIDE = Math.max(1, parseEnvInt("VOXY_DRAWCHK_STRIDE", 16));
     /** How often the allocation table is rebuilt from the metadata buffer, in validate calls. */
-    private static final int DRAWCHK_TABLE_EVERY = Math.max(1, parseEnvInt("VOXY_DRAWCHK_TABLE_EVERY", 30));
+    private static final int DRAWCHK_TABLE_EVERY = Math.max(1, parseEnvInt("VOXY_DRAWCHK_TABLE_EVERY", 1));
 
     /**
      * [0]=checked [1]=orphan [2]=straddle [3]=overlap [4]=sidOob [5]=noGroup [6]=posMismatch
@@ -1298,6 +1309,19 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             {"checked", "orphan", "straddle", "overlap", "sidOob", "noGroup", "posMismatch", "listStale"};
     private static long drawchkCalls = 0;
     private static int drawchkExamples = 0;
+
+    /**
+     * Per-frame counters, reset at the start of each opaque render and logged at the end of it.
+     *
+     * <p>Screenshot filenames carry the same wall clock as the log's own timestamps
+     * ({@code 2026-09-20_01.02.50.png} against {@code [01:02:50]}), so a per-frame line is enough to
+     * line a captured frame up with the renderer's state at that instant. That is the piece every
+     * previous round was missing: the catcher can say *which* frames have the artefact, but without
+     * this there is nothing to compare them against.
+     */
+    private static long pfDraws, pfLightZero, pfModelOob, pfCoarse, pfOrphan, pfStraddle;
+    private static long pfSampled, pfEmptyQuad;
+    private static int pfExamples = 0;
 
     /** Live geometry allocations, flat {@code [start, endExclusive, sectionId]} sorted by start. */
     private static long[] drawchkTable = null;
@@ -1354,6 +1378,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         long pp = pos.getContentsPtr();
         long lp = list.getContentsPtr();
         long mp = md.getContentsPtr();
+        final long gpp = geo.getContentsPtr();
         if (cp == 0 || pp == 0 || lp == 0 || mp == 0) return;
 
         final long posEntries = pos.size() / 8L;//uvec2 per entry
@@ -1374,9 +1399,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
         // Is the CPU's render list the frame cmdgen actually ran on? prep.comp derives the same
         // dispatch size from the same uint, so a count that cannot produce this dispatch is stale.
+        // NOTE the pointer must stay a long: an earlier version of this line narrowed it with
+        // `(int) dcb.getContentsPtr()`, which truncates a 64-bit address to 32 bits and sends
+        // memGetInt to an unmapped page -- a SIGSEGV in the render thread, not a wrong reading.
         final long listCount = Integer.toUnsignedLong(MemoryUtil.memGetInt(lp));
-        final int cmdGenDispatchX = MemoryUtil.memGetInt(viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer dcb
-                ? (int) dcb.getContentsPtr() : 0);
+        long dispatchPtr = 0;
+        if (viewport.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer dcb) {
+            dispatchPtr = dcb.getContentsPtr();
+        }
+        final int cmdGenDispatchX = dispatchPtr == 0 ? 0 : MemoryUtil.memGetInt(dispatchPtr);
         final boolean listFresh = listCount > 0 && cmdGenDispatchX > 0
                 && listCount <= (long) cmdGenDispatchX * 128L;
 
@@ -1398,6 +1429,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             final int slot = tableSize == 0 ? -1 : findContaining(table, tableSize, qs);
             if (slot < 0) {
                 d1++;
+                pfOrphan++;
                 drawchkExample(tag, i, "orphan", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
                         + " end=" + qe + " table=" + tableSize + " heapElems=" + heapElements);
                 continue;
@@ -1405,9 +1437,44 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             final long allocEnd = table[slot * 3 + 1];
             if (qe > allocEnd) {
                 d2++;
+                pfStraddle++;
                 drawchkExample(tag, i, "straddle", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
                         + " end=" + qe + " allocEnd=" + allocEnd + " sid=" + table[slot * 3 + 2]);
                 continue;
+            }
+
+            // The quad the vertex shader will actually read for this command (baseVertex>>2 is the
+            // first quad's index). Two properties of it decide whether the quad can draw as a flat
+            // black rectangle: a fully dark light byte, and a model id past the 65536-entry model
+            // table, which reads out of bounds and yields a garbage face -- and therefore a garbage
+            // UV, a garbage tint and no texture. Both are cheap to decode here (quad_format.glsl:
+            // face = q0&7, light = (q1>>>23)&0xFF with sky low, modelId = ((q0>>>26)&0x3F)|((q1&0x3FFF)<<6)).
+            if (gpp != 0 && qs * 8L + 8L <= geo.size()) {
+                final long qa = gpp + qs * 8L;
+                final int q0 = MemoryUtil.memGetInt(qa);
+                final int q1 = MemoryUtil.memGetInt(qa + 4);
+                final int light = (q1 >>> 23) & 0xFF;
+                final int modelId = ((q0 >>> 26) & 0x3F) | ((q1 & 0x3FFF) << 6);
+                if (light == 0) pfLightZero++;
+                // A zero quad inside a drawn range can never be legitimate: the mesher writes real
+                // quads, and cmdgen only emits a command for a group whose count is non-zero. So a
+                // zero quad here means the geometry at this range is not what the section uploaded --
+                // either the upload has not landed yet or the range belongs to someone else. This is
+                // the one signature that separates "wrong metadata" from "right metadata, wrong
+                // geometry", and nothing so far has tested the latter.
+                if (q0 == 0 && q1 == 0) pfEmptyQuad++;
+                if (modelId >= 65536) {
+                    pfModelOob++;
+                    if (pfExamples++ < 6) {
+                        drawchkExample(tag, i, "modelOob", "modelId=" + modelId + " light=" + light
+                                + " quad=[" + Integer.toUnsignedString(q0) + ","
+                                + Integer.toUnsignedString(q1) + "] quads=" + (indexCount / 6L));
+                    }
+                }
+                // Detail lives in the top nibble of the positionBuffer entry the vertex shader reads.
+                final long rawPosHi = Integer.toUnsignedLong(MemoryUtil.memGetInt(pp + baseInstance * 8L));
+                if ((rawPosHi >>> 28) >= 3) pfCoarse++;
+                pfSampled++;
             }
 
             if (!listFresh || baseInstance >= posEntries) continue;
