@@ -74,6 +74,62 @@ public class MDICViewport extends Viewport<MDICViewport> {
                 : this.positionScratchBuffer;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Draw-command slots: one frame deep, so the CPU read needs no wait.
+    //
+    // These are the buffers the bug was actually about. MetalRenderEncoder reads `baseInstance` out of
+    // the draw commands on the CPU and pushes it as a per-draw constant, because Apple Silicon does not
+    // propagate it to [[base_instance]] for drawIndexedPrimitives:indirectBuffer:. In GL that read is
+    // safe by construction -- cmdgen's write and the draw's read are commands in one ordered stream --
+    // but on Metal with three command buffers in flight it is a frame stale unless either the CPU waits
+    // for the prepasses (what the shipped fix does, and what costs the stall) or the read is taken from
+    // a slot that is already complete.
+    //
+    // Hence: cmdgen writes slot N; the DRAWS consume slot N-1. Frame N-1's prepasses have certainly
+    // completed, so the CPU read needs no wait at all -- and because the indirect args and the pushed
+    // constant come from the SAME slot, the two agents agree, which is exactly the property whose
+    // violation was bug 3.
+    //
+    // Ringing positionScratchBuffer instead was tried and did nothing: its lifetime was never the
+    // problem, the INDEX was. These two are the ones the CPU reads.
+    // ---------------------------------------------------------------------------------------------
+
+    private final IGpuBuffer[] drawCallRing = new IGpuBuffer[FRAME_SLOTS];
+    private final IGpuBuffer[] drawCountRing = new IGpuBuffer[FRAME_SLOTS];
+    {
+        this.drawCallRing[0] = this.drawCallBuffer;
+        this.drawCountRing[0] = this.drawCountCallBuffer;
+        for (int i = 1; i < FRAME_SLOTS; i++) {
+            this.drawCallRing[i] = RenderBackendFactory.get()
+                    .createBuffer(5*4*(400_000+100_000+100_000)).zero();
+            this.drawCountRing[i] = RenderBackendFactory.get().createBuffer(1024).zero();
+        }
+    }
+
+    /** The slot a frame's cmdgen writes. */
+    public IGpuBuffer drawCallWrite(long frameId) {
+        return RING_FRAME_BUFFERS
+                ? this.drawCallRing[(int) ((frameId & 0x7fffffff) % FRAME_SLOTS)] : this.drawCallBuffer;
+    }
+
+    /** The slot the draws consume: one frame behind the writer, so its contents are complete. */
+    public IGpuBuffer drawCallConsume(long frameId) {
+        return RING_FRAME_BUFFERS
+                ? this.drawCallRing[(int) (((frameId - 1) & 0x7fffffff) % FRAME_SLOTS)] : this.drawCallBuffer;
+    }
+
+    /** The slot a frame's cmdgen writes its counts into. */
+    public IGpuBuffer drawCountWrite(long frameId) {
+        return RING_FRAME_BUFFERS
+                ? this.drawCountRing[(int) ((frameId & 0x7fffffff) % FRAME_SLOTS)] : this.drawCountCallBuffer;
+    }
+
+    /** The counts slot the draws consume, one frame behind the writer. */
+    public IGpuBuffer drawCountConsume(long frameId) {
+        return RING_FRAME_BUFFERS
+                ? this.drawCountRing[(int) (((frameId - 1) & 0x7fffffff) % FRAME_SLOTS)] : this.drawCountCallBuffer;
+    }
+
     /**
      * Zeroed like its siblings above. It was not, and its FIRST UINT IS NOT DATA -- it is the render
      * list's length, which `prep.comp` turns into a dispatch size and every consumer of the list uses
@@ -101,6 +157,8 @@ public class MDICViewport extends Viewport<MDICViewport> {
         this.positionScratchBuffer.free();
         for (int i = 1; i < FRAME_SLOTS; i++) {
             this.positionRing[i].free();
+            this.drawCallRing[i].free();
+            this.drawCountRing[i].free();
         }
     }
 
