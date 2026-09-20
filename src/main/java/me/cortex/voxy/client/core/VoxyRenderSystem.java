@@ -550,6 +550,32 @@ public class VoxyRenderSystem {
     }
 
     /**
+     * VOXY_ATLAS_SYNC=0 disables the per-frame wait before the model-atlas upload. ON by default: it is
+     * a correctness fix, not an experiment.
+     *
+     * <p>The hazard: the bakery writes freshly baked tiles into the block model atlas inside
+     * {@code modelService.tick()}, which runs AFTER this frame's LOD draws have been submitted, with
+     * frames N-1 and N-2 still executing on the GPU. The write lowers to a bare
+     * {@code mtlTextureReplaceRegion} (MetalTexture:163-172) -- a host memcpy that Metal does not order
+     * against command buffers already committed on the queue. A tile caught mid-copy reads alpha 0,
+     * which for a {@code useDiscard()} quad hits the {@code discard} and gives a hole, and otherwise
+     * gives rgb 0: an opaque black fragment with a correct silhouette and a healthy draw count.
+     *
+     * <p>Why it is worth fixing even though it costs a stall: the atlas changes ONLY when a bake lands,
+     * so it is a frame-to-frame difference at a moment when nothing about the camera or the world has
+     * changed -- which is exactly the signature the captures have been showing. And the asymmetry is
+     * telling: the model SSBO and the biome colour uploads in the same method already go through
+     * UploadStream, which is fence-tracked. Only the texture path was left unguarded.
+     *
+     * <p>Cost, stated plainly: this is a second full drain per frame, on top of the one the submit
+     * ordering already takes, so it will make the frame slower. It is correctness-first, and the
+     * stall-free version is double-buffering the atlas -- writing to the tile the draws are not
+     * sampling -- which is invasive because the atlas is bound at a shader binding and indexed by the
+     * model SSBO.
+     */
+    private static final boolean ATLAS_SYNC = !"0".equals(System.getenv("VOXY_ATLAS_SYNC"));
+
+    /**
      * VOXY_FRAME_SLEEP_MS=<n>: idle the render thread for n milliseconds at the top of each frame.
      *
      * <p>A PROBE, not a fix, and it exists to break one specific confound. Every timing measurement
@@ -683,6 +709,18 @@ public class VoxyRenderSystem {
             }
             // 2026-07-03: adaptive budget — burst through the startup bake
             // backlog instead of the flat 0.9 ms (see computeBakeBudgetNs).
+            //
+            // ATLAS_SYNC: see the field. The bakery writes freshly baked tiles into the block model
+            // atlas HERE, and that atlas is sampled by the LOD draws submitted earlier this frame --
+            // with frames N-1 and N-2 still executing. The write is a host memcpy through
+            // mtlTextureReplaceRegion, which Metal does not order against committed command buffers,
+            // so a tile caught mid-copy reads alpha 0: a discard hole for a useDiscard() quad, or an
+            // opaque black fragment with a correct silhouette otherwise. One wait per frame rather
+            // than one per bake, because the bakery drains several tiles per tick and a wait per tile
+            // would stall on each of them.
+            if (ATLAS_SYNC) {
+                me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().waitForGpuIdle();
+            }
             do { this.modelService.tick(this.computeBakeBudgetNs()); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
             // Diagnostic: log every ~10s (600 frames) whether the LOD ring is
             // still adding/removing cells. After the ring converges this
