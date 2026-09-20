@@ -45,6 +45,14 @@ import static org.lwjgl.opengl.GL45.glGetNamedFramebufferAttachmentParameteri;
 import static me.cortex.voxy.client.core.gl.GLCompat.bindTextureUnit;
 
 public abstract class AbstractRenderPipeline extends TrackedObject {
+    /**
+     * {@code VOXY_LOD_FRAME_SYNC=1} blocks on the GPU at the end of every frame. Bisection only: it
+     * serialises the pipeline and gives up the CPU/GPU overlap entirely. See the call site for why
+     * a one-frame splotch whose shape does not resemble its own section is a race signature rather
+     * than a shading one.
+     */
+    private static final boolean FRAME_SYNC = "1".equals(System.getenv("VOXY_LOD_FRAME_SYNC"));
+
     private final BooleanSupplier frexStillHasWork;
 
     private final AsyncNodeManager nodeManager;
@@ -746,6 +754,25 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         final long perfT3 = System.nanoTime();
         this.perfEncode += perfT3 - perfT2;  // encoding the LOD pass (CPU side)
         backend.submit();
+        // VOXY_LOD_FRAME_SYNC=1 -- bisection, not a feature. Block until the GPU has finished this
+        // frame's work before the CPU can touch any buffer again.
+        //
+        // The user's report of the black splotches is the reason: the shapes "do not follow terrain
+        // shapes at all", "look completely different from the voxels in their section", and "only
+        // exist for a frame before flashing away into another shape". A wrong light byte cannot do
+        // that -- it shades a correct quad wrongly. Geometry that does not resemble its own section,
+        // for one frame, and different every time, is the signature of a buffer being READ while it
+        // is being written, or of a draw reading a region that has not been filled yet.
+        //
+        // submit() does not wait: Metallum keeps MAX_SUBMITS_IN_FLIGHT (3) frames in flight and
+        // waits only for the third-oldest, so the CPU is free to rewrite a buffer that a still
+        // executing frame is reading. That is correct for buffers that are per-frame by design and
+        // wrong for any that are not. Serialising the frame removes every one of those races at
+        // once, which is why it is the right first experiment: if the splotches survive it, they are
+        // not a race at all and this line can be deleted.
+        if (FRAME_SYNC) {
+            backend.waitForGpuIdle();
+        }
         this.perfSubmit += System.nanoTime() - perfT3;
         this.perfReport();
         this.metalFrame++;
