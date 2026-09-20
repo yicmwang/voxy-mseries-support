@@ -1724,11 +1724,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 this.statisticsBuffer.zero();
             }
             try (var encoder = this.backend.beginComputePass()) {
-                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
-                    this.builtSectionMask.update(viewport, this.backend);
-                    if (this.builtSectionMask.buffer() != null) {
-                        encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
-                    }
+                // Maintain the set in BOTH arms of the VOXY_LOD_BUILT_MASK A/B. With the cull on,
+                // the buffer is what the shader tests; with it off, the CPU-side set is the only
+                // record of what the cull WOULD have removed, and without it the two arms cannot
+                // be compared on anything except pixels — which is the weakest evidence available
+                // for a cull whose failure mode is "nothing was drawn here".
+                this.builtSectionMask.update(viewport, this.backend);
+                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))
+                        && this.builtSectionMask.buffer() != null) {
+                    encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
                 }
                 encoder.setPipeline(this.commandGenPipeline);
                 encoder.setBuffer(0, this.uniform, 0);

@@ -29,6 +29,9 @@ import java.util.function.Function;
 public class VoxyClient implements ClientModInitializer {
     private static final HashSet<String> FREX = new HashSet<>();
 
+    /** How often {@code VOXY_DEV_TIME} re-issues {@code time set} to hold the clock still. */
+    private static final int REPIN_TICKS = 100;
+
     public static void initVoxyClient() {
         Capabilities.init();//Ensure clinit is called
 
@@ -174,31 +177,63 @@ public class VoxyClient implements ClientModInitializer {
         //
         // Accepts any /time set argument ("noon", "midnight", "day", or a tick count), and also
         // clears the weather, which darkens the sky the same way.
+        //
+        // The clock is held by RE-ISSUING `time set`, not by `gamerule doDaylightCycle false`.
+        // That gamerule call does not work on 26.2 — the server answers "Incorrect argument for
+        // command / gamerule doDaylightCycle false<--[HERE]", i.e. the rule name parses and the
+        // boolean value does not — and `doWeatherCycle` fails identically. Both failures were
+        // silent to everything except the log: `time set noon` and `weather clear` DO succeed, so
+        // the run looked pinned and was not. A day is 24000 ticks over 20 real minutes, so the
+        // clock walks out of the pinned value at 20 ticks/second, and a four-minute capture drifts
+        // 4800 ticks — from noon (6000) to mid-afternoon (10800). Every frame in such a run was
+        // lit from a different sun angle while the log said "pinned", which is the same class of
+        // error as the camera fall this class already documents: an uncontrolled variable that
+        // reads as a property of the build under test.
+        //
+        // Re-issuing the command is immune to the gamerule API change and costs one command per
+        // REPIN_TICKS. It also self-corrects if a later `/time add` or a sleeping player moves it.
         String devTime = System.getenv("VOXY_DEV_TIME");
         if (devTime != null && !devTime.isBlank()) {
             final String timeArg = devTime.trim();
             final int[] ticksUntilApply = {40};   // let the world finish loading first
+            final int[] repinCountdown = {0};
             final boolean[] applied = {false};
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
-                if (applied[0] || client.level == null) return;
-                if (ticksUntilApply[0]-- > 0) return;
+                if (client.level == null) return;
                 var server = client.getSingleplayerServer();
                 if (server == null) return;
-                applied[0] = true;
                 try {
-                    var source = server.createCommandSourceStack();
+                    // withSuppressedOutput: `time set` is re-issued every REPIN_TICKS, and a
+                    // command source that reports prints "[Server: Set minecraft:overworld to
+                    // time marker minecraft:noon]" into chat — two lines, every five seconds,
+                    // across the middle of every screenshot. Same failure as the `tp @s`
+                    // feedback this file already documents: the harness covering the exact
+                    // pixels under test. `sendCommandFeedback false` does not suppress a
+                    // command's own output; only the source's output flag does.
+                    var source = server.createCommandSourceStack().withSuppressedOutput();
                     var commands = server.getCommands();
-                    for (String cmd : new String[] {
-                            "gamerule doDaylightCycle false",
-                            "gamerule doWeatherCycle false",
-                            "weather clear",
-                            "time set " + timeArg}) {
-                        commands.performPrefixedCommand(source, cmd);
+                    if (!applied[0]) {
+                        if (ticksUntilApply[0]-- > 0) return;
+                        applied[0] = true;
+                        for (String cmd : new String[] {
+                                "gamerule doDaylightCycle false",
+                                "gamerule doWeatherCycle false",
+                                "weather clear",
+                                "time set " + timeArg}) {
+                            commands.performPrefixedCommand(source, cmd);
+                        }
+                        repinCountdown[0] = REPIN_TICKS;
+                        Logger.info("VOXY_DEV_TIME active: world clock held at '" + timeArg
+                                + "' by re-issuing time set every " + REPIN_TICKS + " ticks"
+                                + " (the doDaylightCycle gamerule does not apply on 26.2)");
+                        return;
                     }
-                    Logger.info("VOXY_DEV_TIME active: pinned the world clock to '" + timeArg
-                            + "' with the daylight cycle off");
+                    if (repinCountdown[0]-- > 0) return;
+                    repinCountdown[0] = REPIN_TICKS;
+                    commands.performPrefixedCommand(source, "time set " + timeArg);
                 } catch (Throwable t) {
                     Logger.error("VOXY_DEV_TIME failed to apply '" + timeArg + "'", t);
+                    applied[0] = true;
                 }
             });
         }
