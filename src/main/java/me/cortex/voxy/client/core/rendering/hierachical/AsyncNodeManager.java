@@ -277,7 +277,25 @@ public class AsyncNodeManager {
             int count = MemoryUtil.memGetInt(ptr);
             ptr += 8;//Its 8 to keep alignment
             if (job.size < count * 8L + 8) {
-                throw new IllegalStateException();
+                // Counted and skipped, NOT thrown.
+                //
+                // This used to throw, and the throw is not a log line: the try/catch that catches it
+                // is OUTSIDE the `while (this.running)` loop, so the exception exits the loop and the
+                // async node manager thread dies permanently. For the rest of the session nothing
+                // processes node requests, nothing uploads geometry, nothing propagates child changes
+                // -- while the renderer keeps drawing whatever state it was left holding, and other
+                // code keeps reusing the memory those stale references point at.
+                //
+                // The user deferred this as an old nuisance ("that error has existed for a long time,
+                // we'll fix it later"). It is being instrumented now because it is a candidate for the
+                // flashing splotches: a dead node manager is exactly the kind of thing that produces
+                // geometry that no longer matches its section, intermittently, and gets worse the
+                // longer a session runs. The count also settles how often the traversal's readback is
+                // garbage -- a nonzero count is proof that it happens at all, which INVALID=0 on a
+                // clean run cannot tell us.
+                DIAG_REQ_BATCH_OVERFLOW.incrementAndGet();
+                job.free();
+                continue;
             }
             for (int i = 0; i < count; i++) {
                 long pos = ((long) MemoryUtil.memGetInt(ptr)) << 32; ptr += 4;
@@ -701,6 +719,16 @@ public class AsyncNodeManager {
      * the difference between "the node manager asked for garbage" and "the GPU told it garbage",
      * and it is the distinction the splotch investigation needs.
      */
+    /**
+     * Batches whose GPU-written count did not fit the slot the traversal allocated for it.
+     *
+     * <p>A count the traversal did not write is the readback returning garbage, which makes this the
+     * one direct measurement of that happening. It also used to be fatal to the async node manager
+     * thread (the throw escaped the run loop); it is now counted and skipped, so a session survives
+     * one and the rate is visible.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_BATCH_OVERFLOW = new java.util.concurrent.atomic.AtomicLong();
+
     public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_INVALID = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_VALIDATED = new java.util.concurrent.atomic.AtomicLong();
 
