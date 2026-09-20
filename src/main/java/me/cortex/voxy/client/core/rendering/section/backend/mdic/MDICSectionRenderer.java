@@ -2178,7 +2178,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // M13 chunk 1: bindBuffers now also wires up the model atlas texture +
         // cross-backend sampler at binding 0 (blockModelAtlas in quads.frag).
         this.modelStore.bindBuffers(encoder, 3, 4, 0);
-        encoder.setBuffer(5, viewport.positionScratchBuffer, 0);
+        encoder.setBuffer(5, viewport.positionScratch(viewport.frameId), 0);
         // Texture / sampler binding 1 — MC's 16×16 RGBA8 lightmap, mirrored
         // into a Shared-storage Metal texture each frame (M13 chunk 2).
         LightMapHelper.bindMetal(encoder, 1);
@@ -2410,7 +2410,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 encoder.setBuffer(3, this.geometryManager.getMetadataBuffer(), 0);
                 encoder.setBuffer(4, viewport.visibilityBuffer, 0);
                 encoder.setBuffer(5, viewport.indirectLookupBuffer, 0);
-                encoder.setBuffer(6, viewport.positionScratchBuffer, 0);
+                encoder.setBuffer(6, viewport.positionScratch(viewport.frameId), 0);
                 encoder.setBuffer(7, this.distanceCountBuffer, 0);
                 if (RenderStatistics.enabled) {
                     encoder.setBuffer(STATISTICS_BUFFER_BINDING, this.statisticsBuffer, 0);
