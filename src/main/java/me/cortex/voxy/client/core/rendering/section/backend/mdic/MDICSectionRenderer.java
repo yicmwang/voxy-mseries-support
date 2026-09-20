@@ -885,6 +885,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             m.put("VOXY_LOD_CHUNK_CULL", "");
             m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
         }
+        // VOXY_LOD_SHOW_DRAWID=1: paint the per-draw section index the vertex stage received. Injected
+        // into the TERRAIN defines so quads3.vert/quads.frag see it, and into the common map so both LOD
+        // passes get it -- they read the same pushed constant. Metal-specific concern: on GL the index
+        // arrives via gl_BaseInstance.
+        if (!"0".equals(System.getenv("VOXY_LOD_SHOW_DRAWID"))) {
+            m.put("VOXY_LOD_SHOW_DRAWID", "");
+        }
         return m;
     }
 
@@ -1121,7 +1128,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     public void renderOpaqueMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
         pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad
-                = pfModelUnbaked = pfFaceZero = pfWrongSection = pfWrongChecked = 0;
+                = pfModelUnbaked = pfFaceZero = pfWrongSection = pfWrongChecked = pfStaleEntry = 0;
         pfWrongExamples = 0;
         // SceneUniform was already uploaded by buildDrawCalls this frame
         // (runPipelineMetal always pairs them); no re-upload.
@@ -1145,7 +1152,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     + " lightZero=" + pfLightZero + " modelOob=" + pfModelOob
                     + " modelUnbaked=" + pfModelUnbaked + " faceZero=" + pfFaceZero
                     + " emptyQuad=" + pfEmptyQuad
-                    + " WRONGSEC=" + pfWrongSection + "/" + pfWrongChecked
+                    + " WRONGSEC=" + pfWrongSection + "/" + pfWrongChecked + " staleTable=" + pfStaleEntry
                     + " coarseDetail=" + pfCoarse + " orphan=" + pfOrphan + " straddle=" + pfStraddle
                     + " allocs=" + drawchkTableSize);
         }
@@ -1344,7 +1351,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static long pfDraws, pfLightZero, pfModelOob, pfCoarse, pfOrphan, pfStraddle;
     private static long pfSampled, pfEmptyQuad, pfModelUnbaked, pfFaceZero;
-    private static long pfWrongSection, pfWrongChecked;
+    private static long pfWrongSection, pfWrongChecked, pfStaleEntry;
     private static int pfExamples = 0;
     private static int pfWrongExamples = 0;
 
@@ -1495,8 +1502,25 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // buffers written by the same pass, so a stale CPU read of a GPU-written list cannot
                 // manufacture a mismatch the way it did for posMismatch.
                 final long ownerSid = table[slot * 3 + 2];
-                if (ownerSid < maxSections && baseInstance < posEntries
-                        && sectionCount == drawchkTableSectionCount) {
+                // SELF-VALIDATION, which is what makes this check trustworthy rather than merely
+                // suggestive. The table can be stale: a section replaced since it was built leaves
+                // the live COUNT unchanged (a replace frees one id and allocates another), so no
+                // count-based gate catches it, and a stale entry would name the previous owner --
+                // a false positive that would look exactly like the bug.
+                //
+                // But a stale entry is detectable for free: if the section the table names no longer
+                // owns that address, its CURRENT metadata will not claim it either. So compare the
+                // table's recorded start against the section's live quadStart and skip the entry when
+                // they disagree. A removed section's record is zeroed, so that case is covered too.
+                // The cost is one read per checked command, against three million-entry scans a frame
+                // for the alternative (rebuilding every call).
+                final long ownerStart = ownerSid < maxSections
+                        ? Integer.toUnsignedLong(MemoryUtil.memGetInt(mp + ownerSid * 32L + 12L)) : -1;
+                if (ownerStart != table[slot * 3]) {
+                    pfStaleEntry++;
+                    continue;
+                }
+                if (ownerSid < maxSections && baseInstance < posEntries) {
                     final long om = mp + ownerSid * 32L;
                     final int ownerHi = MemoryUtil.memGetInt(om);
                     final int ownerLo = MemoryUtil.memGetInt(om + 4);

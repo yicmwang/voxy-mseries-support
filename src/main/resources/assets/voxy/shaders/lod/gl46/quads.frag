@@ -202,7 +202,22 @@ vec4 computeColour(vec2 texturePos, vec4 colour) {
 #endif
 
 
+#ifdef VOXY_LOD_SHOW_DRAWID
+layout(location = 5) in flat uint voxyDrawIdOut;
+#endif
+
 void main() {
+#ifdef VOXY_LOD_SHOW_DRAWID
+    // Paint the section index this vertex stage RECEIVED, 24 bits across RGB. Nothing else runs --
+    // no atlas, no light, no discard -- so the image is a direct readout of the per-draw constant.
+    // A correctly-delivered index is piecewise-constant over each drawn section and matches the draw
+    // order; a coalesced or stuck constant shows the same value over runs of draws, or values that do
+    // not change where the geometry does.
+    outColour = vec4(float((voxyDrawIdOut >> 16) & 0xFFu) / 255.0,
+                     float((voxyDrawIdOut >> 8) & 0xFFu) / 255.0,
+                     float(voxyDrawIdOut & 0xFFu) / 255.0, 1.0);
+    return;
+#endif
 #ifdef VOXY_LOD_CHUNK_CULL
     // Where the chunk-bound depth mask belongs: before any shading, on every path, so a culled
     // column costs one buffer read and nothing else. Placed above the magenta/debug early-outs so

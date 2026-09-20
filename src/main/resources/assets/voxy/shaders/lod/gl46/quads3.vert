@@ -84,6 +84,18 @@ layout(location = 2) out float voxyFogDist;
 // location 3: the horizontal-only offset the near-cull needs.
 layout(location = 3) out vec2 voxyCamRelXZ;
 #endif
+#ifdef VOXY_LOD_SHOW_DRAWID
+// location 5: the per-draw section index the vertex stage ACTUALLY RECEIVED.
+//
+// On Metal this value does not come from the draw call -- gl_BaseInstance and gl_InstanceID both read 0
+// for drawIndexedPrimitives:indirectBuffer: -- so MetalRenderEncoder pushes it per draw with
+// setVertexBytes at binding 6. A per-draw CONSTANT is the one place a wrong section index can reach the
+// shader, and unlike a buffer read it leaves no trace any CPU-side counter can see. This readout makes
+// it visible: the fragment stage paints the received index, so a screenshot shows what the shader got
+// rather than what the CPU believes it sent.
+layout(location = 5) out flat uint voxyDrawIdOut;
+#endif
+
 #ifdef VOXY_LOD_CHUNK_CULL
 // location 4: the full 3D offset, because the cull asks about a 16x16x16 SECTION and Sodium
 // enforces a vertical render distance -- a horizontal column is not enough to answer it. Kept as a
@@ -125,6 +137,9 @@ void main() {
     uint baseInstanceFix = uint(gl_BaseInstance);
 #endif
     setupQuad(quad, quadData[uint(gl_VertexID)>>2], positionBuffer[baseInstanceFix], (gl_VertexID&3) == 1);
+#ifdef VOXY_LOD_SHOW_DRAWID
+    voxyDrawIdOut = baseInstanceFix;
+#endif
 
     uint cornerId = gl_VertexID&3;
     gl_Position = getQuadCornerPos(quad, cornerId);
