@@ -206,7 +206,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static final boolean CHUNK_CULL = !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"))
             // The fragment cull reads the same buffer the node cull does; with the mask switched off
             // there is nothing bound at that slot and the shader would read an unbound buffer.
-            && !"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
+            // Keyed on the SAME condition the mask is enabled by, so the two cannot disagree.
+            && "1".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
 
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
@@ -215,7 +216,20 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // both directions -- it culls over chunks Sodium has not built (holes at the seam) and
         // keeps LOD over chunks it did build (z-fighting). BuiltSectionMask carries the real set.
         // VOXY_LOD_BUILT_MASK=0 omits the define for an A/B.
-        if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+        // DEFAULT OFF, 2026-09-19. The mask is 2D -- one bit per chunk COLUMN, Y dropped -- and
+        // Sodium enforces a vertical render distance, so "this column is built" is false at
+        // altitude: vanilla renders the sections it has, not every Y in the column. The cull
+        // therefore removes LOD sections that vanilla never draws, and because the square is
+        // indexed relative to the camera the holes FOLLOW THE PLAYER. Measured by the user: with
+        // the cull fully off the missing chunks do not appear; with it on they do, and their
+        // positions track the camera.
+        //
+        // Off rather than deleted because the mechanism is sound and the set is already 3D
+        // internally (BUILT holds full SectionPos); what is wrong is the projection to columns and
+        // the per-column query. The fix is to keep a Y bitmask per column and test each fragment's
+        // own 16x16x16 section, so the LOD draws every section vanilla does not, vertically
+        // included. Until that lands, VOXY_LOD_BUILT_MASK=1 opts back into the known-broken cull.
+        if ("1".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
             m.put("VOXY_LOD_BUILT_MASK", "");
             m.put("BUILT_MASK_BINDING", Integer.toString(BUILT_MASK_BINDING));
             // The fragment-stage half, at chunk-column granularity. Its own switch so the two
