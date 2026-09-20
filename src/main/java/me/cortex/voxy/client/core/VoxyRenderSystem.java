@@ -549,9 +549,70 @@ public class VoxyRenderSystem {
         return viewport;
     }
 
+    /**
+     * VOXY_FRAME_SLEEP_MS=<n>: idle the render thread for n milliseconds at the top of each frame.
+     *
+     * <p>A PROBE, not a fix, and it exists to break one specific confound. Every timing measurement
+     * this investigation has is ambiguous, because the instrument that produced the strongest effect
+     * does two things at once: {@code VOXY_DRAWCHK} slows the render thread AND reads GPU-written
+     * buffers from the CPU, and it moved the artefact rate from 5.6% to 75.9%. So "the rate depends on
+     * frame pacing" and "the rate depends on the CPU touching those buffers" are indistinguishable in
+     * that data. A sleep adds idle time and touches no buffer, so it separates them.
+     *
+     * <p>The discriminator is this against {@code VOXY_GPU_SYNC}, which bounds only the GPU boundary
+     * and recovered 75.9% -> 57.4%:
+     *
+     * <ul>
+     *   <li>sleep helps a lot, GPU sync little -> the race is against the CPU-side producer (async
+     *       staging and metadata), not the GPU;</li>
+     *   <li>sleep helps about as much as GPU sync -> the hazard is the GPU boundary itself.</li>
+     * </ul>
+     *
+     * <p>Sweeping several levels (say 16 ms for 60 fps, 33 for 30, 100 for 10) adds a monotonicity
+     * check: a smooth curve is strong evidence for a timing effect, whereas a step or a cliff would
+     * point somewhere else.
+     *
+     * <p>Two confounds to be honest about. A sleep is not a pure timing knob -- fewer frames per second
+     * means more streaming work queued per frame, so per-frame load rises even as pacing improves, and
+     * those two push the rate in OPPOSITE directions. That means a null result would NOT refute the
+     * timing story; only a clear reduction is informative, and the absence of one is not evidence. And
+     * a dedicated sleep is used rather than MC's maxFps/vsync limiter because the latter also affects
+     * vanilla and interacts with the fifo present mode visible in the captures.
+     *
+     * <p>It cannot say WHICH buffer or thread, and it must never be mistaken for a fix: suppressing the
+     * rate is exactly the trap this investigation fell into three times, where an instrument made the
+     * number look better while the bug was untouched.
+     */
+    private static final long FRAME_SLEEP_MS = parseFrameSleepMs();
+
+    private static long parseFrameSleepMs() {
+        String v = System.getenv("VOXY_FRAME_SLEEP_MS");
+        if (v == null || v.isBlank()) return 0L;
+        try {
+            long ms = Long.parseLong(v.trim());
+            if (ms > 0) {
+                me.cortex.voxy.common.Logger.info("[Metal-SLEEP] VOXY_FRAME_SLEEP_MS=" + ms
+                        + " -- idling the render thread each frame (probe, not a fix)");
+            }
+            return Math.max(0L, ms);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
     public void renderOpaque(Viewport<?> viewport) {
         if (viewport == null) {
             return;
+        }
+        // See FRAME_SLEEP_MS. Ahead of the frame's work rather than after it: the gap between frames is
+        // what the async producer gets, and placing it here keeps it off the path of anything that
+        // measures or submits.
+        if (FRAME_SLEEP_MS > 0) {
+            try {
+                Thread.sleep(FRAME_SLEEP_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
