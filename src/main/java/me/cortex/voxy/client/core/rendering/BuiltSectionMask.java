@@ -52,7 +52,16 @@ public final class BuiltSectionMask {
         BUILT.clear();
     }
 
-    private static final int HEADER_UINTS = 4;
+    /**
+     * side, camSecX, camSecZ, camBlockX, camBlockZ, pad.
+     *
+     * <p>The block-coordinate camera position is here for the fragment-stage cull: a fragment knows
+     * its camera-relative offset in blocks (quads3.vert already interpolates it for the near-cull),
+     * so camera block X plus that offset gives the fragment's own chunk column. Without it the shader
+     * would have only the camera's chunk column and could not tell where inside that column the
+     * camera sits, which is the difference between the right chunk and its neighbour.
+     */
+    private static final int HEADER_UINTS = 6;
 
     private IGpuBuffer buffer;
     private int side = -1;
@@ -189,6 +198,35 @@ public final class BuiltSectionMask {
     }
 
     /**
+     * Whether the chunk column containing a given world block is one vanilla has drawn — the test
+     * the fragment stage applies per fragment, and the granularity the cull is required to have.
+     *
+     * <p>This is the whole point of moving the cull out of {@code cmdgen}: a node is 2x2 chunk
+     * columns at detail 0 and larger above it, so a node-level decision is coarser than the thing
+     * being decided. A fragment knows its own block position, so it can ask the question at exactly
+     * chunk granularity, at every detail level, and neither remove a column vanilla did not draw
+     * (a hole) nor keep one it did (a doubled surface).
+     *
+     * <p>{@code worldBlock} is floored world coordinates; the shift is arithmetic so that negative
+     * coordinates floor rather than truncate, which matters because the world extends either side
+     * of the origin. Mirrored by {@code quads.frag}; change both together.
+     */
+    public static boolean columnCovered(final int[] bits, final int side,
+                                        final int camBlockX, final int camBlockZ,
+                                        final int worldBlockX, final int worldBlockZ) {
+        // The mask's origin column is the camera's column, and it is centred, so the camera column
+        // sits at index side>>1. Chunk coords are recovered from the block coords rather than taken
+        // from the header's camSecX so that both ends of the comparison floor identically.
+        final int cx = ((worldBlockX >> 4) - (camBlockX >> 4)) + (side >> 1);
+        final int cz = ((worldBlockZ >> 4) - (camBlockZ >> 4)) + (side >> 1);
+        if (cx < 0 || cz < 0 || cx >= side || cz >= side) {
+            return false;
+        }
+        final int bit = cz * side + cx;
+        return (bits[bit >> 5] & (1 << (bit & 31))) != 0;
+    }
+
+    /**
      * The centre-column rule the cull used to apply, kept only so the two can be counted against
      * each other. A node is "wrongly removed" when this says yes and {@link #nodeFullyCovered}
      * says no, and that count is the size of the hole ring.
@@ -249,9 +287,14 @@ public final class BuiltSectionMask {
         MemoryUtil.memPutInt(ptr, newSide);
         MemoryUtil.memPutInt(ptr + 4, newCamX);
         MemoryUtil.memPutInt(ptr + 8, newCamZ);
-        MemoryUtil.memPutInt(ptr + 12, 0);
+        // Block coords, floored — the fragment stage adds its own camera-relative offset to these
+        // to find its chunk column. Must use the same floored camera the chunk coords came from,
+        // or a camera sitting exactly on a chunk border would disagree with itself.
+        MemoryUtil.memPutInt(ptr + 12, net.minecraft.util.Mth.floor(viewport.cameraX));
+        MemoryUtil.memPutInt(ptr + 16, net.minecraft.util.Mth.floor(viewport.cameraZ));
+        MemoryUtil.memPutInt(ptr + 20, 0);
         for (int i = 0; i < bits.length; i++) {
-            MemoryUtil.memPutInt(ptr + 16L + i * 4L, bits[i]);
+            MemoryUtil.memPutInt(ptr + 24L + i * 4L, bits[i]);
         }
     }
 

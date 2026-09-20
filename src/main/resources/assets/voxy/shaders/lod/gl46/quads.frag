@@ -35,6 +35,29 @@ layout(binding = 9, std430) readonly restrict buffer BoundDepthBuffer {
 };
 #endif
 
+#ifdef VOXY_LOD_CHUNK_CULL
+// Per-chunk-column cull of the LOD against the set of sections vanilla has drawn.
+//
+// This is the SAME set cmdgen.comp tests, applied one chunk column at a time instead of one LOD
+// node at a time, and the difference is the whole fix. A node at detail d spans 2<<d chunk columns
+// (2x2 at detail 0), so deciding for a node decides for several columns at once -- it removes
+// columns vanilla never drew, which is a hole, or keeps columns it did, which is a doubled
+// surface. A fragment knows its own position, so it can decide for exactly one column and be right
+// at every detail level.
+//
+// Bindings: 0-5 are the terrain draw's buffer table, 6 is quads3.vert's per-draw UBO, 9 is the
+// Metal chunk-bound depth buffer, so 10 is free for this.
+layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer BuiltMaskChunkBuffer {
+    uint chunkMaskSide;
+    int chunkMaskCamSecX;
+    int chunkMaskCamSecZ;
+    int chunkMaskCamBlockX;
+    int chunkMaskCamBlockZ;
+    uint _chunkMaskPad;
+    uint chunkMaskBits[];
+};
+#endif
+
 //#define DEBUG_RENDER
 
 //TODO: need to fix when merged quads have discardAlpha set to false but they span multiple tiles
@@ -57,8 +80,15 @@ layout(location = 2) in float voxyFogDist;
 #endif
 // Camera-relative horizontal offset for the near-cull's Chebyshev distance
 // (see quads3.vert — the slant-distance cull leaked LOD water inside the MC
-// square from high/diagonal viewpoints). Must mirror quads3.vert's guard.
-#if defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)
+// square from high/diagonal viewpoints). Must mirror quads3.vert's guard
+// EXACTLY: it is also what the per-chunk-column cull uses to find its own chunk
+// column, and a guard that disagrees with the vertex stage's is a compile error
+// in one stage and a silent location mismatch in the other. Both now use the
+// shared VOXY_NEEDS_CAM_REL_XZ macro.
+#if (defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)) || defined(VOXY_LOD_CHUNK_CULL)
+#define VOXY_NEEDS_CAM_REL_XZ
+#endif
+#ifdef VOXY_NEEDS_CAM_REL_XZ
 layout(location = 3) in vec2 voxyCamRelXZ;
 #endif
 
@@ -154,6 +184,29 @@ vec4 computeColour(vec2 texturePos, vec4 colour) {
 
 
 void main() {
+#ifdef VOXY_LOD_CHUNK_CULL
+    // Where the chunk-bound depth mask belongs: before any shading, on every path, so a culled
+    // column costs one buffer read and nothing else. Placed above the magenta/debug early-outs so
+    // a forced-colour bisection still shows exactly what survives the cull.
+    {
+        // Integer floor, not a truncating cast: the world extends either side of the origin and
+        // `>>` on a negative int floors, which is what the mask's own indexing assumes.
+        int colX = (chunkMaskCamBlockX + int(floor(voxyCamRelXZ.x))) >> 4;
+        int colZ = (chunkMaskCamBlockZ + int(floor(voxyCamRelXZ.y))) >> 4;
+        int cx = (colX - (chunkMaskCamBlockX >> 4)) + int(chunkMaskSide >> 1);
+        int cz = (colZ - (chunkMaskCamBlockZ >> 4)) + int(chunkMaskSide >> 1);
+        int sd = int(chunkMaskSide);
+        if (cx >= 0 && cz >= 0 && cx < sd && cz < sd) {
+            uint bit = uint(cz * sd + cx);
+            if ((chunkMaskBits[bit >> 5] & (1u << (bit & 31u))) != 0u) {
+                // Vanilla draws this exact chunk column. Removing only this fragment's column is
+                // what keeps a neighbouring column's LOD intact -- which a node-level cull cannot
+                // do, and which is why the holes ringed the rim of vanilla's coverage.
+                discard;
+            }
+        }
+    }
+#endif
 #ifdef VOXY_LOD_FORCE_MAGENTA
     // VOXY_LOD_FORCE_MAGENTA=1 -- bisection, not a feature. Emits solid magenta as the FIRST
     // statement of main(), before the depth-bound test, the alpha discard, the tile clamp and

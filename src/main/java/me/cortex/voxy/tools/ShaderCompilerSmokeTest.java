@@ -158,6 +158,30 @@ public final class ShaderCompilerSmokeTest {
                 new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
                         Map.of("VOXY_FORCE_OPAQUE_ALPHA", "", "USE_ENV_FOG", ""),
                         "lod/gl46/quads.frag (Metal — depth-bound enabled default)"),
+                // 2026-09-19: per-chunk-column built-section cull. This stage reads a
+                // camera-relative offset varying it only used to get for the translucent near-cull,
+                // so the case exists to prove the two stages agree on the varying's presence --
+                // a guard that disagrees between quads3.vert and quads.frag is a compile error in
+                // one and a silent location mismatch in the other. Both stages are covered here
+                // with the same define, exactly as MDICSectionRenderer injects it.
+                new ShaderCase("lod/gl46/quads3.vert", RuntimeShaderCompiler.Stage.VERTEX,
+                        Map.of(
+                                "NO_SHADE_FACE_TINT", "1.0",
+                                "UP_FACE_TINT", "1.0",
+                                "DOWN_FACE_TINT", "0.5",
+                                "Z_AXIS_FACE_TINT", "0.8",
+                                "X_AXIS_FACE_TINT", "0.6",
+                                "USE_ENV_FOG", "",
+                                "VOXY_LOD_CHUNK_CULL", ""),
+                        "lod/gl46/quads3.vert (Metal — per-chunk-column cull)"),
+                new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
+                        Map.of("VOXY_NO_ATLAS", "", "USE_ENV_FOG", "",
+                               "VOXY_LOD_CHUNK_CULL", "", "VOXY_LOD_CHUNK_CULL_BINDING", "10"),
+                        "lod/gl46/quads.frag (Metal — per-chunk-column cull, opaque)"),
+                new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
+                        Map.of("VOXY_NO_ATLAS", "", "USE_ENV_FOG", "", "TRANSLUCENT", "",
+                               "VOXY_LOD_CHUNK_CULL", "", "VOXY_LOD_CHUNK_CULL_BINDING", "10"),
+                        "lod/gl46/quads.frag (Metal — per-chunk-column cull, translucent water)"),
                 new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
                         Map.of("VOXY_FORCE_OPAQUE_ALPHA", "", "TRANSLUCENT", "", "USE_ENV_FOG", ""),
                         "lod/gl46/quads.frag (Metal — depth-bound enabled translucent)"),

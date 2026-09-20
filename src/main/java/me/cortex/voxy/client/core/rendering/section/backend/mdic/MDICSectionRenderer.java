@@ -59,6 +59,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     /** cmdgen binding for the built-section mask. 0-7 are the draw/metadata table, 8 is statistics. */
     private static final int BUILT_MASK_BINDING = 9;
     /**
+     * Fragment-stage binding for the same mask, for the per-chunk-column cull in {@code quads.frag}.
+     *
+     * <p>9 is taken on the graphics path by the Metal chunk-bound depth buffer, so the mask rides at
+     * 10. The two stages need it at different granularity: cmdgen decides for a whole LOD node,
+     * which is 2x2 chunk columns at detail 0 and larger above, and the fragment decides for the one
+     * column it is actually in.
+     */
+    private static final int BUILT_MASK_CHUNK_BINDING = 10;
+    /**
      * Terrain shaders. Two paths:
      *   - Iris-patched (legacy {@link Shader.Builder}, GL-only by definition since
      *     the Iris pipeline is GL-gated in RenderPipelineFactory).
@@ -186,6 +195,19 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         return "1".equals(System.getenv("VOXY_CMDGEN_NOCLAMP"));
     }
 
+    /**
+     * {@code VOXY_LOD_CHUNK_CULL=0} disables the fragment-stage per-chunk-column cull.
+     *
+     * <p>On by default because the node-level cull alone is decided at the wrong granularity: a LOD
+     * node spans 2x2 chunk columns at detail 0 and more above, so removing or keeping the node
+     * decides for columns that were not asked about. That is a hole where vanilla never drew, and a
+     * doubled surface where it did.
+     */
+    private static final boolean CHUNK_CULL = !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"))
+            // The fragment cull reads the same buffer the node cull does; with the mask switched off
+            // there is nothing bound at that slot and the shader would read an unbound buffer.
+            && !"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
+
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
         // Cull LOD exactly where vanilla has geometry, using Sodium's built-section set rather
@@ -196,6 +218,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
             m.put("VOXY_LOD_BUILT_MASK", "");
             m.put("BUILT_MASK_BINDING", Integer.toString(BUILT_MASK_BINDING));
+            // The fragment-stage half, at chunk-column granularity. Its own switch so the two
+            // granularities can be A/B'd against each other and against neither: the node-level cull
+            // is now only the fast path (it fires when EVERY column of a node is covered, which is
+            // equivalent to the per-chunk answer for that node), and the fragment cull is what makes
+            // a partially covered node correct instead of a hole or a doubled surface.
+            if (CHUNK_CULL) {
+                m.put("VOXY_LOD_CHUNK_CULL", "");
+                m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
+            }
         }
         m.put("TRANSLUCENT_WRITE_BASE", "1024");
         m.put("TEMPORAL_OFFSET", Integer.toString(TEMPORAL_OFFSET));
@@ -854,6 +885,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             m.put("X_AXIS_FACE_TINT",   Float.toString(level.cardinalLighting().byFace(Direction.EAST)) + "f");
         }
         if (taa != null) m.put("TAA_PATCH", "");
+        // Per-chunk-column cull of the LOD against vanilla's built sections. Lives in the COMMON
+        // defines so both LOD passes get it: the cull has to apply to the translucent surface too,
+        // or LOD water survives over vanilla water and nowhere else, which is a far more visible
+        // artifact than a terrain seam.
+        if (CHUNK_CULL) {
+            m.put("VOXY_LOD_CHUNK_CULL", "");
+            m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
+        }
         return m;
     }
 
@@ -1560,6 +1599,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // format textures read zeros through texture2d<float> declarations).
         if (viewport.metalBoundReadBuffer != null) {
             encoder.setBuffer(9, viewport.metalBoundReadBuffer, 0);
+        }
+        // Buffer binding 10 — the built-section mask again, for the per-chunk-column cull. The same
+        // upload cmdgen read this frame; the compute pass that maintains it runs before the draws.
+        // Bound for all three draws (this method is shared), because the cull has to apply to the
+        // translucent surface too or water is culled over vanilla water and nowhere else.
+        if (CHUNK_CULL && this.builtSectionMask.buffer() != null) {
+            encoder.setBuffer(BUILT_MASK_CHUNK_BINDING, this.builtSectionMask.buffer(), 0);
         }
 
         encoder.bindIndexBuffer(me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer.INSTANCE.getBuffer(),

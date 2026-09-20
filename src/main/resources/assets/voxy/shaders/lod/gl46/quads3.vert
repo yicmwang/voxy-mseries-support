@@ -71,7 +71,16 @@ layout(location = 2) out float voxyFogDist;
 // exactly across merged quads; a per-vertex max(|dx|,|dz|) would overestimate
 // mid-quad wherever a long quad crosses the camera axis) and let the
 // fragment shader take the Chebyshev distance that mirrors MC's square.
-#if defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)
+//
+// 2026-09-19: the same camera-relative offset is what lets the fragment shader find its own CHUNK
+// COLUMN, which is the granularity the built-section cull needs. A LOD node is 2x2 chunks at detail
+// 0 and larger above that, so a node-level decision is coarser than the thing being decided: it can
+// remove a column vanilla never drew (a hole) or keep one it did (a doubled surface). A fragment
+// knows its position, so quads.frag can ask the question per chunk column instead.
+#if (defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)) || defined(VOXY_LOD_CHUNK_CULL)
+#define VOXY_NEEDS_CAM_REL_XZ
+#endif
+#ifdef VOXY_NEEDS_CAM_REL_XZ
 layout(location = 3) out vec2 voxyCamRelXZ;
 #endif
 
@@ -151,16 +160,19 @@ void main() {
     //Note: other data is automatically discarded as it is undefiend and has not been generated
     interData = quad.attributeData;
 
-    #ifdef VOXY_NEEDS_FOG_DIST
+    #if defined(VOXY_NEEDS_FOG_DIST) || defined(VOXY_NEEDS_CAM_REL_XZ)
     // Reconstruct the corner's world-relative point in the same way
     // getQuadCornerPos does (kept inline rather than refactoring quad_util
     // to avoid touching the GL path's hot vertex code). cameraSubPos comes
     // from the SceneUniform SSBO declared above; both points share the
-    // baseSectionPos-anchored frame.
+    // baseSectionPos-anchored frame, so their difference is anchor-free and
+    // is the real world-space offset.
     vec2 cornerMask = vec2((cornerId>>1)&1u, cornerId&1u)*quad.lodScale;
     vec3 cornerPoint = quad.basePoint + swizzelDataAxis(quad.axis, vec3(quad.quadSizeAddin*cornerMask, 0));
+    #ifdef VOXY_NEEDS_FOG_DIST
     voxyFogDist = length(cornerPoint - cameraSubPos);
-    #if defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)
+    #endif
+    #ifdef VOXY_NEEDS_CAM_REL_XZ
     voxyCamRelXZ = cornerPoint.xz - cameraSubPos.xz;
     #endif
     #endif

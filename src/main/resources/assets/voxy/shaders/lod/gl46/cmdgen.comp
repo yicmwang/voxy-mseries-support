@@ -11,6 +11,13 @@ layout(binding = BUILT_MASK_BINDING, std430) readonly restrict buffer BuiltMaskB
     uint builtMaskSide;
     int builtMaskCamX;
     int builtMaskCamZ;
+    // Camera position in BLOCKS, floored. Unused here -- this pass decides per node from the chunk
+    // columns directly -- but present because quads.frag reads the same buffer at the same layout
+    // and needs it to turn a fragment's camera-relative offset into an absolute chunk column. Two
+    // different struct declarations over one buffer is how a silent field-shift bug happens, so
+    // both shaders declare all six header words.
+    int builtMaskCamBlockX;
+    int builtMaskCamBlockZ;
     uint _builtMaskPad;
     uint builtMaskBits[];
 };
