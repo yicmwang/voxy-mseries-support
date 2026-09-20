@@ -729,6 +729,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             if (!bridgeSolidTest && !submersionSkip
                     && this.sectionRenderer instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICSectionRenderer mdic
                     && viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mv) {
+                // Age the geometry-free queue once per frame, on the render thread, so addresses whose
+                // section was removed return to the arena only after no in-flight command buffer can
+                // still be drawing from them. Before the draws rather than after, so the queue advances
+                // even on frames that draw nothing. See IGeometryManager.releaseRetiredFrees.
+                this.nodeManager.releaseRetiredFrees(mv.frameId);
                 mdic.renderOpaqueMetal(enc, mv);
                 mdic.renderTemporalMetal(enc, mv);
                 // Phase D (issue #11): in vx-contract mode translucent LOD

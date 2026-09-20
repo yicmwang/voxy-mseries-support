@@ -809,6 +809,19 @@ public class AsyncNodeManager {
         return this.usedGeometryAmount;
     }
 
+    /**
+     * Render-thread, once per frame: hand geometry addresses freed by {@code removeSection} back to the
+     * arena, once no in-flight command buffer can still be drawing from them.
+     *
+     * <p>Delegates to {@link BasicAsyncGeometryManager} rather than being implemented here, because that
+     * is the class that owns the allocation arena and therefore the only one that can say when an
+     * address is safe to reuse. The render thread is where it has to be driven from, since only it
+     * knows the frame counter the delay is measured in.
+     */
+    public void releaseRetiredFrees(long frameId) {
+        this.geometryManager.releaseRetiredFrees(frameId);
+    }
+
     public long getGeometryCapacity() {
         return this.geometryCapacity;
     }

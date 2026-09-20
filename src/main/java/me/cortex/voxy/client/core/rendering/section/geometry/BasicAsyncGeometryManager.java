@@ -94,8 +94,12 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
         }
         var oldMetadata = this.sectionMetadata.set(id, null);
         int ptr = oldMetadata.geometryPtr;
-        //Free from the heap
-        this.usedCapacity -= this.allocationHeap.free(Integer.toUnsignedLong(ptr));
+        //Free from the heap -- but NOT immediately. See releaseRetiredFrees.
+        if (GEOM_FREE_DELAY_FRAMES <= 0) {
+            this.usedCapacity -= this.allocationHeap.free(Integer.toUnsignedLong(ptr));
+        } else {
+            this.pendingFrees.addLast(new long[]{Integer.toUnsignedLong(ptr), this.lastFrame});
+        }
         //Free the upload if it was uploading
         var buf = this.heapUploads.remove(ptr);
         if (buf != null) {
@@ -103,6 +107,57 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
         }
         this.heapRemoveUploads.add(ptr);
         this.invalidatedIds.add(id);
+    }
+
+    /**
+     * Geometry addresses freed by {@link #removeSection}, held until no in-flight command buffer can
+     * still be reading them. Each entry is {@code {address, frameIdAtFreeTime}}.
+     *
+     * <p>Upstream frees into the arena immediately, and that is safe in GL: a draw, the geometry copy
+     * and the metadata write are all commands in ONE ordered stream, so a reuse necessarily appears
+     * after the draws that referenced the old occupant. This port runs whole-frame Metal with
+     * {@code MAX_SUBMITS_IN_FLIGHT} command buffers in flight, so a buffer that has not executed yet can
+     * still be reading an address that has since been handed to a different section -- and the GPU then
+     * draws the NEW occupant's quads under the OLD section's command and position: real quads, with
+     * their own baked light, at coordinates that do not belong there.
+     *
+     * <p>That is the shape of bug 3, and it also explains why the artefact's rate tracks the render
+     * thread's CPU load rather than anything geometric: the faster the render thread runs, the further
+     * ahead it gets of the GPU, and the more often a free-and-reuse lands inside that window.
+     *
+     * <p>{@code VOXY_GEOM_FREE_DELAY_FRAMES} is the number of frames an address is held before it
+     * returns to the arena. 0 restores upstream's immediate free, so an unset run is the control. The
+     * value only has to exceed the number of command buffers that can be in flight, plus the CPU's own
+     * lead; the renderer's frame counter ages the entries, so this costs a bounded amount of memory
+     * rather than leaking. A fence would express the same thing exactly, and is the right end state --
+     * this is deliberately the cheap version, to find out whether the mechanism is real before paying
+     * for the rigorous one.
+     */
+    private final java.util.ArrayDeque<long[]> pendingFrees = new java.util.ArrayDeque<>();
+
+    private static final int GEOM_FREE_DELAY_FRAMES = parseGeomFreeDelayFrames();
+
+    private static int parseGeomFreeDelayFrames() {
+        String v = System.getenv("VOXY_GEOM_FREE_DELAY_FRAMES");
+        if (v == null || v.isBlank()) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(v.trim()));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** Advanced by the render thread in {@link #releaseRetiredFrees}; read by the async thread to stamp. */
+    private volatile long lastFrame = -1;
+
+    @Override
+    public void releaseRetiredFrees(long frameId) {
+        this.lastFrame = frameId;
+        if (GEOM_FREE_DELAY_FRAMES <= 0) return;
+        while (!this.pendingFrees.isEmpty()
+                && frameId - this.pendingFrees.peekFirst()[1] >= GEOM_FREE_DELAY_FRAMES) {
+            this.usedCapacity -= this.allocationHeap.free(this.pendingFrees.pollFirst()[0]);
+        }
     }
 
     private SectionMeta createMeta(BuiltSection section) {
