@@ -164,10 +164,27 @@ public class MetalRenderBackend implements RenderBackend {
         long targetValue = this.fenceCounter.getAndIncrement();
 
         if (this.activeCommandBuffer == 0) {
-            // Queue idle — every commit path on this queue waits for
-            // completion, so all previously requested work is done. CPU-signal
-            // directly instead of burning a command buffer on the event.
-            MetalNative.mtlSharedEventSetSignaledValue(this.sharedEvent, targetValue);
+            // NOT "queue idle". The old shortcut called mtlSharedEventSetSignaledValue here, on the
+            // premise that "every commit path on this queue waits for completion" -- and the guest
+            // branch of submit() does not (see its comment: it commits via flushFrame() and returns).
+            // So after any guest submit(), activeCommandBuffer is 0 with up to MAX_SUBMITS_IN_FLIGHT
+            // submits still executing, and this branch signalled the fence IMMEDIATELY. Worse, since
+            // MTLSharedEvent's signaledValue is monotonic, one such jump-ahead permanently satisfies
+            // every older outstanding fence -- not just the one being created.
+            //
+            // The functions that hit this are the ones whose entire job is to force a drain:
+            // flushBackendFences() -> submit() -> activeCommandBuffer = 0 -> createFence() is exactly
+            // the path that triggers it. DownloadStream.flushWaitClear (with production callers),
+            // RawDownloadStream.free() and the stream-full emergency loops all spin on a fence that was
+            // already signalled, so they do no synchronisation at all despite their names.
+            //
+            // A committed signal-only buffer orders correctly by queue order: it cannot execute before
+            // work committed earlier, so the fence means what its callers assume. This is the same
+            // buffer the callerPassOpen() branch below commits when no copies are parked.
+            long cmdBuffer = MetalNative.mtlCommandQueueNewCommandBuffer(this.commandQueue);
+            MetalNative.mtlCommandBufferEncodeSignalEvent(cmdBuffer, this.sharedEvent, targetValue);
+            MetalNative.mtlCommandBufferCommit(cmdBuffer);
+            MetalNative.mtlRelease(cmdBuffer);
         } else if (this.callerPassOpen()) {
             // encodeSignalEvent is illegal while an encoder is open. Only the
             // stream-full emergency paths can land here (fence requested while
