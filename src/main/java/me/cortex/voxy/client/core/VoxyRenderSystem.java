@@ -61,29 +61,6 @@ public class VoxyRenderSystem {
             me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                     == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
 
-    /**
-     * VOXY_GPU_SYNC=1: block the render thread until every command buffer committed before this point
-     * has completed, once per frame.
-     *
-     * <p>A DIAGNOSTIC, not a fix -- it serialises CPU against GPU and costs real frame time. It exists
-     * to answer one question that a one-line measurement raised and nothing else can settle.
-     *
-     * <p>Flipping the {@code VOXY_DRAWCHK} default from 1 to 0 -- i.e. skipping a per-frame CPU readback
-     * of GPU buffers and its log line, and changing NOTHING else -- moves the artefact from 22.1% of
-     * frames over 10,000 near-black px to 85.1%. The cull, the shaders and every other file were
-     * identical between those two runs. So the artefact's RATE depends on how much CPU work the render
-     * thread does: it is a race, and the render thread wins it more often when it is fast. That also
-     * means every baseline this investigation has quoted was measured in a regime whose instrumentation
-     * was itself suppressing the bug.
-     *
-     * <p>If waiting for the GPU each frame removes the artefact, the race is "the render thread draws
-     * before the uploads it depends on have landed", and the fix is a synchronisation point that uses
-     * the existing abstraction ({@code IGpuFence} / {@code RenderBackend.waitForGpuIdle}) rather than a
-     * new mechanism. If it does not, the race is elsewhere -- between the async thread's staging and
-     * the render thread -- and this narrows that too, since the GPU side will have been excluded.
-     */
-    private static final boolean GPU_SYNC = "1".equals(System.getenv("VOXY_GPU_SYNC"));
-
     private final WorldEngine worldIn;
 
 
@@ -549,99 +526,11 @@ public class VoxyRenderSystem {
         return viewport;
     }
 
-    /**
-     * VOXY_ATLAS_SYNC=1 enables a per-frame wait before the model-atlas upload. OFF by default: the
-     * hazard is real but its symptom has not been observed, so it does not earn a second full drain
-     * per frame in the shipped build.
-     *
-     * <p>The hazard, for when it is wanted: the bakery writes freshly baked tiles into the block model
-     * atlas inside {@code modelService.tick()}, which runs AFTER this frame's LOD draws have been
-     * submitted, with frames N-1 and N-2 still executing on the GPU. The write lowers to a bare
-     * {@code mtlTextureReplaceRegion} (MetalTexture:163-172) -- a host memcpy Metal does not order
-     * against command buffers already committed on the queue. A tile caught mid-copy reads alpha 0,
-     * which for a {@code useDiscard()} quad hits the {@code discard} and gives a hole, and otherwise
-     * gives rgb 0: a dark fragment whose silhouette is nonetheless CORRECT.
-     *
-     * <p>That symptom is deliberately spelled out because it is NOT bug 3. Bug 3 was geometry
-     * completely out of place -- wrong shapes in wrong sections. This is darkness and holes, a
-     * different failure with a different cause, and it is here on its own merits rather than as
-     * anything adjacent to the bug that was fixed. The user caught that conflation in the commit
-     * message this replaced, and it is the third time a darkness symptom has been reached for to
-     * explain something where the SHAPE was the thing that mattered.
-     *
-     * <p>Turned off after the user played with it on: zero flashing either way, the lag was acceptable
-     * but the wait is a second full drain per frame, and no dark-but-correctly-shaped fragments were
-     * reported. The stall-free version, if it is ever needed, is double-buffering the atlas -- invasive,
-     * because the atlas is bound at a shader binding and indexed by the model SSBO.
-     */
-    private static final boolean ATLAS_SYNC = "1".equals(System.getenv("VOXY_ATLAS_SYNC"));
-
-    /**
-     * VOXY_FRAME_SLEEP_MS=<n>: idle the render thread for n milliseconds at the top of each frame.
-     *
-     * <p>A PROBE, not a fix, and it exists to break one specific confound. Every timing measurement
-     * this investigation has is ambiguous, because the instrument that produced the strongest effect
-     * does two things at once: {@code VOXY_DRAWCHK} slows the render thread AND reads GPU-written
-     * buffers from the CPU, and it moved the artefact rate from 5.6% to 75.9%. So "the rate depends on
-     * frame pacing" and "the rate depends on the CPU touching those buffers" are indistinguishable in
-     * that data. A sleep adds idle time and touches no buffer, so it separates them.
-     *
-     * <p>The discriminator is this against {@code VOXY_GPU_SYNC}, which bounds only the GPU boundary
-     * and recovered 75.9% -> 57.4%:
-     *
-     * <ul>
-     *   <li>sleep helps a lot, GPU sync little -> the race is against the CPU-side producer (async
-     *       staging and metadata), not the GPU;</li>
-     *   <li>sleep helps about as much as GPU sync -> the hazard is the GPU boundary itself.</li>
-     * </ul>
-     *
-     * <p>Sweeping several levels (say 16 ms for 60 fps, 33 for 30, 100 for 10) adds a monotonicity
-     * check: a smooth curve is strong evidence for a timing effect, whereas a step or a cliff would
-     * point somewhere else.
-     *
-     * <p>Two confounds to be honest about. A sleep is not a pure timing knob -- fewer frames per second
-     * means more streaming work queued per frame, so per-frame load rises even as pacing improves, and
-     * those two push the rate in OPPOSITE directions. That means a null result would NOT refute the
-     * timing story; only a clear reduction is informative, and the absence of one is not evidence. And
-     * a dedicated sleep is used rather than MC's maxFps/vsync limiter because the latter also affects
-     * vanilla and interacts with the fifo present mode visible in the captures.
-     *
-     * <p>It cannot say WHICH buffer or thread, and it must never be mistaken for a fix: suppressing the
-     * rate is exactly the trap this investigation fell into three times, where an instrument made the
-     * number look better while the bug was untouched.
-     */
-    private static final long FRAME_SLEEP_MS = parseFrameSleepMs();
-
-    private static long parseFrameSleepMs() {
-        String v = System.getenv("VOXY_FRAME_SLEEP_MS");
-        if (v == null || v.isBlank()) return 0L;
-        try {
-            long ms = Long.parseLong(v.trim());
-            if (ms > 0) {
-                me.cortex.voxy.common.Logger.info("[Metal-SLEEP] VOXY_FRAME_SLEEP_MS=" + ms
-                        + " -- idling the render thread each frame (probe, not a fix)");
-            }
-            return Math.max(0L, ms);
-        } catch (NumberFormatException e) {
-            return 0L;
-        }
-    }
 
     public void renderOpaque(Viewport<?> viewport) {
         if (viewport == null) {
             return;
         }
-        // See FRAME_SLEEP_MS. Ahead of the frame's work rather than after it: the gap between frames is
-        // what the async producer gets, and placing it here keeps it off the path of anything that
-        // measures or submits.
-        if (FRAME_SLEEP_MS > 0) {
-            try {
-                Thread.sleep(FRAME_SLEEP_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                 != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
             // Iris pack toggled since construction? The pipeline's env-fog
@@ -697,11 +586,6 @@ public class VoxyRenderSystem {
             // every mesher call throws IdNotYetComputedException →
             // no LOD geometry ever materializes.
             UploadStream.INSTANCE.tick();
-            // See GPU_SYNC. Placed immediately after the frame's uploads are committed, so the stall
-            // covers exactly the copies this frame's draws depend on.
-            if (GPU_SYNC) {
-                me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().waitForGpuIdle();
-            }
             boolean processedThisFrame = this.renderDistanceTracker.setCenterAndProcess(
                     viewport.cameraX, viewport.cameraZ);
             while (processedThisFrame && VoxyClient.isFrexActive()) {
@@ -710,18 +594,6 @@ public class VoxyRenderSystem {
             }
             // 2026-07-03: adaptive budget — burst through the startup bake
             // backlog instead of the flat 0.9 ms (see computeBakeBudgetNs).
-            //
-            // ATLAS_SYNC: see the field. The bakery writes freshly baked tiles into the block model
-            // atlas HERE, and that atlas is sampled by the LOD draws submitted earlier this frame --
-            // with frames N-1 and N-2 still executing. The write is a host memcpy through
-            // mtlTextureReplaceRegion, which Metal does not order against committed command buffers,
-            // so a tile caught mid-copy reads alpha 0: a discard hole for a useDiscard() quad, or an
-            // opaque black fragment with a correct silhouette otherwise. One wait per frame rather
-            // than one per bake, because the bakery drains several tiles per tick and a wait per tile
-            // would stall on each of them.
-            if (ATLAS_SYNC) {
-                me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().waitForGpuIdle();
-            }
             do { this.modelService.tick(this.computeBakeBudgetNs()); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
             // Diagnostic: log every ~10s (600 frames) whether the LOD ring is
             // still adding/removing cells. After the ring converges this
