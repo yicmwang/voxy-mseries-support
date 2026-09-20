@@ -1121,7 +1121,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     public void renderOpaqueMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
         pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad
-                = pfModelUnbaked = pfFaceZero = 0;
+                = pfModelUnbaked = pfFaceZero = pfWrongSection = pfWrongChecked = 0;
+        pfWrongExamples = 0;
         // SceneUniform was already uploaded by buildDrawCalls this frame
         // (runPipelineMetal always pairs them); no re-upload.
         if (this.terrainPipeline == null) {
@@ -1144,6 +1145,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     + " lightZero=" + pfLightZero + " modelOob=" + pfModelOob
                     + " modelUnbaked=" + pfModelUnbaked + " faceZero=" + pfFaceZero
                     + " emptyQuad=" + pfEmptyQuad
+                    + " WRONGSEC=" + pfWrongSection + "/" + pfWrongChecked
                     + " coarseDetail=" + pfCoarse + " orphan=" + pfOrphan + " straddle=" + pfStraddle
                     + " allocs=" + drawchkTableSize);
         }
@@ -1342,12 +1344,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static long pfDraws, pfLightZero, pfModelOob, pfCoarse, pfOrphan, pfStraddle;
     private static long pfSampled, pfEmptyQuad, pfModelUnbaked, pfFaceZero;
+    private static long pfWrongSection, pfWrongChecked;
     private static int pfExamples = 0;
+    private static int pfWrongExamples = 0;
 
     /** Live geometry allocations, flat {@code [start, endExclusive, sectionId]} sorted by start. */
     private static long[] drawchkTable = null;
     private static int drawchkTableSize = 0;
     private static int drawchkTableAge = Integer.MAX_VALUE;
+    /** Live section count when the table was built; the ownership check is gated on it not moving. */
+    private static int drawchkTableSectionCount = -1;
 
     /**
      * Validate, on the CPU, every draw command this slice is about to submit against the geometry
@@ -1410,13 +1416,17 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         long avail = Math.max(0, (cmds.size() - indirectOffset) / 20L);
         int n = (int) Math.min(maxDrawCount, avail);
 
-        // Rebuild the allocation table periodically rather than every call: the scan is over
-        // maxSections entries and the table only moves as geometry streams in. Skipped entirely unless
-        // opted into -- see DRAWCHK_TABLE.
+        // Rebuild the allocation table periodically rather than every call, and also whenever the live
+        // section count moves. The count gate matters for correctness, not freshness: the ownership
+        // check below asks "which section owns this address", and a table built before a section was
+        // freed and its address reused answers with the PREVIOUS owner -- a false positive that would
+        // be worse than no reading at all. Skipped entirely unless opted into -- see DRAWCHK_TABLE.
+        final int sectionCount = this.geometryManager.getSectionCount();
         if (DRAWCHK_TABLE) {
-            if (drawchkTableAge >= DRAWCHK_TABLE_EVERY) {
+            if (drawchkTableAge >= DRAWCHK_TABLE_EVERY || sectionCount != drawchkTableSectionCount) {
                 drawchkTableAge = 0;
                 rebuildAllocationTable(mp, maxSections, heapElements);
+                drawchkTableSectionCount = sectionCount;
             }
             drawchkTableAge += 3;// opaque + temporal + translucent per frame
         }
@@ -1468,6 +1478,43 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     drawchkExample(tag, i, "straddle", "baseVertex>>2=" + qs + " quads=" + (indexCount / 6L)
                             + " end=" + qe + " allocEnd=" + allocEnd + " sid=" + table[slot * 3 + 2]);
                     continue;
+                }
+
+                // THE OWNERSHIP CHECK -- "is this geometry in the right place?"
+                //
+                // Each section's quads live in one contiguous allocation, so the allocation table
+                // answers "which section owns the quads at baseVertex" without the render list. The
+                // vertex shader places that geometry using positionBuffer[baseInstance], which cmdgen
+                // wrote from the metadata of whatever section it built the command for. So if the
+                // owning section and the position the draw uses disagree, the draw is rendering one
+                // section's quads at another section's position -- trees with their trunks in open
+                // sky, kelp over dry ground, water at the wrong height, terrain slices detached.
+                //
+                // This is the one form of the fault that a per-command check CAN see, and it is
+                // deliberately independent of the render list: both sides of the comparison come from
+                // buffers written by the same pass, so a stale CPU read of a GPU-written list cannot
+                // manufacture a mismatch the way it did for posMismatch.
+                final long ownerSid = table[slot * 3 + 2];
+                if (ownerSid < maxSections && baseInstance < posEntries
+                        && sectionCount == drawchkTableSectionCount) {
+                    final long om = mp + ownerSid * 32L;
+                    final int ownerHi = MemoryUtil.memGetInt(om);
+                    final int ownerLo = MemoryUtil.memGetInt(om + 4);
+                    final int useHi = MemoryUtil.memGetInt(pp + baseInstance * 8L);
+                    final int useLo = MemoryUtil.memGetInt(pp + baseInstance * 8L + 4);
+                    if (ownerHi != useHi || ownerLo != useLo) {
+                        pfWrongSection++;
+                        if (pfWrongExamples++ < 8) {
+                            Logger.warn("[Metal-WRONGSEC! " + tag + "] cmd#" + i
+                                    + " quads[" + qs + "," + qe + ") owned by sid=" + ownerSid
+                                    + " at " + pprintRawPos(ownerHi, ownerLo)
+                                    + " but drawn with baseInstance=" + baseInstance
+                                    + " at " + pprintRawPos(useHi, useLo)
+                                    + " quads=" + (indexCount / 6L));
+                        }
+                    } else {
+                        pfWrongChecked++;
+                    }
                 }
             }
 
@@ -1673,6 +1720,24 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static void drawchkExample(String tag, int i, String kind, String detail) {
         if (drawchkExamples++ >= 8) return;
         Logger.warn("[Metal-DRAWCHK! " + tag + "] cmd#" + i + " " + kind + " " + detail);
+    }
+
+    /**
+     * A section's raw position as {@code "detail L<x,y,z>"} -- the top nibble is the LOD level and the
+     * rest decodes exactly as {@code extractLoDPosition} does in quad_util.glsl. Printed instead of hex
+     * so a WRONGSEC line can be read without hand-decoding the packing, which is error-prone enough
+     * that doing it by hand is how a same-detail mismatch and a level mismatch get confused.
+     */
+    private static String pprintRawPos(final int hi, final int lo) {
+        final int d = hi >>> 28;
+        final int y = (hi >> 20) & 0xFF;
+        final int x = (lo >> 4) & 0xFFFFFF;
+        final int z = (((hi & 0xFFFFF) << 4) | (lo >>> 28)) & 0xFFFFFF;
+        // Sign-extend x and z from 24 bits, y from 8, matching bitfieldExtract on a signed int.
+        final int sx = (x << 8) >> 8;
+        final int sz = (z << 8) >> 8;
+        final int sy = (byte) y;
+        return "d" + d + " L" + sx + "," + sy + "," + sz;
     }
 
     /**
