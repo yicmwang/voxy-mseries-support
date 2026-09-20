@@ -163,22 +163,34 @@ public class VoxelIngestService {
      * @param lightCorrect {@code ChunkAccess.isLightCorrect()} at the moment the layers were copied
      */
     /**
-     * Whether an unlit chunk's stored zeros are treated as "not computed yet" rather than as
-     * darkness ({@code VOXY_TRUST_UNLIT_CHUNKS=0} restores the old reading).
+     * The same as the two-argument form. {@code lightCorrect} is NOT consulted.
      *
-     * <p>On by default because the old reading is the one that draws the black splotches, and it is
-     * the one that cannot be undone: a baked zero is permanent, whereas an over-lit guess is corrected
-     * the moment the light does arrive. The switch exists so the two readings can be A/B'd in ONE
-     * build. Two builds would be two SHAs, and frames or counters from different SHAs are not
-     * comparable — that confound has already cost this investigation a round.
+     * <p>It used to be. When it was false this returned a constant sky 15 for the whole section, on the
+     * reasoning that a chunk which is not light-correct has had no light computed for it yet, so its
+     * layers read zero for the same reason an absent layer does. Two things were wrong with that.
+     *
+     * <p>First, <b>{@code ChunkAccess.isLightCorrect()} is never set true on a vanilla client.</b> The
+     * client's light path is {@code ClientPacketListener.applyLightData -> LevelLightEngine.queueSectionData},
+     * which queues light; nothing on it calls {@code setLightCorrect}. So the flag says nothing about
+     * whether light has been computed — it is false for every section, always.
+     *
+     * <p>Second, <b>the correction the old comment promised did not exist.</b> It said "if the light does
+     * arrive, the section is re-ingested and corrected"; nothing in the tree re-ingests on light arrival,
+     * and no light-update hook exists. So the guess was not recoverable — it was permanent.
+     *
+     * <p>Together those made sky 15 the DEFAULT outcome of client-side ingest rather than an edge case,
+     * and it threw away real light: measured, 54% of ingested sections arrive with both layers null (for
+     * which the per-layer rule below already answers sky 15), and the rest carry real data that this
+     * branch overwrote.
+     *
+     * <p>The user chose removal over the correct fix, knowing the trade: present-and-zero layers now bake
+     * as darkness again, which is bug 2's original symptom and is sticky in the same way. The correct fix
+     * is to gate ingest on the light packet having actually arrived — the readiness signal already exists
+     * and is already tested at {@code MixinRenderSectionManager} ({@code cachedChunkStatus == 3}, set from
+     * {@code ClientChunkCacheMixin.onChunkLoaded} and {@code ClientPacketListenerMixin.onLightDataReceived})
+     * — and then read the data verbatim, which needs no substitution at all.
      */
-    private static final boolean TRUST_UNLIT_CHUNKS = !"0".equals(System.getenv("VOXY_TRUST_UNLIT_CHUNKS"));
     static ILightingSupplier lightingSupplier(final DataLayer blockLight, final DataLayer skyLight, final boolean lightCorrect) {
-        if (!lightCorrect && TRUST_UNLIT_CHUNKS) {
-            // Unlit: neither layer is trustworthy, so take both defaults. Sky 15 rather than 0 —
-            // see above. Block 0 matches BlockLightSectionStorage's absent-layer answer.
-            return (x, y, z) -> (byte) 15;
-        }
         return (x, y, z) -> {
             final int block = blockLight == null ? 0 : Math.min(15, blockLight.get(x, y, z));
             final int sky = skyLight == null ? 15 : Math.min(15, skyLight.get(x, y, z));

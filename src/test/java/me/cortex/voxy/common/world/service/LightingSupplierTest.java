@@ -136,12 +136,20 @@ class LightingSupplierTest {
     }
 
     @Test
-    void unlitChunkReadsAsFullySkyLitRatherThanAsStoredZero() {
-        // The other half of the same question. "A stored all-zero layer is genuinely dark" is only
-        // true of a chunk Minecraft has finished lighting; a chunk that is not light-correct has had
-        // no light computed for it, and its layers read zero because there is nothing there yet.
-        // Baking those zeros is permanent -- the LOD has no notion of light arriving later -- and it
-        // draws the terrain as a black mass with a correct silhouette.
+    void unlitChunkWithAnAllZeroLayerReadsAsDarkNotFullyLit() {
+        // THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the point.
+        //
+        // It asserted sky 15, on the reasoning that a chunk which is not light-correct has had no light
+        // computed for it, so its zero layers mean "nothing there yet" rather than darkness. That
+        // reasoning does not hold on a client: ChunkAccess.isLightCorrect() is never set true there --
+        // the client's light path is applyLightData -> queueSectionData, which queues light without
+        // marking it -- so the flag was false for every section always, and the substitution it fed was
+        // the DEFAULT outcome of client-side ingest rather than an edge case.
+        //
+        // The user's verdict on it: "the clamping is a bodge solution to fix a bug that didn't exist."
+        // So a stored, present, all-zero layer now reads as what it is -- dark -- which is also what
+        // storedAllZeroSkyLayerStaysDark pins through the two-argument overload. The two forms agree now;
+        // they disagreed before, which was the bodge.
         DataLayer block = new DataLayer();
         DataLayer sky = new DataLayer();
         ILightingSupplier supplier = VoxelIngestService.lightingSupplier(block, sky, false);
@@ -150,25 +158,25 @@ class LightingSupplierTest {
             for (int z = 0; z < 16; z += 5) {
                 for (int x = 0; x < 16; x += 5) {
                     byte light = supplier.supply(x, y, z);
-                    assertEquals(15, skyOf(light), "an unlit chunk must not bake a stored zero as night");
-                    assertEquals(0, blockOf(light), "and must not invent block light either");
+                    assertEquals(0, skyOf(light), "a stored all-zero sky layer is dark, not absent");
+                    assertEquals(0, blockOf(light), "and there is no block light to invent");
                 }
             }
         }
     }
 
     @Test
-    void unlitChunkIgnoresEvenAPopulatedLayer() {
-        // Not just the all-zero layer: an unlit chunk's layers are not trustworthy at all, so a
-        // stray nonzero value in one must not be believed either. Otherwise a half-written layer
-        // would bake a half-lit chunk, which is the harder failure to notice.
+    void unlitChunkReadsItsPopulatedLayersVerbatim() {
+        // The other half. This used to assert that an unlit chunk ignored even a POPULATED layer,
+        // returning sky 15 and block 0 regardless -- which is what threw away real light for the ~46%
+        // of ingested sections that carry data while the flag is false. Present data is data.
         DataLayer block = filled(15);
         DataLayer sky = filled(12);
         ILightingSupplier supplier = VoxelIngestService.lightingSupplier(block, sky, false);
 
         byte light = supplier.supply(8, 8, 8);
-        assertEquals(15, skyOf(light));
-        assertEquals(0, blockOf(light));
+        assertEquals(12, skyOf(light));
+        assertEquals(15, blockOf(light));
     }
 
     @Test
