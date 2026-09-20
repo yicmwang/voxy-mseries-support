@@ -947,12 +947,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.client.core.model.ModelFactory.DIAG_PROCESS_MODEL_RESULTS.get(),
                     me.cortex.voxy.client.core.model.ModelFactory.DIAG_ATLAS_UPLOADS.get()));
             Logger.info(String.format(
-                    "[Metal-REQ   f=%d] last=%d  total=%d  directRead=%d  downloadRead=%d",
+                    "[Metal-REQ   f=%d] last=%d  total=%d  directRead=%d  downloadRead=%d  validated=%d INVALID=%d",
                     this.metalFrame,
                     me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_LAST_REQUEST_COUNT.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_TOTAL_REQUEST_COUNT.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DIRECT_READ_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DOWNLOAD_COUNT.get()));
+                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DOWNLOAD_COUNT.get(),
+                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_REQ_VALIDATED.get(),
+                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_REQ_INVALID.get()));
         }
     }
 

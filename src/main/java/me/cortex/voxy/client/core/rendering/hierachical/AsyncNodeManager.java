@@ -282,6 +282,24 @@ public class AsyncNodeManager {
             for (int i = 0; i < count; i++) {
                 long pos = ((long) MemoryUtil.memGetInt(ptr)) << 32; ptr += 4;
                 pos |= Integer.toUnsignedLong(MemoryUtil.memGetInt(ptr)); ptr += 4;
+                // Validate what came back from the GPU before acting on it.
+                //
+                // This is the CPU reading GPU-written traversal output, and it is the one place in
+                // the pipeline where a wrong value turns into wrong NODES being loaded and meshed
+                // rather than wrong pixels being shaded. The user's splotch report -- shapes that do
+                // not resemble their own section, one frame, different every time -- is what that
+                // would look like from outside, and the deferred batch-overflow IllegalStateException
+                // a few lines above is its sibling: a garbage count there, a garbage-but-in-range
+                // position here.
+                //
+                // The check is a round trip. getWorldSectionId packs level, x, y and z into a long
+                // with masked fields, so a value that did not come from that packing cannot survive
+                // being unpacked and repacked -- any stray bit lands in a masked-off position and the
+                // result differs. That catches corruption without needing to know what it looks like.
+                if (!validSectionPos(pos)) {
+                    DIAG_REQ_INVALID.incrementAndGet();
+                }
+                DIAG_REQ_VALIDATED.incrementAndGet();
                 this.manager.processRequest(pos);
             }
             job.free();
@@ -674,7 +692,28 @@ public class AsyncNodeManager {
     }
 
     /** M13 diagnostic counters — read by AbstractRenderPipeline's Metal-DIAG dump. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_WORLD_EVENT_COUNT = new java.util.concurrent.atomic.AtomicLong();
+        /**
+     * Node requests read back from the GPU and checked for plausibility before being acted on.
+     *
+     * <p>A request that survives the round trip in {@link #validSectionPos} decoded from the same
+     * packing that produced it, so a nonzero {@code DIAG_REQ_INVALID} means the CPU read bytes the
+     * traversal did not write -- corruption in flight rather than a wrong value generated. That is
+     * the difference between "the node manager asked for garbage" and "the GPU told it garbage",
+     * and it is the distinction the splotch investigation needs.
+     */
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_INVALID = new java.util.concurrent.atomic.AtomicLong();
+    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_VALIDATED = new java.util.concurrent.atomic.AtomicLong();
+
+    private static boolean validSectionPos(final long pos) {
+        final int lvl = me.cortex.voxy.common.world.WorldEngine.getLevel(pos);
+        if (lvl < 0 || lvl > me.cortex.voxy.common.world.WorldEngine.MAX_LOD_LAYER) return false;
+        final int x = me.cortex.voxy.common.world.WorldEngine.getX(pos);
+        final int y = me.cortex.voxy.common.world.WorldEngine.getY(pos);
+        final int z = me.cortex.voxy.common.world.WorldEngine.getZ(pos);
+        return me.cortex.voxy.common.world.WorldEngine.getWorldSectionId(lvl, x, y, z) == pos;
+    }
+
+public static final java.util.concurrent.atomic.AtomicLong DIAG_WORLD_EVENT_COUNT = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_GEOMETRY_RESULT_COUNT = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_TOP_LEVEL_ADD_COUNT = new java.util.concurrent.atomic.AtomicLong();
     /** Times AsyncNodeManager.tick() ran and consumed a non-null SyncResults. */
