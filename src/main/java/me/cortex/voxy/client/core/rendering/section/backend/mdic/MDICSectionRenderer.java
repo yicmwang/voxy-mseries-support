@@ -257,7 +257,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * <p>A ring of UNIFORM_RING slots, indexed by the frame id, keeps a frame's uniform alive until
      * well after its draws have retired.
      */
-    private static final int UNIFORM_RING = 4;
+    // Sized for the CPU AHEAD of the GPU, not for MAX_SUBMITS_IN_FLIGHT. The ring's job is to keep a
+    // frame's uniform alive until that frame's draws have retired, and the CPU does not block on the
+    // GPU: it can be many frames ahead of what has executed, so 4 slots (just past the 3 submits in
+    // flight) is not enough. 32 costs 32 KB and covers any lead this renderer produces.
+    private static final int UNIFORM_RING = 32;
     private final IGpuBuffer[] uniformRing = new IGpuBuffer[UNIFORM_RING];
     {
         for (int i = 0; i < UNIFORM_RING; i++) {
