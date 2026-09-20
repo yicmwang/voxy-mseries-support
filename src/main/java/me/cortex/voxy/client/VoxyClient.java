@@ -44,6 +44,15 @@ public class VoxyClient implements ClientModInitializer {
         }
     }
 
+    private static long gcd(long a, long b) {
+        while (b != 0) {
+            long t = a % b;
+            a = b;
+            b = t;
+        }
+        return a == 0 ? 1 : a;
+    }
+
     public static void initVoxyClient() {
         Capabilities.init();//Ensure clinit is called
 
@@ -356,7 +365,33 @@ public class VoxyClient implements ClientModInitializer {
                 Logger.info("VOXY_DEV_CAM_DRIFT active: translating " + drift + " blocks/sec, no rotation");
             }
             if (spin != 0) {
-                Logger.info("VOXY_DEV_CAM_SPIN active: rotating " + spin + " deg/sec at a fixed position");
+                // A constant spin ALIASES against a constant capture interval, and the aliasing is
+                // silent: the camera advances spin*interval degrees between screenshots, so the
+                // headings actually sampled are 360/gcd(advance,360) of them, not all of them. At the
+                // first rate tried -- 60 deg/s with the 2 s capture -- the advance was exactly 120 deg,
+                // gcd(120,360)=120, so EVERY frame came from one of THREE headings while looking like
+                // a full survey. A direction-dependent artefact would then be either always or never
+                // seen depending on phase, and the run would read as a clean result.
+                //
+                // The interval is re-parsed here rather than shared, because the capture registry is
+                // configured in a different block above and a shared local would be a silent coupling.
+                // Unset means no capture at all; the arithmetic below is then about a run that will not
+                // produce frames anyway, so the default only has to keep the numbers finite.
+                final int capSecs = Math.max(2, parseEnvIntDefault("VOXY_AUTO_SCREENSHOT", 2));
+                final long advance = Math.round(Math.abs(spin) * capSecs);
+                long a = advance % 360;
+                if (a == 0) a = 360;                       // a full turn samples the same heading forever
+                final long headings = 360 / gcd(a, 360);
+                Logger.info("VOXY_DEV_CAM_SPIN active: rotating " + spin + " deg/sec at a fixed position"
+                        + " -- " + advance + " deg per " + capSecs + "s capture, "
+                        + headings + " distinct heading(s) sampled");
+                if (headings < 30) {
+                    Logger.warn("VOXY_DEV_CAM_SPIN is ALIASED against the " + capSecs + "s capture: only "
+                            + headings + " distinct heading(s) will ever be screenshotted, so this run "
+                            + "samples " + headings + " direction(s) rather than the whole circle. Pick a "
+                            + "rate whose advance is not a large divisor of 360 (e.g. 67 deg/s at 2s "
+                            + "gives 134 deg, 180 headings).");
+                }
             }
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
                 if (client.level == null) return;
@@ -452,13 +487,17 @@ public class VoxyClient implements ClientModInitializer {
             }
             final int holdTicks = Math.max(4, parseEnvIntDefault("VOXY_DEV_TP_TICKS", 40));
             final int shotDelay = Math.max(1, parseEnvIntDefault("VOXY_DEV_TP_SHOT_DELAY", 2));
+            // 1 is the old behaviour: a single grab, `shotDelay` ticks after each arrival.
+            final int shotBurst = Math.max(1, parseEnvIntDefault("VOXY_DEV_TP_SHOT_BURST", 1));
             final boolean takeShots = !"0".equals(System.getenv("VOXY_DEV_TP_SHOT"));
             Logger.info("VOXY_DEV_TP active: cycling " + points.length + " point(s) every "
-                    + holdTicks + " ticks, screenshot " + shotDelay + " tick(s) after each arrival");
+                    + holdTicks + " ticks, screenshot " + shotDelay + " tick(s) after each arrival"
+                    + (shotBurst > 1 ? ", burst of " + shotBurst + " ticks" : ""));
 
             final int[] ticksUntilApply = {40};
             final int[] hold = {0};
             final int[] shotIn = {-1};
+            final int[] burstLeft = {0};
             final int[] idx = {0};
             final boolean[] applied = {false};
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -478,10 +517,28 @@ public class VoxyClient implements ClientModInitializer {
                     }
                     // The grab lands a fixed number of ticks after the teleport, so it is the first
                     // frame the new eye position could have produced.
-                    if (shotIn[0] > 0 && --shotIn[0] == 0 && takeShots
+                    //
+                    // VOXY_DEV_TP_SHOT_BURST=<n> grabs once per TICK for n ticks from `shotDelay`
+                    // onwards, instead of a single frame, because one sample cannot catch a transient
+                    // that lasts one to three frames. It must be one grab per tick, not n grabs in one
+                    // tick: Screenshot.grab reads the current render target asynchronously, so n calls
+                    // in a tick capture the same framebuffer n times over.
+                    //
+                    // Reason to expect a transient exactly here: a teleport forces the full
+                    // re-traversal and re-anchor, and the measured artefact counts ramp immediately
+                    // after a discontinuity -- so the frames just after arrival are where a
+                    // short-lived fault should be, and the default single grab at +2 ticks samples
+                    // that window once rather than surveying it.
+                    if (shotIn[0] > 0 && --shotIn[0] == 0) {
+                        burstLeft[0] = shotBurst;
+                    }
+                    if (burstLeft[0] > 0 && takeShots
                             && client.gameRenderer.mainRenderTarget() != null) {
-                        Logger.info("[Metal-TP-SHOT] point=" + ((idx[0] + points.length - 1) % points.length)
-                                + " args=" + points[(idx[0] + points.length - 1) % points.length]);
+                        burstLeft[0]--;
+                        final int pi = (idx[0] + points.length - 1) % points.length;
+                        Logger.info("[Metal-TP-SHOT] point=" + pi
+                                + " burst=" + (shotBurst - 1 - burstLeft[0])
+                                + " args=" + points[pi]);
                         net.minecraft.client.Screenshot.grab(client.gameDirectory,
                                 client.gameRenderer.mainRenderTarget(), component -> {});
                     }
@@ -492,6 +549,7 @@ public class VoxyClient implements ClientModInitializer {
                     commands.performPrefixedCommand(source, "tp @s " + pos);
                     Logger.info("[Metal-TP] -> point " + ((idx[0] - 1) % points.length) + " args=" + pos);
                     shotIn[0] = shotDelay;
+                    burstLeft[0] = 0;   // an unfinished burst must not bleed into the next arrival
                 } catch (Throwable t) {
                     Logger.error("VOXY_DEV_TP failed", t);
                     applied[0] = true;
