@@ -37,6 +37,45 @@ public class MetalRenderBackend implements RenderBackend {
     /** Lazily allocated MTLCommandBuffer for the current frame; 0 when no commands are queued. */
     private long activeCommandBuffer = 0;
 
+    /** Set only for the duration of a {@link #submitDeferWait()} call, read by the guest branch. */
+    private boolean deferOrderedWait = false;
+    /** The handle {@link #submitDeferWait()} committed, awaiting {@link #awaitCommitted()}. */
+    private volatile long pendingOrderedWait = 0;
+
+    /**
+     * Commit exactly as {@link #submit()} does, but leave the ordered wait for {@link #awaitCommitted()}.
+     *
+     * <p>Why this exists. The wait is load-bearing -- the guest branch commits without waiting, so the
+     * CPU's per-draw read of {@code baseInstance} out of drawCallBuffer would otherwise be a frame
+     * stale, which was bug 3. But WHERE it happens is free to move: the read it protects does not occur
+     * until the draw, and the render pipeline does real CPU work in between (fog and clear setup, the
+     * render-pass description, attachment resolution). Waiting immediately after the commit makes the
+     * CPU idle through the GPU's prepasses and then do that work; deferring the wait lets the work
+     * overlap them instead.
+     *
+     * <p>It cannot weaken the guarantee: the wait still happens before the first read, so the ordering
+     * the fix establishes is unchanged. It only changes how much of it the CPU spends idle.
+     */
+    @Override
+    public void submitDeferWait() {
+        this.deferOrderedWait = true;
+        try {
+            this.submit();
+        } finally {
+            this.deferOrderedWait = false;
+        }
+    }
+
+    /** Perform the wait {@link #submitDeferWait()} deferred. No-op when there is none. */
+    @Override
+    public void awaitCommitted() {
+        final long h = this.pendingOrderedWait;
+        if (h != 0L) {
+            this.pendingOrderedWait = 0L;
+            MetalNative.mtlCommandBufferWaitUntilCompleted(h);
+        }
+    }
+
     /**
      * Whether the guest branch of {@link #submit()} waits for the frame it just committed. ON by
      * default, because it is the fix for bug 3, not an experiment: the guest branch's own comment
@@ -1194,7 +1233,13 @@ public class MetalRenderBackend implements RenderBackend {
                     // CPU and pushes it as the per-draw constant, so a stale read gives the WRONG
                     // SECTION'S ORIGIN while the draw keeps its own quads and baked light -- bug 3's
                     // symptom exactly, including the preserved lighting. Confirmed fixed by eye.
-                    MetalNative.mtlCommandBufferWaitUntilCompleted(committed);
+                    if (this.deferOrderedWait) {
+                        // The caller wants the commit now and the wait later, so it can spend the
+                        // interval on CPU work that overlaps the GPU's prepasses. See submitDeferWait.
+                        this.pendingOrderedWait = committed;
+                    } else {
+                        MetalNative.mtlCommandBufferWaitUntilCompleted(committed);
+                    }
                 }
                 return;
             }

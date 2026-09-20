@@ -94,6 +94,25 @@ public interface RenderBackend {
     void memoryBarrier(int flags);
 
     /**
+     * Commit the current frame's work WITHOUT waiting for it, for backends where committing and waiting
+     * are separable. Metal overrides this; the default is a plain {@link #submit()}, which is correct
+     * for a backend whose submit already means "done" (GL: one ordered command stream).
+     *
+     * <p>Exists so a caller can commit now and {@link #awaitCommitted()} later, spending the interval on
+     * CPU work that overlaps the GPU's prepasses rather than idling through them.
+     */
+    default void submitDeferWait() {
+        submit();
+    }
+
+    /**
+     * Complete a wait deferred by {@link #submitDeferWait()}. No-op by default, and no-op when nothing
+     * was deferred.
+     */
+    default void awaitCommitted() {
+    }
+
+    /**
      * Copies `size` bytes from `src`+srcOffset to `dst`+dstOffset.
      * OpenGL uses glCopyNamedBufferSubData (or the bound-buffer fallback);
      * Metal enqueues a blit encoder on a transient command buffer.

@@ -411,7 +411,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         int fbh = viewport.height;
         if (fbw <= 0 || fbh <= 0) return;
         var backend = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get();
-        if (!(backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mrb)) return;
+        if (!(backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend voxyMb)) return;
         final long perfT0 = System.nanoTime();
 
         // 1) Allocate the IOSurface bridge sized to MC's framebuffer. The
@@ -481,10 +481,10 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // push baseInstance via setVertexBytes (drawIndexedPrimitives:
         // indirectBuffer: doesn't propagate it natively). Without this
         // submit() the CPU sees stale data from the prior frame.
-        backend.submit();
+        backend.submitDeferWait();
         final long perfT2 = System.nanoTime();
         this.perfPrep += perfT1 - perfT0;   // traversal + draw-call prepasses
-        this.perfSplit += perfT2 - perfT1;  // split submit; includes the GPU wait
+        this.perfSplit += perfT2 - perfT1;  // split submit, commit only -- the ordered wait moved to the draw
 
         // M13 2026-05-15 Layer B diagnostic — read back the renderList and
         // drawCountCallBuffer values so we can see exactly how many sections
@@ -726,6 +726,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             // typing follows from the RenderPipelineFactory pairing).
             // postOpaquePreTranslucent (SSAO) is skipped on Metal — SSAO
             // is M13 polish; the LOD result is intelligible without it.
+            // The deferred wait, taken as late as possible: everything above this line is CPU work that
+            // has been overlapping the GPU's prepasses. This is the first point that reads anything the
+            // prepasses wrote (MetalRenderEncoder pulls baseInstance out of drawCallBuffer per draw), so
+            // the ordering the fix establishes is unchanged -- only the idle time moved.
+            backend.awaitCommitted();
             if (!bridgeSolidTest && !submersionSkip
                     && this.sectionRenderer instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICSectionRenderer mdic
                     && viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mv) {
