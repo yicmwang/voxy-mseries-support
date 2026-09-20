@@ -141,6 +141,19 @@ public class HierarchicalOcclusionTraverser {
         m.put("MAX_ITERATIONS", Integer.toString(MAX_ITERATIONS));
         m.put("LOCAL_SIZE_BITS", Integer.toString(LOCAL_WORK_SIZE_BITS));
         m.put("MAX_REQUEST_QUEUE_SIZE", Integer.toString(MAX_REQUEST_QUEUE_SIZE));
+        // Metal never builds the Hi-Z pyramid: the only caller of HiZBuffer.buildMipChain is
+        // AbstractRenderPipeline.innerPrimaryWork, and the Metal path deliberately runs a copy of that
+        // method "minus the GL bits (HiZBuffer.buildMipChain, ...)" (AbstractRenderPipeline:458). The
+        // traversal then samples that unbuilt texture, and the shader's guard against an unbuilt
+        // pyramid assumes it reads zeros -- but a Metal Shared texture is not zeroed on allocation, so
+        // it reads garbage. The result is a subtree-cull test driven by noise: sections drop out at
+        // random (empty chunks, including near the player) and distant coarse nodes flicker in and out
+        // as opaque black masses. Disabled here rather than left to chance; Voxy draws into MC's depth,
+        // so the real depth test already provides the occlusion the LOD needs.
+        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            m.put("VOXY_NO_HIZ", "");
+        }
         m.put("HIZ_BINDING", Integer.toString(HIZ_BINDING));
         m.put("SCENE_UNIFORM_BINDING", Integer.toString(SCENE_UNIFORM_BINDING));
         m.put("REQUEST_QUEUE_BINDING", Integer.toString(REQUEST_QUEUE_BINDING));

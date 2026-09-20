@@ -137,6 +137,12 @@ bool outsideFrustum() {
 }
 
 bool isCulledByHiz() {
+#ifdef VOXY_NO_HIZ
+    // The pyramid is never built on this backend (see HierarchicalOcclusionTraverser.traversalDefines),
+    // so sampling it tests noise. The guard below assumes an unbuilt pyramid reads zero, which holds
+    // for a zeroed buffer and not for raw allocated texture memory.
+    return false;
+#endif
     //Things start breaking down if the area is the entire scree, no idea why, just abort if we hit this case
     if ((maxBB.xy-minBB.xy)==vec2(1.0f)) return false;
 
