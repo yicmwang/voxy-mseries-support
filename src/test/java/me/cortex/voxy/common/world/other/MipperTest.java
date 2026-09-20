@@ -88,6 +88,54 @@ class MipperTest {
         assertEquals(15, skyOf(mip(lit, lit, lit, lit, lit, lit, lit, lit)));
     }
 
+
+    @Test
+    void aMixedCellTakesTheBrightestLightAmongItsChildren() {
+        // THE bug-3 mechanism, pinned at the rule that was wrong.
+        //
+        // mip()'s non-air branch returns the most opaque child UNCHANGED, light included, and a
+        // solid block's own cell light is 0 in both nibbles because light does not propagate into a
+        // solid. So a coarse cell holding four solid children and four air children became a solid
+        // cell carrying (0,0) -- and at coarse LOD levels that cell IS the terrain surface, so every
+        // face that takes its light from it went black. Measured with VOXY_LOD_SHOW_LIGHT: 26.24% of
+        // drawn LOD fragments carry a zero light byte, all of them in the mid-distance band where
+        // the LOD is coarse, and 0% in the near foreground where it is not.
+        //
+        // Upstream's TODO prescribes the fix -- compute the MAX light level, "since e.g. if a point
+        // is bright irl you can see it from really really damn far away" -- so the rule is: the
+        // brightest child is what a viewer outside the cell sees.
+        //
+        // Tested through brightestLight rather than mip() because mip() needs a Mapper to choose the
+        // representative child, and a Mapper needs deserialised block states. The rule is the part
+        // that was wrong, so the rule is the part worth pinning.
+        long solidDark = air(0);          // a solid's own cell: light 0 in both nibbles
+        long airLit = air(0x0F);          // the fully sky-lit air beside it
+        assertEquals(15, Mipper.brightestLight(solidDark, solidDark, solidDark, solidDark,
+                        airLit, airLit, airLit, airLit) & 0x0F,
+                "a cell with lit air in it must not be baked as unlit");
+    }
+
+    @Test
+    void aCellWithNoLitChildStaysDark() {
+        // The counterpart, and the reason this cannot be "just light every mip cell": a sealed
+        // underground cell has no lit child and must stay dark, or every cave in the world lights up.
+        long dark = air(0);
+        assertEquals(0, Mipper.brightestLight(dark, dark, dark, dark, dark, dark, dark, dark),
+                "a sealed cell must stay pitch black");
+    }
+
+    @Test
+    void theBrightestSkyAndTheBrightestBlockAreTakenSeparately() {
+        // Maximising the packed bytes would be wrong: a cell with sky 15 block 0 and a cell with sky
+        // 0 block 12 must produce sky 15 AND block 12, not whichever packed byte is larger.
+        long skyOnly = air(0x0F);
+        long blockOnly = air(0xF0);
+        int lit = Mipper.brightestLight(skyOnly, skyOnly, skyOnly, skyOnly,
+                blockOnly, blockOnly, blockOnly, blockOnly);
+        assertEquals(15, lit & 0x0F, "sky from the sky-lit children");
+        assertEquals(15, (lit >> 4) & 0x0F, "block from the torch-lit children");
+    }
+
     @Test
     void theTwoNibblesDoNotLeakIntoEachOther() {
         // The port's bug was a nibble-crossing error, so assert the crossing directly: block light
