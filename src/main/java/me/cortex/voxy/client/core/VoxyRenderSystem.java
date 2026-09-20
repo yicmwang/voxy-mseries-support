@@ -61,6 +61,29 @@ public class VoxyRenderSystem {
             me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                     == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
 
+    /**
+     * VOXY_GPU_SYNC=1: block the render thread until every command buffer committed before this point
+     * has completed, once per frame.
+     *
+     * <p>A DIAGNOSTIC, not a fix -- it serialises CPU against GPU and costs real frame time. It exists
+     * to answer one question that a one-line measurement raised and nothing else can settle.
+     *
+     * <p>Flipping the {@code VOXY_DRAWCHK} default from 1 to 0 -- i.e. skipping a per-frame CPU readback
+     * of GPU buffers and its log line, and changing NOTHING else -- moves the artefact from 22.1% of
+     * frames over 10,000 near-black px to 85.1%. The cull, the shaders and every other file were
+     * identical between those two runs. So the artefact's RATE depends on how much CPU work the render
+     * thread does: it is a race, and the render thread wins it more often when it is fast. That also
+     * means every baseline this investigation has quoted was measured in a regime whose instrumentation
+     * was itself suppressing the bug.
+     *
+     * <p>If waiting for the GPU each frame removes the artefact, the race is "the render thread draws
+     * before the uploads it depends on have landed", and the fix is a synchronisation point that uses
+     * the existing abstraction ({@code IGpuFence} / {@code RenderBackend.waitForGpuIdle}) rather than a
+     * new mechanism. If it does not, the race is elsewhere -- between the async thread's staging and
+     * the render thread -- and this narrows that too, since the GPU side will have been excluded.
+     */
+    private static final boolean GPU_SYNC = "1".equals(System.getenv("VOXY_GPU_SYNC"));
+
     private final WorldEngine worldIn;
 
 
@@ -586,6 +609,11 @@ public class VoxyRenderSystem {
             // every mesher call throws IdNotYetComputedException →
             // no LOD geometry ever materializes.
             UploadStream.INSTANCE.tick();
+            // See GPU_SYNC. Placed immediately after the frame's uploads are committed, so the stall
+            // covers exactly the copies this frame's draws depend on.
+            if (GPU_SYNC) {
+                me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().waitForGpuIdle();
+            }
             boolean processedThisFrame = this.renderDistanceTracker.setCenterAndProcess(
                     viewport.cameraX, viewport.cameraZ);
             while (processedThisFrame && VoxyClient.isFrexActive()) {
