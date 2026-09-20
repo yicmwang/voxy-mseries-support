@@ -103,6 +103,26 @@ public final class BuiltSectionMask {
         return Math.floorDiv(v, step) * step;
     }
 
+    /**
+     * Whether a section at this chunk offset from the camera is inside the region Sodium RENDERS.
+     *
+     * <p>Sodium renders a Euclidean cylinder of radius {@code renderDistance} centred on the
+     * camera's chunk — the same metric the translucent near-cull in quads.frag uses, and for the
+     * same reason: it is the metric Sodium actually draws in. It MESHES a square, because it builds
+     * every section of every loaded chunk, plus a margin beyond the render distance while chunks
+     * load and unload. Measured at a moved camera: built=779 with 45 sections (5.8%) past the render
+     * distance, out to Chebyshev 10 against rd=8, concentrated in the square's corners — which are
+     * Euclidean up to 11.3 chunks out.
+     *
+     * <p>Every one of those is meshed and never drawn. A mask that believed {@code isBuilt()} alone
+     * culled the LOD there, which is a hole in a ring just outside vanilla's render distance — the
+     * "smaller holes around the edges" the user reported. A section outside this cylinder is not
+     * drawn, whatever its mesh says.
+     */
+    static boolean withinRenderCylinder(final int chunkDx, final int chunkDz, final int rd) {
+        return (long) chunkDx * chunkDx + (long) chunkDz * chunkDz <= (long) rd * rd;
+    }
+
     private IGpuBuffer buffer;
     private int side = -1;
     private int camSecX = Integer.MIN_VALUE;
@@ -181,6 +201,62 @@ public final class BuiltSectionMask {
                 "[Metal-VMASK2 f=%d] vertical span: bits %d..%d of 64 (bias %d => sections %d..%d relative to the camera's)",
                 VMASK_FRAME, minBit < 64 ? minBit : -1, maxBit, Y_BIAS,
                 minBit < 64 ? minBit - Y_BIAS : 0, maxBit - Y_BIAS));
+    }
+
+    /**
+     * Enumerate what the mask CLAIMS vanilla renders, and hold it against the region Sodium is
+     * documented to render: a cylinder of radius {@code renderDistance} chunks around the camera.
+     *
+     * <p>This exists because {@code isBuilt()} answers "Sodium finished a mesh for this section",
+     * which is not the same question as "Sodium draws this section". The mask has always treated
+     * them as the same, and if they differ the mask claims coverage where vanilla draws nothing --
+     * which is a hole, and specifically an EDGE hole, because that is where the two sets diverge.
+     *
+     * <p>Reports the horizontal Chebyshev distance distribution of the set in chunk units. Anything
+     * past the render distance is a section the mask believes is covered and Sodium will not draw.
+     */
+    public static void logBuiltExtent(final int camSecX, final int camSecZ, final int rd) {
+        if (!VMASK_LOG) return;
+        final long[] snapshot;
+        synchronized (BuiltSectionMask.class) {
+            snapshot = BUILT.toLongArray();
+        }
+        if (snapshot.length == 0) return;
+
+        // Bands of one chunk, plus a tail bucket; enough to see the shape without 400 log lines.
+        final int BANDS = 24;
+        final int[] hist = new int[BANDS + 1];
+        int beyondRd = 0;
+        int outsideCylinder = 0;
+        int maxD = 0;
+        int minY = Integer.MAX_VALUE, maxY = Integer.MIN_VALUE;
+        final long r2 = (long) rd * rd;
+        for (final long pos : snapshot) {
+            final int dx = Math.abs(SectionPos.x(pos) - camSecX);
+            final int dz = Math.abs(SectionPos.z(pos) - camSecZ);
+            final int d = Math.max(dx, dz);
+            hist[Math.min(d, BANDS)]++;
+            if (d > maxD) maxD = d;
+            if (d > rd) beyondRd++;
+            // Sodium renders a CYLINDER (fx*fx + fz*fz <= r*r), but it MESHES a square: it builds
+            // every section of every loaded chunk. So the square's corners are meshed and never
+            // rendered, and the mask culls the LOD there -- a hole at the four diagonal edges, which
+            // is where "holes at the edges" would be. This is the count that tests it.
+            if ((long) dx * dx + (long) dz * dz > r2) outsideCylinder++;
+            final int y = SectionPos.y(pos);
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+
+        final StringBuilder b = new StringBuilder();
+        for (int d = 0; d <= BANDS; d++) {
+            if (hist[d] == 0) continue;
+            b.append(String.format("  d%02d%s=%d", d, d == BANDS ? "+" : " ", hist[d]));
+        }
+        me.cortex.voxy.common.Logger.info(String.format(
+                "[Metal-VMASK3 f=%d] built=%d  outsideChebyshev=%d  outsideCYLINDER=%d (%.1f%%)  maxChebyshev=%d (rd=%d)  secY %d..%d%s",
+                VMASK_FRAME, snapshot.length, beyondRd, outsideCylinder,
+                100.0 * outsideCylinder / Math.max(1, snapshot.length), maxD, rd, minY, maxY, b));
     }
 
     /** The mask buffer, or null before the first {@link #update}. */
@@ -283,9 +359,27 @@ public final class BuiltSectionMask {
         // believed otherwise removed LOD sections vanilla never drew. That is a hole above or below
         // vanilla's vertical range, and because the square is camera-relative those holes followed
         // the player.
+        // Sodium MESHES more than it RENDERS, and the mask has to answer the second question.
+        //
+        // Measured, at a camera that had been moved: built=779 with 45 sections (5.8%) beyond the
+        // render distance, out to Chebyshev 10 against rd=8, and a square-corner distribution --
+        // while Sodium renders a EUCLIDEAN CYLINDER of radius renderDistance centred on the camera's
+        // chunk (the same metric quads.frag's translucent near-cull already uses, and the reason it
+        // uses it). So "isBuilt()" includes the square's corners, which are Euclidean up to 11.3
+        // chunks out, and a margin beyond the render distance while chunks load and unload. Every
+        // one of those is meshed and never drawn, and the mask culled the LOD there -- a hole in a
+        // ring just outside vanilla's render distance, which is where the user sees them.
+        //
+        // The filter is the metric Sodium renders in, not a margin: a section outside the cylinder
+        // is not drawn, whatever its mesh says.
         final long[] columnY = new long[newSide * newSide];
         synchronized (BuiltSectionMask.class) {
             for (final long pos : BUILT) {
+                // Distance from the CAMERA's column, because the cylinder is centred there, while
+                // the square's origin is world-anchored.
+                if (!withinRenderCylinder(SectionPos.x(pos) - newCamX, SectionPos.z(pos) - newCamZ, rd)) {
+                    continue;
+                }
                 final int dx = SectionPos.x(pos) - anchorX;
                 final int dz = SectionPos.z(pos) - anchorZ;
                 if (dx < 0 || dz < 0 || dx >= newSide || dz >= newSide) continue;
@@ -296,6 +390,7 @@ public final class BuiltSectionMask {
         }
 
         logPopulation(newSide, anchorX, newCamY, anchorZ, columnY, this.uploads);
+        logBuiltExtent(newCamX, newCamZ, rd);
 
         if (this.buffer != null && this.side == newSide
                 && this.camSecX == anchorX && this.camSecY == newCamY && this.camSecZ == anchorZ

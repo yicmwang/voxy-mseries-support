@@ -197,6 +197,28 @@ class BuiltSectionMaskTest {
                 "the same question from any caller gives the same answer");
     }
 
+
+    @Test
+    void onlySectionsInsideSodiumsRenderCylinderAreClaimed() {
+        // Sodium MESHES a square but RENDERS a Euclidean cylinder. Measured at a moved camera:
+        // built=779 with 45 sections (5.8%) past the render distance, out to Chebyshev 10 against
+        // rd=8, concentrated in the square corners. Every one is meshed and never drawn, so a mask
+        // that counted them culled the LOD in a ring just outside vanilla render distance -- the
+        // edge holes. This is the rule that excludes them, in the metric Sodium draws in.
+        int rd = 8;
+        assertTrue(BuiltSectionMask.withinRenderCylinder(0, 0, rd));
+        assertTrue(BuiltSectionMask.withinRenderCylinder(8, 0, rd), "on the axis at the radius");
+        assertTrue(BuiltSectionMask.withinRenderCylinder(0, -8, rd));
+        assertFalse(BuiltSectionMask.withinRenderCylinder(9, 0, rd), "one past the radius on the axis");
+        // The corners of the Chebyshev square are the case that matters: distance sqrt(8^2+8^2) = 11.3.
+        assertFalse(BuiltSectionMask.withinRenderCylinder(8, 8, rd), "the square corner is outside the circle");
+        assertFalse(BuiltSectionMask.withinRenderCylinder(-8, 8, rd));
+        assertFalse(BuiltSectionMask.withinRenderCylinder(6, 6, rd), "sqrt(72)=8.49 > 8");
+        assertTrue(BuiltSectionMask.withinRenderCylinder(5, 6, rd), "sqrt(61)=7.81 <= 8");
+        // Chebyshev distance alone would have accepted every one of those corners.
+        assertEquals(8, Math.max(Math.abs(8), Math.abs(8)));
+    }
+
     @Test
     void anEmptyMaskCoversNothing() {
         long[] m = empty();
