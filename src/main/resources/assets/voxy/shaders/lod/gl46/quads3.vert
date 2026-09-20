@@ -71,8 +71,36 @@ layout(location = 2) out float voxyFogDist;
 // exactly across merged quads; a per-vertex max(|dx|,|dz|) would overestimate
 // mid-quad wherever a long quad crosses the camera axis) and let the
 // fragment shader take the Chebyshev distance that mirrors MC's square.
-#if defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)
+//
+// 2026-09-19: the same camera-relative offset is what lets the fragment shader find its own CHUNK
+// COLUMN, which is the granularity the built-section cull needs. A LOD node is 2x2 chunks at detail
+// 0 and larger above that, so a node-level decision is coarser than the thing being decided: it can
+// remove a column vanilla never drew (a hole) or keep one it did (a doubled surface). A fragment
+// knows its position, so quads.frag can ask the question per chunk column instead.
+#if (defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)) || defined(VOXY_LOD_CHUNK_CULL)
+#define VOXY_NEEDS_CAM_REL_XZ
+#endif
+#ifdef VOXY_NEEDS_CAM_REL_XZ
+// location 3: the horizontal-only offset the near-cull needs.
 layout(location = 3) out vec2 voxyCamRelXZ;
+#endif
+#ifdef VOXY_LOD_SHOW_DRAWID
+// location 5: the per-draw section index the vertex stage ACTUALLY RECEIVED.
+//
+// On Metal this value does not come from the draw call -- gl_BaseInstance and gl_InstanceID both read 0
+// for drawIndexedPrimitives:indirectBuffer: -- so MetalRenderEncoder pushes it per draw with
+// setVertexBytes at binding 6. A per-draw CONSTANT is the one place a wrong section index can reach the
+// shader, and unlike a buffer read it leaves no trace any CPU-side counter can see. This readout makes
+// it visible: the fragment stage paints the received index, so a screenshot shows what the shader got
+// rather than what the CPU believes it sent.
+layout(location = 5) out flat uint voxyDrawIdOut;
+#endif
+
+#ifdef VOXY_LOD_CHUNK_CULL
+// location 4: the full 3D offset, because the cull asks about a 16x16x16 SECTION and Sodium
+// enforces a vertical render distance -- a horizontal column is not enough to answer it. Kept as a
+// separate varying rather than widening location 3 so the near-cull's existing path is untouched.
+layout(location = 4) out vec3 voxyCamRelPos;
 #endif
 
 vec2 taaShift();
@@ -108,7 +136,16 @@ void main() {
 #else
     uint baseInstanceFix = uint(gl_BaseInstance);
 #endif
+#ifdef VOXY_BI_OFFSET
+    // The position buffer is bound at `baseInstance * 8`, so this draw's entry IS index 0. The index
+    // therefore arrives as buffer state rather than as a pushed constant -- see MetalRenderEncoder.
+    setupQuad(quad, quadData[uint(gl_VertexID)>>2], positionBuffer[0], (gl_VertexID&3) == 1);
+#else
     setupQuad(quad, quadData[uint(gl_VertexID)>>2], positionBuffer[baseInstanceFix], (gl_VertexID&3) == 1);
+#endif
+#ifdef VOXY_LOD_SHOW_DRAWID
+    voxyDrawIdOut = baseInstanceFix;
+#endif
 
     uint cornerId = gl_VertexID&3;
     gl_Position = getQuadCornerPos(quad, cornerId);
@@ -151,17 +188,23 @@ void main() {
     //Note: other data is automatically discarded as it is undefiend and has not been generated
     interData = quad.attributeData;
 
-    #ifdef VOXY_NEEDS_FOG_DIST
+    #if defined(VOXY_NEEDS_FOG_DIST) || defined(VOXY_NEEDS_CAM_REL_XZ) || defined(VOXY_LOD_CHUNK_CULL)
     // Reconstruct the corner's world-relative point in the same way
     // getQuadCornerPos does (kept inline rather than refactoring quad_util
     // to avoid touching the GL path's hot vertex code). cameraSubPos comes
     // from the SceneUniform SSBO declared above; both points share the
-    // baseSectionPos-anchored frame.
+    // baseSectionPos-anchored frame, so their difference is anchor-free and
+    // is the real world-space offset.
     vec2 cornerMask = vec2((cornerId>>1)&1u, cornerId&1u)*quad.lodScale;
     vec3 cornerPoint = quad.basePoint + swizzelDataAxis(quad.axis, vec3(quad.quadSizeAddin*cornerMask, 0));
+    #ifdef VOXY_NEEDS_FOG_DIST
     voxyFogDist = length(cornerPoint - cameraSubPos);
-    #if defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)
+    #endif
+    #ifdef VOXY_NEEDS_CAM_REL_XZ
     voxyCamRelXZ = cornerPoint.xz - cameraSubPos.xz;
+    #endif
+    #ifdef VOXY_LOD_CHUNK_CULL
+    voxyCamRelPos = cornerPoint - cameraSubPos;
     #endif
     #endif
 

@@ -59,6 +59,30 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     /** cmdgen binding for the built-section mask. 0-7 are the draw/metadata table, 8 is statistics. */
     private static final int BUILT_MASK_BINDING = 9;
     /**
+     * Upstream culls in cmdgen.comp, at NODE granularity, by testing whether the node's CENTRE column
+     * is vanilla-built. That cannot express what is needed here, and the reason is structural rather
+     * than a tuning problem: cmdgen emits one command per node and can only drop whole nodes, while
+     * the decision that has to be made is per 16^3 SECTION and in three dimensions. A node at level
+     * `detail` spans (2<<detail) sections per axis, so its centre column says nothing about whether the
+     * sections away from its centre are covered -- and at the vanilla render distance used here (4
+     * chunks, so a 9x9 column mask spanning +/-64 blocks) that leaves most of the near-field LOD drawn
+     * on top of vanilla terrain.
+     *
+     * <p>Measured, not argued: with upstream's cull in place the artefact is present in 98.4% of frames
+     * of the drift run, median 58,080 near-black px, against 20.5% and median 248 for the per-section
+     * cull. At a matched camera and elapsed time the difference is plain -- grey slabs and displaced
+     * water across the mid-field versus coherent terrain.
+     *
+     * <p>So the cull stays in the fragment stage, per section. It needs a binding of its own because
+     * binding 9 is taken on the Metal graphics path by the chunk-bound depth buffer.
+     */
+    private static final int BUILT_MASK_CHUNK_BINDING = 10;
+    /** True when the built-section cull runs at all; VOXY_LOD_BUILT_MASK=0 turns it off. */
+    private static final boolean CULL_ENABLED = !"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"));
+    /** The per-section fragment-stage cull, the one that actually removes the artefact. */
+    private static final boolean CHUNK_CULL = CULL_ENABLED
+            && !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"));
+    /**
      * Terrain shaders. Two paths:
      *   - Iris-patched (legacy {@link Shader.Builder}, GL-only by definition since
      *     the Iris pipeline is GL-gated in RenderPipelineFactory).
@@ -192,10 +216,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // than a render-distance box. The box is a proxy for "where vanilla drew" and is wrong in
         // both directions -- it culls over chunks Sodium has not built (holes at the seam) and
         // keeps LOD over chunks it did build (z-fighting). BuiltSectionMask carries the real set.
-        // VOXY_LOD_BUILT_MASK=0 omits the define for an A/B.
-        if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
-            m.put("VOXY_LOD_BUILT_MASK", "");
-            m.put("BUILT_MASK_BINDING", Integer.toString(BUILT_MASK_BINDING));
+        //
+        // Declared for the FRAGMENT stage, not cmdgen: the decision is per 16^3 section and in three
+        // dimensions, and a node-granular command generator cannot express it. See CHUNK_CULL.
+        if (CHUNK_CULL) {
+            m.put("VOXY_LOD_CHUNK_CULL", "");
+            m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
         }
         m.put("TRANSLUCENT_WRITE_BASE", "1024");
         m.put("TEMPORAL_OFFSET", Integer.toString(TEMPORAL_OFFSET));
@@ -1529,6 +1555,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // cross-backend sampler at binding 0 (blockModelAtlas in quads.frag).
         this.modelStore.bindBuffers(encoder, 3, 4, 0);
         encoder.setBuffer(5, viewport.positionScratchBuffer, 0);
+        // The built-section mask, read by quads.frag's per-section cull. Bound at 10 because 9 is the
+        // chunk-bound depth buffer on this path. The mask is refreshed in the compute pass above; this
+        // is where the fragment stage that consumes it gets it.
+        if (CHUNK_CULL && this.builtSectionMask.buffer() != null) {
+            encoder.setBuffer(BUILT_MASK_CHUNK_BINDING, this.builtSectionMask.buffer(), 0);
+        }
         // Texture / sampler binding 1 — MC's 16×16 RGBA8 lightmap, mirrored
         // into a Shared-storage Metal texture each frame (M13 chunk 2).
         LightMapHelper.bindMetal(encoder, 1);
@@ -1733,11 +1765,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // diagnostics at all — a single sample, cause unproven, but the mask-off arm is
                 // the only path this touched, so it goes back to doing nothing there rather than
                 // being left as an unexplained behaviour change for a diagnostic that is moot.
-                if (!"0".equals(System.getenv("VOXY_LOD_BUILT_MASK"))) {
+                // Gated on CULL_ENABLED rather than made unconditional. update() allocates a buffer and
+                // does an UploadStream upload, and it runs from inside an open compute encoder, so
+                // running it while the cull is off is a behaviour change in its own right -- and one
+                // run on that arm hung during load having emitted no render diagnostics at all.
+                // The mask is read by quads.frag, so the bind goes on the graphics path below.
+                if (CULL_ENABLED) {
                     this.builtSectionMask.update(viewport, this.backend);
-                    if (this.builtSectionMask.buffer() != null) {
-                        encoder.setBuffer(BUILT_MASK_BINDING, this.builtSectionMask.buffer(), 0);
-                    }
                 }
                 encoder.setPipeline(this.commandGenPipeline);
                 encoder.setBuffer(0, this.uniform, 0);

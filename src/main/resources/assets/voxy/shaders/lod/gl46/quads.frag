@@ -35,6 +35,42 @@ layout(binding = 9, std430) readonly restrict buffer BoundDepthBuffer {
 };
 #endif
 
+#ifdef VOXY_LOD_CHUNK_CULL
+// Per-SECTION cull of the LOD against the set of sections vanilla has drawn.
+//
+// Three dimensions, deliberately. Sodium enforces a vertical render distance as well as a
+// horizontal one, so "this chunk column has geometry" does not mean the section above or below it
+// does -- and a cull that believes otherwise removes LOD sections vanilla never drew, which is a
+// hole in the air. Two earlier versions got this wrong in different ways: one tested a LOD node's
+// centre column (a node is 2x2 columns at detail 0, so one bit decided four, leaving a hole ring
+// around the rim of vanilla's coverage), and the next tested every column of the node but was
+// still two-dimensional. A fragment knows its own position in all three axes, so it can ask about
+// its own 16x16x16 section and be exact at every detail level.
+//
+// Bindings: 0-5 are the terrain draw's buffer table, 6 is quads3.vert's per-draw UBO, 9 is the
+// Metal chunk-bound depth buffer, so 10 is free for this.
+//
+// Header is EIGHT uints so the uvec2 array starts at byte 32 and is 8-byte aligned, which std430
+// requires for a vec2 array. Must match BuiltSectionMask.HEADER_UINTS exactly.
+layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer BuiltMaskChunkBuffer {
+    uint chunkMaskSide;
+    // The square's origin is WORLD-anchored, not the camera's column: it only moves when the
+    // camera crosses a multiple of the anchor step. Indexing from a fixed world origin is what
+    // stops the culled region's edge sliding along with the player.
+    int chunkMaskAnchorSecX;
+    int chunkMaskCamSecY;
+    int chunkMaskAnchorSecZ;
+    int chunkMaskCamBlockX;
+    int chunkMaskCamBlockY;
+    int chunkMaskCamBlockZ;
+    uint _chunkMaskPad;
+    // One 64-bit vertical bitmask per column, bit (secY - camSecY) + 32. Two uints rather than a
+    // uint64_t because MSL translation of 64-bit GLSL integers is a risk not worth taking for a
+    // value that is only ever shifted and tested.
+    uvec2 chunkMaskColumnY[];
+};
+#endif
+
 //#define DEBUG_RENDER
 
 //TODO: need to fix when merged quads have discardAlpha set to false but they span multiple tiles
@@ -57,9 +93,22 @@ layout(location = 2) in float voxyFogDist;
 #endif
 // Camera-relative horizontal offset for the near-cull's Chebyshev distance
 // (see quads3.vert — the slant-distance cull leaked LOD water inside the MC
-// square from high/diagonal viewpoints). Must mirror quads3.vert's guard.
-#if defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)
+// square from high/diagonal viewpoints). Must mirror quads3.vert's guard
+// EXACTLY: it is also what the per-chunk-column cull uses to find its own chunk
+// column, and a guard that disagrees with the vertex stage's is a compile error
+// in one stage and a silent location mismatch in the other. Both now use the
+// shared VOXY_NEEDS_CAM_REL_XZ macro.
+#if (defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)) || defined(VOXY_LOD_CHUNK_CULL)
+#define VOXY_NEEDS_CAM_REL_XZ
+#endif
+#ifdef VOXY_NEEDS_CAM_REL_XZ
 layout(location = 3) in vec2 voxyCamRelXZ;
+#endif
+#ifdef VOXY_LOD_CHUNK_CULL
+// The full 3D camera-relative offset, for the per-section cull: it asks about a 16x16x16 section,
+// and Sodium's vertical render distance means the horizontal column is not enough to answer it.
+// Must mirror quads3.vert's guard and location exactly.
+layout(location = 4) in vec3 voxyCamRelPos;
 #endif
 
 #ifdef DEBUG_RENDER
@@ -153,7 +202,62 @@ vec4 computeColour(vec2 texturePos, vec4 colour) {
 #endif
 
 
+#ifdef VOXY_LOD_SHOW_DRAWID
+layout(location = 5) in flat uint voxyDrawIdOut;
+#endif
+
 void main() {
+#ifdef VOXY_LOD_SHOW_DRAWID
+    // Paint the section index this vertex stage RECEIVED, 24 bits across RGB. Nothing else runs --
+    // no atlas, no light, no discard -- so the image is a direct readout of the per-draw constant.
+    // A correctly-delivered index is piecewise-constant over each drawn section and matches the draw
+    // order; a coalesced or stuck constant shows the same value over runs of draws, or values that do
+    // not change where the geometry does.
+    // R is a MARKER, not data: exactly 1.0 means "this pixel was painted by the readout", which is what
+    // lets an analysis separate LOD-painted pixels from vanilla terrain and sky without guessing at
+    // colours. The index is the low 16 bits in G,B -- enough because a render list is at most
+    // MAX_QUEUE_SIZE = 200_000, and the valid bound for any one frame is its listCount (measured at
+    // ~5_100 here). So any marked pixel whose decoded index is >= that frame's listCount was never
+    // written by cmdgen: the shader received an index that does not exist, which is the coalesced or
+    // stale per-draw constant this readout exists to catch.
+    outColour = vec4(1.0,
+                     float((voxyDrawIdOut >> 8) & 0xFFu) / 255.0,
+                     float(voxyDrawIdOut & 0xFFu) / 255.0, 1.0);
+    return;
+#endif
+#ifdef VOXY_LOD_CHUNK_CULL
+    // Where the chunk-bound depth mask belongs: before any shading, on every path, so a culled
+    // column costs one buffer read and nothing else. Placed above the magenta/debug early-outs so
+    // a forced-colour bisection still shows exactly what survives the cull.
+    {
+        // The fragment's own world section, in all three axes. Integer floor via an arithmetic
+        // shift, not a truncating cast: the world extends either side of the origin and `>>` floors
+        // a negative int, which is what BuiltSectionMask's own indexing assumes.
+        int secX = (chunkMaskCamBlockX + int(floor(voxyCamRelPos.x))) >> 4;
+        int secY = (chunkMaskCamBlockY + int(floor(voxyCamRelPos.y))) >> 4;
+        int secZ = (chunkMaskCamBlockZ + int(floor(voxyCamRelPos.z))) >> 4;
+        int sd = int(chunkMaskSide);
+        // 0-based from the world-anchored origin. No centre bias, and nothing here depends on where
+        // the camera is inside the square -- which is what stops the boundary being dragged.
+        int cx = secX - chunkMaskAnchorSecX;
+        int cz = secZ - chunkMaskAnchorSecZ;
+        // Outside the square, or outside the +/-512 blocks the per-column bitmask spans, is NOT
+        // covered: keep the LOD. An over-drawn LOD z-fights, an under-drawn one shows the void.
+        if (cx >= 0 && cz >= 0 && cx < sd && cz < sd) {
+            int bit = (secY - chunkMaskCamSecY) + 32;
+            if (bit >= 0 && bit < 64) {
+                uvec2 col = chunkMaskColumnY[cz * sd + cx];
+                uint word = bit < 32 ? col.x : col.y;
+                if ((word & (1u << uint(bit & 31))) != 0u) {
+                    // Vanilla draws this exact 16x16x16 section. Removing only this section is what
+                    // keeps the section above it -- which vanilla may not draw at all -- intact,
+                    // and that vertical case is what the missing LOD chunks turned out to be.
+                    discard;
+                }
+            }
+        }
+    }
+#endif
 #ifdef VOXY_LOD_FORCE_MAGENTA
     // VOXY_LOD_FORCE_MAGENTA=1 -- bisection, not a feature. Emits solid magenta as the FIRST
     // statement of main(), before the depth-bound test, the alpha discard, the tile clamp and
