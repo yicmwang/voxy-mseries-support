@@ -168,24 +168,32 @@ public final class BuiltSectionMask {
     }
 
     /**
-     * The same question in three dimensions, which is the one that matters when the camera is not
-     * at ground level.
+     * Claim a section when it is inside the horizontal radius AND within the vertical bound. A cylinder
+     * with a vertical cap -- neither the bare cylinder nor the sphere.
      *
-     * <p>The horizontal cylinder above is right at ground level and wrong in the air. Sodium's
-     * visible set is a frustum traversal limited by its build distance, so at altitude a section
-     * directly below the camera is far outside the drawn region while still being 0 chunks away
-     * horizontally — and the mask claimed it, so the LOD was culled there and nothing drew it. The
-     * user's report names it exactly: "when I fly up high, the top surface of LODs close to me is
-     * fully absent and I can see straight through; top surfaces for LODs far from me are just
-     * fine". Near LODs are the ones directly under the camera; far ones are outside the horizontal
-     * radius anyway, so they were never claimed and were never broken.
+     * <p>Why not the sphere it used to be. A sphere is strictly smaller than the horizontal radius
+     * wherever the camera is not level with the terrain, so every section in the difference is drawn by
+     * vanilla AND by the LOD. At rd 8 a section 7 chunks out and 4 sections down scores 49+16 = 65 > 64
+     * and was dropped while vanilla still drew it, and the shortfall grows with rd -- worst in the near
+     * field, which is where it was reported. The comment here used to defend the sphere as "the safe
+     * direction", but that reasoning is about holes (under-claiming keeps the LOD) and is exactly
+     * backwards for the symptom it produces.
      *
-     * <p>A sphere is also the safe direction if Sodium's rule is looser vertically than a sphere:
-     * under-claiming keeps the LOD where vanilla draws (a z-fight), over-claiming removes it where
-     * vanilla does not (a hole), and holes are what this whole exercise has been chasing.
+     * <p>Why not Sodium's own {@code OcclusionCuller.testDistance} either, which is
+     * {@code (dx*dx+dz*dz < rd*rd) || (|dy| < rd)}. That is a union, so the horizontal term alone claims
+     * a section directly below the camera however far down it is -- {@code (0, 14, 0)} is accepted at
+     * rd 8. Vanilla does not draw that, and claiming it is precisely the altitude hole the user
+     * reported when flying high ("the top surface of LODs close to me is fully absent and I can see
+     * straight through"). So the vertical term is a CONJUNCTION here, not a disjunction: it keeps that
+     * fix while dropping the sphere's horizontal shortfall.
+     *
+     * <p>Be clear about what this is. Vanilla's real acceptance is a frustum traversal, and no distance
+     * rule can express visibility -- so this is a proxy that is now wrong in the cheaper direction for
+     * the cases measured. The principled fix is to feed the mask from what Sodium actually RENDERS rather
+     * than what it meshes; until then, this is the shape that satisfies both reports.
      */
     static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
-        return (long) dx * dx + (long) dy * dy + (long) dz * dz <= (long) rd * rd;
+        return ((long) dx * dx + (long) dz * dz) < (long) rd * rd && Math.abs(dy) < rd;
     }
 
     private IGpuBuffer buffer;

@@ -224,20 +224,45 @@ class BuiltSectionMaskTest {
     void sectionsFarBelowTheCameraAreNotClaimed() {
         // The user's altitude report: flying high, the top surface of NEAR LODs is absent and you
         // see straight through, while FAR LODs are fine. Near LODs sit directly under the camera, so
-        // they are zero chunks away horizontally -- the old horizontal-only test claimed them
-        // whatever their height, while vanilla (a frustum traversal limited by its build distance)
-        // was not drawing them. Far LODs are outside the horizontal radius anyway, so they were
-        // never claimed and never broke, which is why the symptom split that way.
+        // they are zero chunks away horizontally -- a horizontal-only test claimed them whatever
+        // their height, while vanilla (a frustum traversal limited by its build distance) was not
+        // drawing them. Far LODs are outside the horizontal radius anyway, so they were never claimed
+        // and never broke, which is why the symptom split that way.
+        //
+        // This is why the vertical term is a CONJUNCTION and not Sodium's disjunction: with
+        // `horizontal < rd || |dy| < rd`, the horizontal term alone would claim (0, 14, 0) and this
+        // report would come back.
         int rd = 8;
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 0, 0, rd));
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, near ground");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, -8, 0, rd), "directly above, at the radius");
+        assertFalse(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
+                "at the vertical bound, which is exclusive: 256 blocks down is not drawn");
         assertFalse(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd),
                 "224 blocks straight down is outside 128, and vanilla does not draw it");
         assertFalse(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
-        // The corner case in three dimensions: inside the horizontal cylinder but far in Y.
-        assertFalse(BuiltSectionMask.withinRenderDistance(7, 7, 0, rd), "sqrt(49+49)=9.9 > 8");
-        assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd), "sqrt(48)=6.9 <= 8");
+        // Inside the horizontal radius but far in Y: still not claimed, because the cap is what holds
+        // the altitude fix.
+        assertFalse(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd), "horizontal ok, vertical not");
+    }
+
+
+    @Test
+    void sectionsInsideTheHorizontalRadiusWithModerateDepthAreClaimed() {
+        // The reported over-draw, and the case the sphere got wrong. These are sections vanilla DRAWS
+        // -- they are inside the horizontal render radius -- that the old 3-D sphere dropped, so the
+        // LOD was drawn on top of them. The band is `dx^2+dz^2 < rd^2 <= dx^2+dy^2+dz^2`.
+        int rd = 8;
+        // 7 chunks out, 4 sections down: vanilla draws it (7 < 8), the sphere scored 49+16 = 65 > 64.
+        assertTrue(BuiltSectionMask.withinRenderDistance(7, 4, 0, rd), "the sphere dropped this");
+        // The two-axis twin: horizontal 5^2+5^2 = 50 < 64, and the sphere scored 50+16 = 66 > 64.
+        assertTrue(BuiltSectionMask.withinRenderDistance(5, 4, 5, rd), "and its two-axis twin");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 7, 0, rd), "straight down, inside the cap");
+        // Still outside: the horizontal radius is the hard edge, and it is exclusive.
+        assertFalse(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd));
+        assertFalse(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "sqrt(72) = 8.49 > 8");
+        // The old sphere accepted this one and the new rule does not: 4^2+4^2+4^2 = 48 <= 64, but
+        // |dy| = 4 < 8 so both agree here -- kept as a guard that the cap did not tighten the near field.
+        assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd));
     }
 
 
