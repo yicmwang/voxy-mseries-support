@@ -192,6 +192,11 @@ public class VoxyClient implements ClientModInitializer {
         //
         // Re-issuing the command is immune to the gamerule API change and costs one command per
         // REPIN_TICKS. It also self-corrects if a later `/time add` or a sleeping player moves it.
+        // VOXY_DEV_TIME_HOLD=0 restores the pre-fix behaviour — set the clock once and let the
+        // daylight cycle walk it away — so "held" and "drifting" can be compared as one runtime
+        // switch on one SHA rather than as two builds. A rebuild between arms is the confound this
+        // project keeps paying for; a switch is not.
+        final boolean holdClock = !"0".equals(System.getenv("VOXY_DEV_TIME_HOLD"));
         String devTime = System.getenv("VOXY_DEV_TIME");
         if (devTime != null && !devTime.isBlank()) {
             final String timeArg = devTime.trim();
@@ -223,11 +228,16 @@ public class VoxyClient implements ClientModInitializer {
                             commands.performPrefixedCommand(source, cmd);
                         }
                         repinCountdown[0] = REPIN_TICKS;
-                        Logger.info("VOXY_DEV_TIME active: world clock held at '" + timeArg
-                                + "' by re-issuing time set every " + REPIN_TICKS + " ticks"
-                                + " (the doDaylightCycle gamerule does not apply on 26.2)");
+                        Logger.info("VOXY_DEV_TIME active: world clock "
+                                + (holdClock
+                                        ? "held at '" + timeArg + "' by re-issuing time set every "
+                                                + REPIN_TICKS + " ticks (the doDaylightCycle gamerule"
+                                                + " does not apply on 26.2)"
+                                        : "set to '" + timeArg + "' ONCE and left to drift"
+                                                + " (VOXY_DEV_TIME_HOLD=0)"));
                         return;
                     }
+                    if (!holdClock) return;
                     if (repinCountdown[0]-- > 0) return;
                     repinCountdown[0] = REPIN_TICKS;
                     commands.performPrefixedCommand(source, "time set " + timeArg);
