@@ -38,16 +38,22 @@ public class MetalRenderBackend implements RenderBackend {
     private long activeCommandBuffer = 0;
 
     /**
-     * VOXY_SUBMIT_ORDER=1 makes the guest branch of {@link #submit()} actually wait for the frame it
-     * just committed. See the block in submit() for the full trace; the short version is that
-     * flushFrame() commits without waiting, three CPU-side reads depend on the result mid-frame, and
-     * the guest branch's own comment claims a completeness it does not provide.
+     * Whether the guest branch of {@link #submit()} waits for the frame it just committed. ON by
+     * default, because it is the fix for bug 3, not an experiment: the guest branch's own comment
+     * claims the work is "committed and complete, making it CPU-visible for the draw path's
+     * baseInstance read", and without this wait that claim is false.
      *
-     * <p>This is the switch the race audit asked to be re-run: an equivalent one was added in 4d5cbd92
-     * and reverted in 90d94c6f with no recorded result, and nothing under the log directory mentions
-     * it, so that bisection appears never to have actually been run.
+     * <p>The failure it fixes: {@code flushFrame()} commits without waiting, and Metallum's encoder
+     * awaits three submits BACK from a counter that STARTS at 3, so the first three submits wait for
+     * nothing. MetalRenderEncoder then reads {@code baseInstance} out of drawCallBuffer on the CPU,
+     * per draw, and pushes it as the per-draw constant; a stale read gives the WRONG SECTION'S ORIGIN
+     * while the draw keeps its own quads and their baked light -- bug 3's symptom, lighting included.
+     *
+     * <p>{@code VOXY_SUBMIT_ORDER=0} turns it off, for a controlled A/B or to measure its cost. Note
+     * the polarity is deliberately the default-ON idiom, which is correct here and was wrong for the
+     * debug readouts that once defaulted on by accident.
      */
-    private static final boolean SUBMIT_ORDER = "1".equals(System.getenv("VOXY_SUBMIT_ORDER"));
+    private static final boolean SUBMIT_ORDER = !"0".equals(System.getenv("VOXY_SUBMIT_ORDER"));
     /** False when the active buffer belongs to Metallum and must not be committed or released. */
     private boolean ownsActiveCommandBuffer = true;
     /** Lazily-opened MTLBlitCommandEncoder on the active buffer for stream copies; 0 when closed. */
