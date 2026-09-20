@@ -550,30 +550,31 @@ public class VoxyRenderSystem {
     }
 
     /**
-     * VOXY_ATLAS_SYNC=0 disables the per-frame wait before the model-atlas upload. ON by default: it is
-     * a correctness fix, not an experiment.
+     * VOXY_ATLAS_SYNC=1 enables a per-frame wait before the model-atlas upload. OFF by default: the
+     * hazard is real but its symptom has not been observed, so it does not earn a second full drain
+     * per frame in the shipped build.
      *
-     * <p>The hazard: the bakery writes freshly baked tiles into the block model atlas inside
-     * {@code modelService.tick()}, which runs AFTER this frame's LOD draws have been submitted, with
-     * frames N-1 and N-2 still executing on the GPU. The write lowers to a bare
-     * {@code mtlTextureReplaceRegion} (MetalTexture:163-172) -- a host memcpy that Metal does not order
+     * <p>The hazard, for when it is wanted: the bakery writes freshly baked tiles into the block model
+     * atlas inside {@code modelService.tick()}, which runs AFTER this frame's LOD draws have been
+     * submitted, with frames N-1 and N-2 still executing on the GPU. The write lowers to a bare
+     * {@code mtlTextureReplaceRegion} (MetalTexture:163-172) -- a host memcpy Metal does not order
      * against command buffers already committed on the queue. A tile caught mid-copy reads alpha 0,
      * which for a {@code useDiscard()} quad hits the {@code discard} and gives a hole, and otherwise
-     * gives rgb 0: an opaque black fragment with a correct silhouette and a healthy draw count.
+     * gives rgb 0: a dark fragment whose silhouette is nonetheless CORRECT.
      *
-     * <p>Why it is worth fixing even though it costs a stall: the atlas changes ONLY when a bake lands,
-     * so it is a frame-to-frame difference at a moment when nothing about the camera or the world has
-     * changed -- which is exactly the signature the captures have been showing. And the asymmetry is
-     * telling: the model SSBO and the biome colour uploads in the same method already go through
-     * UploadStream, which is fence-tracked. Only the texture path was left unguarded.
+     * <p>That symptom is deliberately spelled out because it is NOT bug 3. Bug 3 was geometry
+     * completely out of place -- wrong shapes in wrong sections. This is darkness and holes, a
+     * different failure with a different cause, and it is here on its own merits rather than as
+     * anything adjacent to the bug that was fixed. The user caught that conflation in the commit
+     * message this replaced, and it is the third time a darkness symptom has been reached for to
+     * explain something where the SHAPE was the thing that mattered.
      *
-     * <p>Cost, stated plainly: this is a second full drain per frame, on top of the one the submit
-     * ordering already takes, so it will make the frame slower. It is correctness-first, and the
-     * stall-free version is double-buffering the atlas -- writing to the tile the draws are not
-     * sampling -- which is invasive because the atlas is bound at a shader binding and indexed by the
-     * model SSBO.
+     * <p>Turned off after the user played with it on: zero flashing either way, the lag was acceptable
+     * but the wait is a second full drain per frame, and no dark-but-correctly-shaped fragments were
+     * reported. The stall-free version, if it is ever needed, is double-buffering the atlas -- invasive,
+     * because the atlas is bound at a shader binding and indexed by the model SSBO.
      */
-    private static final boolean ATLAS_SYNC = !"0".equals(System.getenv("VOXY_ATLAS_SYNC"));
+    private static final boolean ATLAS_SYNC = "1".equals(System.getenv("VOXY_ATLAS_SYNC"));
 
     /**
      * VOXY_FRAME_SLEEP_MS=<n>: idle the render thread for n milliseconds at the top of each frame.
