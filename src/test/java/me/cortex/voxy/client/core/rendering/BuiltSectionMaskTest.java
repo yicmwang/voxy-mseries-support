@@ -208,8 +208,13 @@ class BuiltSectionMaskTest {
         // edge holes. This is the rule that excludes them, in the metric Sodium draws in.
         int rd = 8;
         assertTrue(BuiltSectionMask.withinRenderCylinder(0, 0, rd));
-        assertTrue(BuiltSectionMask.withinRenderCylinder(8, 0, rd), "on the axis at the radius");
-        assertTrue(BuiltSectionMask.withinRenderCylinder(0, -8, rd));
+        // WAS assertTrue. The boundary is STRICT, because Sodium's is: OcclusionCuller.testDistance is
+        // `a < c*c`, so a section exactly at the radius is not drawn. An inclusive test here claims a
+        // one-section ring around the whole circle that vanilla leaves empty -- at RD 8, ~50 columns of
+        // culled LOD with nothing behind it. Same class of error as the slab term, in miniature.
+        assertFalse(BuiltSectionMask.withinRenderCylinder(8, 0, rd), "exactly at the radius is not drawn");
+        assertTrue(BuiltSectionMask.withinRenderCylinder(7, 0, rd), "one inside it is");
+        assertFalse(BuiltSectionMask.withinRenderCylinder(0, -8, rd));
         assertFalse(BuiltSectionMask.withinRenderCylinder(9, 0, rd), "one past the radius on the axis");
         // The corners of the Chebyshev square are the case that matters: distance sqrt(8^2+8^2) = 11.3.
         assertFalse(BuiltSectionMask.withinRenderCylinder(8, 8, rd), "the square corner is outside the circle");
@@ -269,12 +274,27 @@ class BuiltSectionMaskTest {
         // The two-axis twin: horizontal 5^2+5^2 = 50 < 64, and the sphere scored 50+16 = 66 > 64.
         assertTrue(BuiltSectionMask.withinRenderDistance(5, 4, 5, rd), "and its two-axis twin");
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 7, 0, rd), "straight down, inside the cap");
-        // These two were assertFalse under the conjunction, which treated the horizontal radius as the
-        // only term. Under Sodium's union the vertical slab term claims them: |dy| < rd, so they are
-        // drawn by vanilla at the camera's own level and must be culled. Refusing them is the
-        // corner-band over-draw -- see sectionsInARenderedColumnAreClaimedHoweverDeep.
-        assertTrue(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd), "the slab term claims it");
-        assertTrue(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "and this one: |dy| = 4 < 8");
+        // THESE TWO WERE assertTrue, AND THAT WAS THE BUG THEY PINNED. They asserted that Sodium's
+        // union -- (dx^2+dz^2 < rd^2) || (|dy| < rd) -- claims them via the vertical slab term, on the
+        // reasoning that Sodium's own rule must be the right one for a cull that mirrors Sodium.
+        //
+        // It is the right rule for Sodium, which applies it as a TRAVERSAL bound and then clips the
+        // result by the frustum and the occlusion tree, so its slab term never becomes claimed ground.
+        // Applied as the CLAIM rule over the meshed set it does: on flat terrain every section shares
+        // the camera's section Y, so |dy| = 0 < rd holds everywhere and the horizontal radius stops
+        // mattering at all. Measured on the superflat fixture at RD 8:
+        //
+        //   built=754  outsideChebyshev=497  outsideRenderDistance3D=0 (0.0%)
+        //   maxChebyshev=31 (rd=8)  secY -4..-4
+        //
+        // Half the set beyond Chebyshev 8, reaching 31 chunks against a render distance of 8, and
+        // nothing refused. The mask culled the LOD out to 31 chunks where vanilla drew to 8, so
+        // everything between was culled LOD with nothing behind it -- the void edge at the LOD/vanilla
+        // intersection, with its boundary at the MESHED set's edge, which is why it drifted as chunks
+        // loaded and unloaded.
+        assertFalse(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd),
+                "outside the radius: the slab term that used to claim this was the bug");
+        assertFalse(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "sqrt(72) = 8.49 > 8");
         assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd));
     }
 
@@ -290,10 +310,12 @@ class BuiltSectionMaskTest {
         assertTrue(BuiltSectionMask.worthKeeping(0, 0, 0, rd));
         assertTrue(BuiltSectionMask.worthKeeping(rd, 0, 0, rd), "at the radius");
         assertTrue(BuiltSectionMask.worthKeeping(rd + 3, 0, 0, rd), "just outside, could come back");
-        // WAS assertFalse. It changed because the claim rule did: the union's vertical slab term claims
-        // |dy| < rd at any horizontal distance inside the square, so this section is claimed NOW and
-        // pruning it would under-claim. The addressable bound is what still holds the set in check.
-        assertTrue(BuiltSectionMask.worthKeeping(rd + 5, 0, 0, rd), "claimed by the slab term now");
+        // WAS assertTrue, and it was there only to keep step with the slab term: while the claim rule
+        // was the union it claimed |dy| < rd at any horizontal distance, so this had to be kept or
+        // pruning would have under-claimed. With the slab term gone the claim rule is the radius
+        // alone, so this is outside it again and only the margin saves it -- which is what the line
+        // above tests. See sectionsInsideTheHorizontalRadiusWithModerateDepthAreClaimed.
+        assertFalse(BuiltSectionMask.worthKeeping(rd + 5, 0, 0, rd), "outside the radius and the margin");
         assertFalse(BuiltSectionMask.worthKeeping(0, 40, 0, rd), "left far below, past the bit span");
         assertFalse(BuiltSectionMask.worthKeeping(100, 0, 0, rd), "left far behind, outside the square");
     }

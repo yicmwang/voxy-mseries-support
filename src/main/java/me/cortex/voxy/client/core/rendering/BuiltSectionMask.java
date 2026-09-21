@@ -238,36 +238,46 @@ public final class BuiltSectionMask {
      * drawn, whatever its mesh says.
      */
     static boolean withinRenderCylinder(final int chunkDx, final int chunkDz, final int rd) {
-        return (long) chunkDx * chunkDx + (long) chunkDz * chunkDz <= (long) rd * rd;
+        // Strict, because Sodium's is: OcclusionCuller.testDistance is `a < c*c`, so a section exactly
+        // at the radius is NOT drawn. Inclusive here would claim a one-section ring around the whole
+        // circle that vanilla leaves empty, which at RD 8 is a ~50-column band of culled LOD with
+        // nothing behind it -- small next to the slab term this replaced, but the same kind of error.
+        return (long) chunkDx * chunkDx + (long) chunkDz * chunkDz < (long) rd * rd;
     }
 
     /**
-     * Claim a section when it is inside the horizontal radius AND within the vertical bound. A cylinder
-     * with a vertical cap -- neither the bare cylinder nor the sphere.
+     * Claim a section when its COLUMN is inside the radius of the camera's section. Nothing vertical.
      *
-     * <p>Why not the sphere it used to be. A sphere is strictly smaller than the horizontal radius
-     * wherever the camera is not level with the terrain, so every section in the difference is drawn by
-     * vanilla AND by the LOD. At rd 8 a section 7 chunks out and 4 sections down scores 49+16 = 65 > 64
-     * and was dropped while vanilla still drew it, and the shortfall grows with rd -- worst in the near
-     * field, which is where it was reported. The comment here used to defend the sphere as "the safe
-     * direction", but that reasoning is about holes (under-claiming keeps the LOD) and is exactly
-     * backwards for the symptom it produces.
+     * <p>This is the vanilla render area, section-quantised: a disc of {@code rd} chunks around the
+     * section the player is standing in, which sits still while the player is inside that section and
+     * snaps when they enter the next one. Vanilla renders whole columns of the chunks it draws, so the
+     * vertical extent is the whole column and the only bound needed is the mask's own bit window.
      *
-     * <p>Why not Sodium's own {@code OcclusionCuller.testDistance} either, which is
-     * {@code (dx*dx+dz*dz < rd*rd) || (|dy| < rd)}. That is a union, so the horizontal term alone claims
-     * a section directly below the camera however far down it is -- {@code (0, 14, 0)} is accepted at
-     * rd 8. Vanilla does not draw that, and claiming it is precisely the altitude hole the user
-     * reported when flying high ("the top surface of LODs close to me is fully absent and I can see
-     * straight through"). So the vertical term is a CONJUNCTION here, not a disjunction: it keeps that
-     * fix while dropping the sphere's horizontal shortfall.
+     * <p><b>Why the vertical term was removed, measured.</b> The rule was Sodium's own
+     * {@code OcclusionCuller.testDistance}, {@code (dx²+dz² < rd²) || (|dy| < rd)}, on the reasoning
+     * that Sodium's rule must be right. It is right for Sodium, which applies it as a TRAVERSAL bound
+     * and then clips the result by the frustum and the occlusion tree — so its slab term never
+     * manifests as claimed ground. Applied as the CLAIM rule over the meshed set it does exactly that,
+     * and on flat terrain it is vacuous: every section is at the camera's own section Y, so
+     * {@code |dy| = 0 < rd} holds everywhere and the horizontal radius stops mattering. From
+     * {@code VOXY_VMASK=1} on the superflat fixture at RD 8:
      *
-     * <p>Be clear about what this is. Vanilla's real acceptance is a frustum traversal, and no distance
-     * rule can express visibility -- so this is a proxy that is now wrong in the cheaper direction for
-     * the cases measured. The principled fix is to feed the mask from what Sodium actually RENDERS rather
-     * than what it meshes; until then, this is the shape that satisfies both reports.
+     * <pre>
+     *   built=754  outsideChebyshev=497  outsideRenderDistance3D=0 (0.0%)
+     *   maxChebyshev=31 (rd=8)  secY -4..-4
+     * </pre>
+     *
+     * Half the set is beyond Chebyshev 8 and it reaches **31 chunks**, with nothing refused. So the mask
+     * culled the LOD out to 31 chunks while vanilla drew to 8, and everything in between was culled LOD
+     * with nothing behind it. That is the void edge at the LOD/vanilla intersection, and because its
+     * boundary is the MESHED set's edge, it drifts as chunks load and unload.
+     *
+     * <p>Dropping the slab term also retires the altitude report it was added for: a section directly
+     * below the camera IS in a rendered column, so claiming it is correct, and the earlier "LODs close
+     * to me are absent" came from claiming meshed sections outside the disc, which this no longer does.
      */
     static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
-        return withinRenderCylinder(dx, dz, rd) || Math.abs(dy) < rd;
+        return withinRenderCylinder(dx, dz, rd);
     }
 
     /**
