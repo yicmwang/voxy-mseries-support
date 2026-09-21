@@ -282,6 +282,37 @@ public final class BuiltSectionMask {
      * this capped cylinder of radius 8, so nine tenths of the built set is meshed and never drawn.
      * Refusing it is the whole job.
      */
+    /** Distance from the origin to [lo,hi] on one axis: Sodium's nearestToZero, in BLOCK coordinates. */
+    private static double nearestToZero(final double lo, final double hi) {
+        if (lo > 0.0) return lo;
+        if (hi < 0.0) return hi;
+        return 0.0;
+    }
+
+    /**
+     * Sodium's acceptance test with Sodium's own OPERANDS: the nearest point of the section's box,
+     * inflated by one block on every side (an 18-block box), measured from the CAMERA'S POSITION --
+     * not from its section. The limit is the render distance in BLOCKS.
+     *
+     * <p>This is the correction the user pointed at. Centring the test on the camera's SECTION, as this
+     * class did, quantises the boundary to 16 blocks; Sodium's is quantised to nothing and moves with
+     * the camera. So the two disagree by up to a section near the edge, in the direction the camera sits
+     * off-centre inside its own section -- and where they disagree vanilla draws while the mask refuses,
+     * so the LOD is not culled there. That is the residual edge overdraw.
+     *
+     * <p>Upstream: TraversableTree.java:284 at tag mc26.2-0.9.2, with the inflated-box operand; see
+     * cull.MD 8.10-8.12.
+     */
+    public static boolean sodiumDrawsSection(final double camX, final double camY, final double camZ,
+                                             final int secX, final int secY, final int secZ, final int rd) {
+        final double limit = rd * 16.0;
+        final double bx = (double) (secX << 4), by = (double) (secY << 4), bz = (double) (secZ << 4);
+        final double dx = nearestToZero(bx - 1.0 - camX, bx + 17.0 - camX);
+        final double dy = nearestToZero(by - 1.0 - camY, by + 17.0 - camY);
+        final double dz = nearestToZero(bz - 1.0 - camZ, bz + 17.0 - camZ);
+        return (dx * dx + dz * dz) < (limit * limit) && Math.abs(dy) < limit;
+    }
+
     /** Public so the under-claim audit in the render hook can call the real rule instead of a copy. */
     public static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
         // CHEBYSHEV horizontally, and this is measured rather than derived. Upstream at the pinned tag
@@ -591,8 +622,9 @@ public final class BuiltSectionMask {
                 // the square's origin is world-anchored.
                 // Three-dimensional, not the horizontal cylinder: at altitude the sections below the
                 // camera are the ones this must exclude, and they are zero chunks away horizontally.
-                if (!withinRenderDistance(SectionPos.x(pos) - newCamX, SectionPos.y(pos) - newCamY,
-                                          SectionPos.z(pos) - newCamZ, rd)) {
+                // Sodium's operands, not the camera's section: see sodiumDrawsSection.
+                if (!sodiumDrawsSection(viewport.cameraX, viewport.cameraY, viewport.cameraZ,
+                                        SectionPos.x(pos), SectionPos.y(pos), SectionPos.z(pos), rd)) {
                     continue;
                 }
                 final int dx = SectionPos.x(pos) - anchorX;

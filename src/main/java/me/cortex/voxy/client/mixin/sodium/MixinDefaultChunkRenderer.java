@@ -104,7 +104,8 @@ public abstract class MixinDefaultChunkRenderer {
                 final int dy = region.getChunkY() + LocalSectionIndex.unpackY(idx) - camY;
                 final int dz = region.getChunkZ() + LocalSectionIndex.unpackZ(idx) - camZ;
                 drawn++;
-                if (BuiltSectionMask.withinRenderDistance(dx, dy, dz, rd)) continue;
+                if (BuiltSectionMask.sodiumDrawsSection(camera.x, camera.y, camera.z,
+                        camX + dx, camY + dy, camZ + dz, rd)) continue;
                 refused++;
                 if ((long) dx * dx + (long) dz * dz < (long) rd * rd) {
                     refusedHorizOk++;
