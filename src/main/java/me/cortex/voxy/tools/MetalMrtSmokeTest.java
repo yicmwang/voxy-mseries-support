@@ -224,20 +224,111 @@ public final class MetalMrtSmokeTest {
                 terrainVert, null, "lod/gl46/quads3.vert", terrainFrag,
                 Map.of("VOXY_NO_DEPTH_BOUND", "", "VOXY_FORCE_OPAQUE_ALPHA", "",
                         "VOXY_NO_ATLAS", "", "VOXY_LOD_FLAT_FRAG", ""));
+        // Case 9: THE DECISIVE ONE, and it retires -- or confirms -- §11.3.
+        //
+        // Cases 3, 7 and 8 all pass `terrainVert` with vertCompiled == null, so icbCase recompiles the
+        // vertex from its OWN hardcoded define map (its fragDefines argument reaches only the fragment).
+        // The terrain vertex MSL is therefore byte-identical in all three -- and case 8 PASSES with it.
+        // So case 7's "Vertex shader cannot be used with indirect command buffers" cannot mean the
+        // vertex is incompatible; the same vertex built a pipeline Metal accepted, in the same run.
+        // Case 7's message named the wrong stage, and §11.3's "BOTH stages are implicated" is wrong.
+        //
+        // This case isolates the vertex completely: the real terrain VERTEX against the TOY fragment.
+        //   PASS -> the vertex is ICB-compatible beyond doubt. Stop looking at it; the blocker is
+        //           entirely in quads.frag, and cases 3/7/8's failures are all fragment-side.
+        //   FAIL -> the vertex genuinely is implicated, and §11.3 is right for a reason case 8 hides.
+        // Either way this is one pipeline build, not a bisection of quads3.vert's binding surface.
+        // The fragment is tools/quads_iface.frag, NOT tools/mrt.frag: the terrain vertex writes
+        // `flat uvec4 interData` at location 0 and mrt.frag declares `vec3 vColor` there, so that
+        // pairing fails to LINK ("Fragment input(s) `user(locn0)` mismatching vertex shader output
+        // type(s)") -- a failure that says nothing about ICBs and would have been misread as one.
+        icbCase(backend, 9, "real terrain VERTEX + interface-matched toy fragment (isolates the vertex)",
+                terrainVert, null, "lod/gl46/quads3.vert",
+                Files0.frag(shadersRoot, "tools/quads_iface.frag"), toyFragDefines);
+        // Cases 8 and 9 disagree: the SAME terrain vertex, and 8 PASSES while 9 FAILS with the vertex
+        // message. Cases 10 and 11 separate the two explanations.
+        //
+        // Case 10 -- §11.4's candidate #1, and the highest-value answer in this probe. VOXY_METAL_BI_FIX
+        // is the binding-6 per-draw UBO the Metal baseInstance workaround pushes (MetalRenderEncoder
+        // :217-222). An ICB supplies baseInstance natively, so if a pipeline that ALSO reads a pushed
+        // per-draw constant is what Metal refuses, then deleting the workaround removes the per-draw
+        // CPU read, the drain, AND the ICB blocker in one move.
+        icbCase(backend, 10, "real terrain VERTEX WITHOUT VOXY_METAL_BI_FIX (is binding 6 the trigger?)",
+                terrainVert, null, "lod/gl46/quads3.vert",
+                Files0.frag(shadersRoot, "tools/quads_iface.frag"), toyFragDefines,
+                Map.of("NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0",
+                        "DOWN_FACE_TINT", "0.5", "Z_AXIS_FACE_TINT", "0.8",
+                        "X_AXIS_FACE_TINT", "0.6"));
+        // Case 11 -- the same vertex again, against a fragment that declares NO inputs. If this passes
+        // where case 9 fails, the trigger is the fragment's input interface (dropped by quads.frag's
+        // FLAT early-out, which is why case 8 passes) and the vertex is exonerated.
+        icbCase(backend, 11, "real terrain VERTEX + NO-INPUT fragment (is it the fragment's interface?)",
+                terrainVert, null, "lod/gl46/quads3.vert",
+                Files0.frag(shadersRoot, "tools/noinput.frag"), toyFragDefines);
+        // Case 11 settled that the terrain VERTEX is ICB-compatible and case 10 that binding 6 is not
+        // the trigger. What is left is the vertex->fragment interpolant interface: it fails with a
+        // fragment that declares quads3.vert's two varyings and passes with one that declares none.
+        // These two split that interface in half, to name the member rather than the whole.
+        icbCase(backend, 12, "real terrain VERTEX + fragment declaring only `vec2 uv` (location 1)",
+                terrainVert, null, "lod/gl46/quads3.vert",
+                Files0.frag(shadersRoot, "tools/uv_only.frag"), toyFragDefines);
+        icbCase(backend, 13, "real terrain VERTEX + fragment declaring only `flat uvec4 interData`",
+                terrainVert, null, "lod/gl46/quads3.vert",
+                Files0.frag(shadersRoot, "tools/idata_only.frag"), toyFragDefines);
+        // Case 14 -- THE FIX, PROTOTYPED. Case 13 names `flat uvec4 interData` as the blocker; this
+        // patches quads3.vert to carry the same bits in a float varying while KEEPING `flat`, and pairs
+        // it with tools/idata_float.frag. PASS => the cause is the integer type, and the fix is a
+        // two-shader bitcast. FAIL => the cause is the `flat` qualifier, and interData must leave the
+        // varying interface altogether.
+        final String FLAT_VAR_DECL = "layout(location = 0) out flat uvec4 interData;";
+        final String FLOAT_VAR_DECL = "layout(location = 0) out flat vec4 interData;";
+        final String VAR_ASSIGN = "interData = quad.attributeData;";
+        final String FLOAT_ASSIGN = "interData = uintBitsToFloat(quad.attributeData);";
+        String floatIfaceVert = terrainVert
+                .replace(FLAT_VAR_DECL, FLOAT_VAR_DECL)
+                .replace(VAR_ASSIGN, FLOAT_ASSIGN);
+        // A `replace` that silently does not match would hand this case the UNPATCHED vertex, whose
+        // fragment interface cannot link -- a FAIL that says nothing about the fix. Verify the patch
+        // landed rather than trusting the result.
+        if (floatIfaceVert.contains(FLAT_VAR_DECL) || !floatIfaceVert.contains(FLOAT_VAR_DECL)
+                || !floatIfaceVert.contains(FLOAT_ASSIGN)) {
+            System.out.println("  case 14 SKIPPED: the quads3.vert patch did not apply — the probe "
+                    + "would have tested the unpatched shader and its FAIL would have meant nothing");
+        } else {
+            icbCase(backend, 14, "PATCHED vertex: interData as `flat vec4` + floatBitsToUint (THE FIX)",
+                    floatIfaceVert, null, "lod/gl46/quads3.vert (patched)",
+                    Files0.frag(shadersRoot, "tools/idata_float.frag"), toyFragDefines);
+        }
     }
 
-    /** One ICB case. Reports acceptance or Metal's own rejection text; never throws. */
+    /**
+     * The vertex defines every case below compiles with: the terrain face-tint baseline plus
+     * {@code VOXY_METAL_BI_FIX}, i.e. the binding-6 per-draw UBO that the Metal baseInstance
+     * workaround pushes. Named rather than inlined so a bisection can vary it — which is the whole
+     * point of the {@code vertDefines} overload underneath.
+     */
+    private static final Map<String, String> TERRAIN_VERT_DEFINES = Map.of(
+            "NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0", "DOWN_FACE_TINT", "0.5",
+            "Z_AXIS_FACE_TINT", "0.8", "X_AXIS_FACE_TINT", "0.6", "VOXY_METAL_BI_FIX", "");
+
+    /** One ICB case, compiled with {@link #TERRAIN_VERT_DEFINES}. Never throws. */
     private static void icbCase(MetalRenderBackend backend, int n, String label,
                                 String vertGlsl, RuntimeShaderCompiler.Result vertCompiled,
                                 String fragPath, String fragGlsl, Map<String, String> fragDefines) {
+        icbCase(backend, n, label, vertGlsl, vertCompiled, fragPath, fragGlsl, fragDefines,
+                TERRAIN_VERT_DEFINES);
+    }
+
+    /** One ICB case with an explicit vertex define map, for bisecting the vertex stage. */
+    private static void icbCase(MetalRenderBackend backend, int n, String label,
+                                String vertGlsl, RuntimeShaderCompiler.Result vertCompiled,
+                                String fragPath, String fragGlsl, Map<String, String> fragDefines,
+                                Map<String, String> vertDefines) {
         IGpuPipeline pipeline = null;
         try {
             RuntimeShaderCompiler.Result v = vertCompiled != null ? vertCompiled
                     : RuntimeShaderCompiler.compile(vertGlsl, RuntimeShaderCompiler.Stage.VERTEX,
-                            Map.of("NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0",
-                                    "DOWN_FACE_TINT", "0.5", "Z_AXIS_FACE_TINT", "0.8",
-                                    "X_AXIS_FACE_TINT", "0.6", "VOXY_METAL_BI_FIX", ""),
-                            RuntimeShaderCompiler.Target.METAL_MSL);
+                            vertDefines, RuntimeShaderCompiler.Target.METAL_MSL);
             RuntimeShaderCompiler.Result f = RuntimeShaderCompiler.compile(fragGlsl,
                     RuntimeShaderCompiler.Stage.FRAGMENT, fragDefines,
                     RuntimeShaderCompiler.Target.METAL_MSL);
