@@ -938,6 +938,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             m.put("VOXY_LOD_CHUNK_CULL", "");
             m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
         }
+        // VOXY_LOD_CULL_SHOW=1: paint culled fragments red instead of discarding them. A diagnostic,
+        // and the only way to tell a cull boundary apart from the edge of Voxy's own LOD coverage --
+        // both are "no magenta" in a forced-colour frame. Paired with VOXY_LOD_FORCE_MAGENTA the frame
+        // reads MAGENTA = LOD drawn, RED = culled by the section mask, SKY = no LOD geometry.
+        if ("1".equals(System.getenv("VOXY_LOD_CULL_SHOW"))) {
+            m.put("VOXY_LOD_CULL_SHOW", "");
+        }
         // VOXY_LOD_SHOW_DRAWID=1: paint the per-draw section index the vertex stage received. Injected
         // into the TERRAIN defines so quads3.vert/quads.frag see it, and into the common map so both LOD
         // passes get it -- they read the same pushed constant. Metal-specific concern: on GL the index

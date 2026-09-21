@@ -252,7 +252,18 @@ void main() {
                     // Vanilla draws this exact 16x16x16 section. Removing only this section is what
                     // keeps the section above it -- which vanilla may not draw at all -- intact,
                     // and that vertical case is what the missing LOD chunks turned out to be.
+#ifdef VOXY_LOD_CULL_SHOW
+                    // CULL_SHOW=1: paint what the cull removes instead of discarding it. Without this
+                    // a hole in the LOD has two possible causes that look identical -- the cull
+                    // removed it, or there is no LOD geometry there at all -- so a screenshot cannot
+                    // tell a cull boundary from the edge of Voxy's own coverage. With it, combined
+                    // with VOXY_LOD_FORCE_MAGENTA, the frame separates into three:
+                    //   MAGENTA = LOD drawn   RED = culled by the section mask   SKY = no LOD geometry
+                    outColour = vec4(1.0, 0.0, 0.0, 1.0);
+                    return;
+#else
                     discard;
+#endif
                 }
             }
         }
