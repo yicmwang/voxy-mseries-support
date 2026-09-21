@@ -1222,48 +1222,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                         me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP.get(),
                         100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP_DARK.get()
                                 / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP.get())));
-                Logger.info(String.format(
-                        "[Metal-FACE  f=%d] selfLit=%d dark=%.2f%%   neighLit=%d dark=%.2f%%",
-                        this.metalFrame,
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_SELF.get(),
-                        100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_SELF_DARK.get()
-                                / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_SELF.get()),
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH.get(),
-                        100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get()
-                                / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH.get())));
-            }
-            if (me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get() > 0) {
-                Logger.info(String.format(
-                        "[Metal-LITAUD f=%d] meshedFaces=%d  zeroLight=%.2f%%   <- camera-independent; compare THIS across builds",
-                        this.metalFrame,
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get(),
-                        100.0 * me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_DARK.get()
-                                / Math.max(1, me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_FACES.get())));
-                Logger.info(String.format(
-                        "[Metal-DARKSRC f=%d] darkFaces fromAIR=%d  fromSOLID=%d  (both meshing paths)",
-                        this.metalFrame,
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_DARK_FROM_AIR.get(),
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_ALL_DARK_FROM_SOLID.get()));
-                Logger.info(String.format(
-                        "[Metal-CULL  f=%d] byOccludes_fullCube=%d  byOccludes_NONcube=%d  bySameModel=%d  byFullyOpaque=%d",
-                        this.metalFrame,
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_OCCLUDES_FULL.get(),
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_OCCLUDES_PARTIAL.get(),
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_SAME.get(),
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_CULL_FULLY_OPAQUE.get()));
-            }
-            if (me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_FACE_NEIGH_DARK.get() > 0) {
-                Logger.info(String.format(
-                        "[Metal-NDARK f=%d] darkNeigh lightFromAir=%d  lightFromSolid=%d",
-                        this.metalFrame,
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_AIR.get(),
-                        me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_NEIGH_DARK_FROM_SOLID.get()));
-                Logger.info(String.format(
-                        "[Metal-VOXEL2 f=%d] groundAir=%d  dark=%.2f%%   <- the cells a surface face takes its light from",
-                        this.metalFrame,
-                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get(),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND_DARK.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_GROUND.get())));
             }
             Logger.info(String.format(
                     "[Metal-TICK  f=%d] tickWithResults=%d  tickWithUploads=%d  lastResultSectionCount=%d  basicSectionCount=%d",
@@ -1285,15 +1243,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                     me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_UPLOAD_EMPTY_NO_CHILDREN.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_UPLOAD_REAL.get(),
                     me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_TOP_LEVEL_NO_DATA_DEFER.get()));
-            Logger.info(String.format(
-                    "[Metal-GEN   f=%d] called=%d  prepThrow=%d  faceThrow=%d  zeroQ=%d  realQ=%d  lastQ=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_GEN_CALLED.get(),
-                    me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_GEN_PREPARE_THROW.get(),
-                    me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_GEN_FACE_THROW.get(),
-                    me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_GEN_ZERO_QUADS.get(),
-                    me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_GEN_REAL_QUADS.get(),
-                    me.cortex.voxy.client.core.rendering.building.RenderDataFactory.DIAG_GEN_LAST_QUADCOUNT.get()));
             Logger.info(String.format(
                     "[Metal-BAKE  f=%d] invocations=%d  nonzeroPixels=%d  fullAlpha=%d  zeroAlpha=%d  dilateRuns=%d  dilateFilled=%d",
                     this.metalFrame,
