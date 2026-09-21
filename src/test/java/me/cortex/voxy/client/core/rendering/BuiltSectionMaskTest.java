@@ -228,38 +228,36 @@ class BuiltSectionMaskTest {
 
     @Test
     void sectionsInARenderedColumnAreClaimedHoweverDeep() {
-        // THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the point: every assertion below was
-        // assertFalse for deep sections, holding a CONJUNCTION (`horizontal < rd && |dy| < rd`).
+        // THIS TEST HAS NOW BEEN WRONG IN BOTH DIRECTIONS, and the second correction is the important
+        // one because it came from reading the bytecode instead of from reasoning about the docs.
         //
-        // That conjunction refuses 90% of what Sodium builds, measured at the users's render distance:
-        // with VOXY_VMASK=1 on an unpinned ground-level camera at RD 2,
-        //   [Metal-VMASK3] built=192 outsideRenderDistance3D=173 (90.1%) maxChebyshev=6 (rd=2) secY 2..7
-        // and the mask claimed 6 columns out of the 81 addressable while Sodium's mesh set is a 5x5
-        // square of columns, d01=33 d02=52 sections. Columns at Chebyshev 2 were refused unless their
-        // dy was within 1, so most of the terrain at the camera's OWN LEVEL stayed LOD-covered on top
-        // of vanilla. That is the near-field overlap, and it is the cull's own operator, not its feed.
+        // It first asserted the CONJUNCTION and I "fixed" it to the UNION because cull.MD §2.2 recorded
+        // OcclusionCuller.testDistance as `(a < c*c) || (b < c)`. That `||` is a MISREADING. The shipped
+        // sodium-mc26.2-0.9.2-fabric.jar says `&&`:
         //
-        // Sodium's rule is a UNION -- OcclusionCuller.testDistance, called as
-        // testDistance(dx*dx+dz*dz, |dy|, searchDistance) from SectionTree.traverse:
-        //     (a < c*c) || (b < c)   with a = dx^2+dz^2, b = |dy|
-        // so a section passes on EITHER term. The vertical slab term is what claims the corners at the
-        // camera's own level; the horizontal term is what claims a column at any depth.
+        //   testDistance(a, b, c):  if (a >= c*c) return false;  if (b >= c) return false;  return true;
+        //   call site (visitNode):  a = dx*dx + dz*dz,  b = |dy|,  c = searchDistanceRegular
+        //                           if true -> WriteQueue.enqueue(section)   // DRAWN
         //
-        // The cost is the altitude report this conjunction was written for, and it is knowingly
-        // accepted here: a section far below the camera now IS claimed, so if the frustum is not
-        // looking at it the LOD is culled over nothing. No distance rule can tell -- the fix is to feed
-        // the mask from the sections Sodium actually RENDERS (cull.MD 6.1), not to pick a different
-        // operator. Do not "tighten" this back without fixing that first.
+        // So the rule is a capped cylinder, BOTH comparisons strict, and passing it is what draws the
+        // section -- not merely a traversal bound that something else clips.
+        //
+        // And the "90% of built sections refused" figure that prompted the union was never a bug: Sodium
+        // MESHES a Chebyshev square out to ~31 chunks on the fixture while DRAWING a capped cylinder of
+        // radius 8, so nine tenths of the built set is meshed and never drawn. Refusing it is the job.
+        // Applying the union instead claimed the whole meshed square -- measured at
+        // outsideRenderDistance3D=0.0% -- and culled the LOD over ground vanilla never draws, which is
+        // the void edge at the LOD/vanilla intersection.
         int rd = 8;
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 0, 0, rd));
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, near ground");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
-                "the horizontal term alone claims the whole column, and vanilla draws the column");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd),
-                "224 blocks straight down is still in a rendered column -- previously refused here");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
-        assertTrue(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd),
-                "inside the horizontal radius, so claimed whatever its height");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, inside the cap");
+        assertFalse(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
+                "at the cap: strict, as Sodium's is");
+        assertFalse(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd), "well below the cap");
+        assertFalse(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
+        assertFalse(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd),
+                "inside the radius but below the cap: vanilla does not draw it");
+        assertTrue(BuiltSectionMask.withinRenderDistance(4, 7, 4, rd), "inside both");
     }
 
 

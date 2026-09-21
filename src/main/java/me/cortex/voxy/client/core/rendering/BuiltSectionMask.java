@@ -246,38 +246,44 @@ public final class BuiltSectionMask {
     }
 
     /**
-     * Claim a section when its COLUMN is inside the radius of the camera's section. Nothing vertical.
+     * Sodium's own acceptance test for DRAWING a section: a capped cylinder around the camera's
+     * section. Horizontal radius {@code rd} AND vertical half-extent {@code rd}.
      *
-     * <p>This is the vanilla render area, section-quantised: a disc of {@code rd} chunks around the
-     * section the player is standing in, which sits still while the player is inside that section and
-     * snaps when they enter the next one. Vanilla renders whole columns of the chunks it draws, so the
-     * vertical extent is the whole column and the only bound needed is the mask's own bit window.
-     *
-     * <p><b>Why the vertical term was removed, measured.</b> The rule was Sodium's own
-     * {@code OcclusionCuller.testDistance}, {@code (dx²+dz² < rd²) || (|dy| < rd)}, on the reasoning
-     * that Sodium's rule must be right. It is right for Sodium, which applies it as a TRAVERSAL bound
-     * and then clips the result by the frustum and the occlusion tree — so its slab term never
-     * manifests as claimed ground. Applied as the CLAIM rule over the meshed set it does exactly that,
-     * and on flat terrain it is vacuous: every section is at the camera's own section Y, so
-     * {@code |dy| = 0 < rd} holds everywhere and the horizontal radius stops mattering. From
-     * {@code VOXY_VMASK=1} on the superflat fixture at RD 8:
+     * <p><b>Read out of the bytecode, and the documentation in this tree had the operator wrong.</b>
+     * {@code cull.MD} §2.2 records {@code OcclusionCuller.testDistance} as
+     * {@code (a < c*c) || (b < c)} — a union — and two rules were written on the strength of that.
+     * The shipped {@code sodium-mc26.2-0.9.2-fabric.jar} says otherwise:
      *
      * <pre>
-     *   built=754  outsideChebyshev=497  outsideRenderDistance3D=0 (0.0%)
-     *   maxChebyshev=31 (rd=8)  secY -4..-4
+     *   OcclusionCuller.testDistance(float a, float b, float c):
+     *       0: fload_0; fload_2; fload_2; fmul; fcmpg; ifge 18   // if (a &gt;= c*c) return false
+     *       8: fload_1; fload_2;          fcmpg; ifge 18         // if (b &gt;= c)   return false
+     *      14: iconst_1                                          // otherwise true
+     *
+     *   call site, OcclusionCuller.visitNode:
+     *     127: v11*v11 + v13*v13 -&gt; a       // dx*dx + dz*dz
+     *     140: Math.abs(v12)       -&gt; b      // |dy|
+     *     147: testDistance(a, b, searchDistanceRegular)
+     *     158: ifeq 200                       // false: skip the section entirely
+     *     161: WriteQueue.enqueue(section)    // TRUE: THE SECTION IS DRAWN
      * </pre>
      *
-     * Half the set is beyond Chebyshev 8 and it reaches **31 chunks**, with nothing refused. So the mask
-     * culled the LOD out to 31 chunks while vanilla drew to 8, and everything in between was culled LOD
-     * with nothing behind it. That is the void edge at the LOD/vanilla intersection, and because its
-     * boundary is the MESHED set's edge, it drifts as chunks load and unload.
+     * So the test is a CONJUNCTION, and passing it is what enqueues the section for drawing — it is not
+     * merely a traversal bound that something else clips. The union was wrong in the permissive
+     * direction: applied to the meshed set, its {@code |dy| < rd} term is satisfied by every section at
+     * the camera's own level, so on flat terrain it claims the whole meshed square and the horizontal
+     * radius stops mattering. That is the void edge at the LOD/vanilla intersection, and the fix is the
+     * cap, not a bigger radius.
      *
-     * <p>Dropping the slab term also retires the altitude report it was added for: a section directly
-     * below the camera IS in a rendered column, so claiming it is correct, and the earlier "LODs close
-     * to me are absent" came from claiming meshed sections outside the disc, which this no longer does.
+     * <p>Both comparisons are strict, as Sodium's are ({@code <}, not {@code <=}).
+     *
+     * <p>This also retires the "the conjunction refuses 90% of the built set" conclusion. It does, and
+     * that is correct: Sodium MESHES a square out to Chebyshev ~31 on the fixture while DRAWING only
+     * this capped cylinder of radius 8, so nine tenths of the built set is meshed and never drawn.
+     * Refusing it is the whole job.
      */
     static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
-        return withinRenderCylinder(dx, dz, rd);
+        return withinRenderCylinder(dx, dz, rd) && Math.abs(dy) < rd;
     }
 
     /**
