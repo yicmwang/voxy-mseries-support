@@ -193,6 +193,40 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPassSetColorAttachmen
     }
 }
 
+// Reads back what a render pass descriptor's colour attachment slot ACTUALLY holds, after Voxy has
+// set it. Diagnostic only, and it exists because "the pass carries two attachments" has only ever been
+// asserted from the Java builder's list -- the builder's intent, not the descriptor's state. If slot 1
+// is bound to a different texture than intended, or its store action is not STORE, every symptom of the
+// missing [[color(1)]] write follows with no error anywhere.
+//
+// The returned handle is BORROWED: unlike voxy_handle_from this does not take a +1, so Java must not
+// release it. It is only ever compared for identity against a handle from MetalHandleMap, where both
+// sides are the same object address.
+static inline jlong voxy_handle_borrow(id object) {
+    return (jlong)(__bridge void *)object;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPassGetColorAttachmentTexture(
+        JNIEnv *, jclass, jlong descHandle, jint index) {
+    @autoreleasepool {
+        if (descHandle == 0) return 0;
+        MTLRenderPassDescriptor *desc = voxy_handle_cast<MTLRenderPassDescriptor *>(descHandle);
+        id<MTLTexture> tex = desc.colorAttachments[(NSUInteger)index].texture;
+        return tex ? voxy_handle_borrow(tex) : 0;
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPassGetColorAttachmentStoreAction(
+        JNIEnv *, jclass, jlong descHandle, jint index) {
+    @autoreleasepool {
+        if (descHandle == 0) return -1;
+        MTLRenderPassDescriptor *desc = voxy_handle_cast<MTLRenderPassDescriptor *>(descHandle);
+        return (jint)desc.colorAttachments[(NSUInteger)index].storeAction;
+    }
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPassSetDepthAttachment(
         JNIEnv *, jclass, jlong descHandle,

@@ -417,6 +417,36 @@ public final class MetalNative {
     public static final int MTLColorWriteMaskAll = 0xF;
     public static final int MTLColorWriteMaskNone = 0x0;
 
+    /**
+     * Reads back the pixel format a render PIPELINE descriptor actually carries for a slot, as a raw
+     * {@code MTLPixelFormat}. Diagnostic only; -1 for a null descriptor.
+     *
+     * <p>The pass descriptor is measured by {@link #mtlRenderPassGetColorAttachmentTexture}; this is
+     * the other half of the pair. Until it existed, "the pipeline declares two formats" had only been
+     * established by reading the Java loop and the native setter, never by reading the descriptor back.
+     */
+    public static native int mtlRenderPipelineDescriptorGetColorAttachmentFormat(long descriptor, int index);
+
+    /** The write mask the pipeline descriptor actually carries for a slot. Diagnostic only. */
+    public static native int mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(long descriptor, int index);
+
+    /**
+     * Reads back the texture a render pass descriptor's colour attachment slot ACTUALLY holds, after
+     * it has been set. Diagnostic only.
+     *
+     * <p>Exists because "the pass carries two attachments" has only ever been asserted from the Java
+     * builder's list — the builder's intent, not the descriptor's state. The returned handle is
+     * BORROWED (no +1); do not release it. Compare it for identity against a handle from
+     * {@code MetalHandleMap}, which is the same object address.
+     */
+    public static native long mtlRenderPassGetColorAttachmentTexture(long descriptor, int index);
+
+    /**
+     * The store action the descriptor's colour attachment slot actually carries, as a raw
+     * {@code MTLStoreAction}. Diagnostic only. Returns -1 for a null descriptor.
+     */
+    public static native int mtlRenderPassGetColorAttachmentStoreAction(long descriptor, int index);
+
     public static native long mtlNewDepthStencilDescriptor();
     public static native void mtlDepthStencilDescriptorSetCompareFunction(long descriptor, int compareFunction);
     public static native void mtlDepthStencilDescriptorSetDepthWriteEnabled(long descriptor, boolean enabled);

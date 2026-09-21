@@ -643,6 +643,8 @@ public class MetalRenderBackend implements RenderBackend {
      */
     /** Per-pass attachment trace ({@code VOXY_ATTACH_TRACE=1}), independent of the verbose ENC_TRACE. */
     private static long passTraceCount = 0;
+    /** Caps the [Metal-PASSSLOT] diagnostic; see beginRenderPass. */
+    private static int passSlotProbeCount = 0;
 
     /** Prefer a Metallum-untracked encoder for Voxy's passes; {@code VOXY_LOD_DETACHED_ENCODER=0} opts out. */
     /** Borrow Metallum's encoder instead of owning one; {@code VOXY_LOD_BORROW_ENCODER=1} for A/B. */
@@ -812,6 +814,29 @@ public class MetalRenderBackend implements RenderBackend {
             // colour is printed too: with VOXY_LOD_DEBUG_CLEAR=1 it is magenta (1,0,1,1), so a line
             // showing that proves the pass really is built against the frame's attachments.
             int nColors = desc.colorAttachments().size();
+            // VOXY_PASS_SLOT_PROBE=1: read back what the descriptor ACTUALLY holds for slot 1, rather
+            // than trusting the builder's list for it. "The pass carries two attachments" has only ever
+            // been asserted from the Java side -- the builder's intent, not the descriptor's state. If
+            // slot 1 is bound to a different texture than the one the probe reads, or its store action
+            // is not STORE, every symptom of the missing [[color(1)]] write follows with no error
+            // anywhere. Capped at three lines so it is cheap; the LOD pass is the one with BOTH a
+            // second colour attachment and a depth attachment.
+            if ("1".equals(System.getenv("VOXY_PASS_SLOT_PROBE"))
+                    && nColors >= 2 && passSlotProbeCount < 3) {
+                passSlotProbeCount++;
+                RenderPassDesc.ColorAttachment c1 = desc.colorAttachments().get(1);
+                long want = MetalHandleMap.getHandle(c1.texture().id());
+                long got = MetalNative.mtlRenderPassGetColorAttachmentTexture(passDescHandle, 1);
+                int store = MetalNative.mtlRenderPassGetColorAttachmentStoreAction(passDescHandle, 1);
+                me.cortex.voxy.common.Logger.info("[Metal-PASSSLOT] colours=" + nColors
+                        + " depth=" + (desc.depthAttachment() != null)
+                        + " slot1 want=0x" + Long.toHexString(want)
+                        + " (fmt=" + MetalNative.mtlTextureGetPixelFormat(want) + ")"
+                        + " descriptor=0x" + Long.toHexString(got)
+                        + " (fmt=" + (got == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(got)) + ")"
+                        + " storeAction=" + store + " (1=Store)"
+                        + " MATCH=" + (want == got));
+            }
             if ("1".equals(System.getenv("VOXY_ATTACH_TRACE"))
                     && nColors > 0 && desc.depthAttachment() != null
                     && (passTraceCount++ % 60) == 1) {
@@ -1057,6 +1082,23 @@ public class MetalRenderBackend implements RenderBackend {
                     MetalNative.mtlRenderPipelineDescriptorSetColorAttachmentWriteMask(
                             pipelineDesc, i, MetalNative.MTLColorWriteMaskAll);
                 }
+            }
+            // VOXY_PIPELINE_SLOT_PROBE=1: read the formats back OFF THE DESCRIPTOR, right before the
+            // pipeline state is built from it. The pass half is already measured ([Metal-PASSSLOT]);
+            // this is the other half, and it is the last link in the MRT chain that had only ever been
+            // established by reading code rather than by reading state. A 0 here means "no attachment
+            // at this index" as far as Metal is concerned.
+            if ("1".equals(System.getenv("VOXY_PIPELINE_SLOT_PROBE"))
+                    && desc.colorAttachmentFormats.length >= 2) {
+                final int f0 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 0);
+                final int f1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 1);
+                final int w0 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(pipelineDesc, 0);
+                final int w1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(pipelineDesc, 1);
+                me.cortex.voxy.common.Logger.info("[Metal-PIPESLOT] label=" + desc.label
+                        + " declared=2"
+                        + " desc[0].fmt=" + f0 + " mask=" + Integer.toHexString(w0)
+                        + " desc[1].fmt=" + f1 + " mask=" + Integer.toHexString(w1)
+                        + " (70=RGBA8Unorm, 55=R32Float; 0 means NO ATTACHMENT)");
             }
 
             // Build + attach vertex descriptor if the pipeline declares vertex inputs.

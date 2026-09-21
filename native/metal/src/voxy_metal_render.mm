@@ -77,6 +77,31 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPipelineDescriptorSet
     }
 }
 
+// Reads back the pixel format the render PIPELINE descriptor actually carries for a slot, right before
+// the pipeline state is built from it. The pass descriptor is now measured ([Metal-PASSSLOT]: slot 1
+// bound to the right texture, RGBA8Unorm, storeAction=Store); this is the other half of the pair, and
+// until now "the pipeline declares two formats" had only ever been established by reading the Java
+// loop and the native setter -- never by reading the descriptor back.
+extern "C" JNIEXPORT jint JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPipelineDescriptorGetColorAttachmentFormat(
+        JNIEnv *, jclass, jlong descHandle, jint index) {
+    @autoreleasepool {
+        if (descHandle == 0) return -1;
+        MTLRenderPipelineDescriptor *desc = voxy_handle_cast<MTLRenderPipelineDescriptor *>(descHandle);
+        return (jint)desc.colorAttachments[(NSUInteger)index].pixelFormat;
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(
+        JNIEnv *, jclass, jlong descHandle, jint index) {
+    @autoreleasepool {
+        if (descHandle == 0) return -1;
+        MTLRenderPipelineDescriptor *desc = voxy_handle_cast<MTLRenderPipelineDescriptor *>(descHandle);
+        return (jint)desc.colorAttachments[(NSUInteger)index].writeMask;
+    }
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_me_cortex_voxy_client_core_metal_MetalNative_mtlDeviceNewRenderPipelineState(
         JNIEnv *, jclass, jlong deviceHandle, jlong descHandle) {
