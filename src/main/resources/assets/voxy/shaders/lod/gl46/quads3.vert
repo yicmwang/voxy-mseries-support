@@ -77,13 +77,10 @@ layout(location = 2) out float voxyFogDist;
 // 0 and larger above that, so a node-level decision is coarser than the thing being decided: it can
 // remove a column vanilla never drew (a hole) or keep one it did (a doubled surface). A fragment
 // knows its position, so quads.frag can ask the question per chunk column instead.
-#if (defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)) || defined(VOXY_LOD_CHUNK_CULL)
-#define VOXY_NEEDS_CAM_REL_XZ
-#endif
-#ifdef VOXY_NEEDS_CAM_REL_XZ
-// location 3: the horizontal-only offset the near-cull needs.
-layout(location = 3) out vec2 voxyCamRelXZ;
-#endif
+// location 3 was the near-cull's horizontal-only offset (voxyCamRelXZ). Removed: the translucent
+// near-cull that read it was deleted, VOXY_TRANS_NEAR_CULL is never injected by anything, and the
+// per-section cull reads location 4 instead. Nothing else ever claimed location 3, and every varying
+// here carries an EXPLICIT location, so dropping one cannot shift the others.
 #ifdef VOXY_LOD_SHOW_DRAWID
 // location 5: the per-draw section index the vertex stage ACTUALLY RECEIVED.
 //
@@ -188,7 +185,7 @@ void main() {
     //Note: other data is automatically discarded as it is undefiend and has not been generated
     interData = quad.attributeData;
 
-    #if defined(VOXY_NEEDS_FOG_DIST) || defined(VOXY_NEEDS_CAM_REL_XZ) || defined(VOXY_LOD_CHUNK_CULL)
+    #if defined(VOXY_NEEDS_FOG_DIST) || defined(VOXY_LOD_CHUNK_CULL)
     // Reconstruct the corner's world-relative point in the same way
     // getQuadCornerPos does (kept inline rather than refactoring quad_util
     // to avoid touching the GL path's hot vertex code). cameraSubPos comes
@@ -199,9 +196,6 @@ void main() {
     vec3 cornerPoint = quad.basePoint + swizzelDataAxis(quad.axis, vec3(quad.quadSizeAddin*cornerMask, 0));
     #ifdef VOXY_NEEDS_FOG_DIST
     voxyFogDist = length(cornerPoint - cameraSubPos);
-    #endif
-    #ifdef VOXY_NEEDS_CAM_REL_XZ
-    voxyCamRelXZ = cornerPoint.xz - cameraSubPos.xz;
     #endif
     #ifdef VOXY_LOD_CHUNK_CULL
     voxyFramePos = cornerPoint;

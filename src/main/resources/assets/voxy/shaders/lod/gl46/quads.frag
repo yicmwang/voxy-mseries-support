@@ -104,19 +104,10 @@ layout(location = 1) in vec2 uv;
 #ifdef VOXY_NEEDS_FOG_DIST
 layout(location = 2) in float voxyFogDist;
 #endif
-// Camera-relative horizontal offset for the near-cull's Chebyshev distance
-// (see quads3.vert — the slant-distance cull leaked LOD water inside the MC
-// square from high/diagonal viewpoints). Must mirror quads3.vert's guard
-// EXACTLY: it is also what the per-chunk-column cull uses to find its own chunk
-// column, and a guard that disagrees with the vertex stage's is a compile error
-// in one stage and a silent location mismatch in the other. Both now use the
-// shared VOXY_NEEDS_CAM_REL_XZ macro.
-#if (defined(VOXY_TRANS_NEAR_CULL) && defined(VOXY_TRANS_NEAR_CULL_XZ)) || defined(VOXY_LOD_CHUNK_CULL)
-#define VOXY_NEEDS_CAM_REL_XZ
-#endif
-#ifdef VOXY_NEEDS_CAM_REL_XZ
-layout(location = 3) in vec2 voxyCamRelXZ;
-#endif
+// location 3 was the near-cull's horizontal-only offset; see quads3.vert for why it is gone. The
+// per-section cull reads location 4 (voxyFramePos) instead -- an earlier version of this comment
+// claimed the cull used this varying to find its chunk column, which stopped being true when the cull
+// moved from a column to a 16x16x16 section and never was true afterwards.
 #ifdef VOXY_LOD_CHUNK_CULL
 // The full 3D camera-relative offset, for the per-section cull: it asks about a 16x16x16 section,
 // and Sodium's vertical render distance means the horizontal column is not enough to answer it.

@@ -303,29 +303,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static final float WATER_FAR_ALPHA_START = parseEnvFloat("VOXY_WATER_FAR_ALPHA_START", 0.0f);
     private static final float WATER_FAR_ALPHA_END = parseEnvFloat("VOXY_WATER_FAR_ALPHA_END", 0.0f);
 
-    // Near-cull metric (2026-07-03 round 3). XZ mode compares the horizontal
-    // Chebyshev distance max(|dx|,|dz|) against the threshold — the metric MC
-    // renders chunks in — instead of the 3D slant distance, which from a high
-    // camera / toward the square's diagonals let LOD water survive INSIDE the
-    // MC ring and double-composite with BSL/Sodium water (the flickering pale
-    // squares). VOXY_TRANS_NEAR_CULL_XZ=0 restores the slant metric. The
-    // margin shrinks from 48 to 16 in XZ mode because Chebyshev matches the
-    // loaded-chunk square exactly (48 only papered over the slant mismatch);
-    // VOXY_TRANS_NEAR_CULL_MARGIN overrides in blocks.
-    private static final boolean TRANS_NEAR_CULL_XZ =
-            !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_XZ"));
-    // 2026-07-03 round 5: Sodium renders sections in a Euclidean XZ CYLINDER
-    // (OcclusionCuller fx*fx+fz*fz <= r*r), so the Chebyshev SQUARE cull left
-    // a ring toward the render square's diagonals (Euclid RD..RD*sqrt(2))
-    // with NEITHER MC water NOR LOD water — the naked kelp/seafloor band the
-    // colortex16 clear fix exposed. Radial matches Sodium's real coverage and
-    // turns the diagonal gap into the same ~margin-wide overlap ring the axes
-    // already have (handled by the chunk-bound mask).
-    // VOXY_TRANS_NEAR_CULL_RADIAL=0 falls back to the Chebyshev square.
-    private static final boolean TRANS_NEAR_CULL_RADIAL =
-            TRANS_NEAR_CULL_XZ && !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_RADIAL"));
-    private static final float TRANS_NEAR_CULL_MARGIN =
-            parseEnvFloat("VOXY_TRANS_NEAR_CULL_MARGIN", TRANS_NEAR_CULL_XZ ? 16f : 48f);
+    // The translucent near-cull's tuning used to live here: TRANS_NEAR_CULL_XZ / _RADIAL / _MARGIN,
+    // which switched the near-water cull between the Chebyshev square, the 3D slant distance and
+    // Sodium's Euclidean cylinder (2026-07-03 rounds 3 and 5). All three are gone with the cull they
+    // configured -- the near-cull was deleted when it was folded into the per-section built mask, the
+    // VOXY_TRANS_NEAR_CULL* defines were never injected after that, and nothing read these constants.
+    // The metric question they were answering is now settled by sodiumDrawsSection, once, in
+    // BuiltSectionMask.
 
     private static float parseEnvFloat(String name, float def) {
         String v = System.getenv(name);
