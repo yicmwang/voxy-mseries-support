@@ -21,6 +21,7 @@ import net.caffeinemc.mods.sodium.client.util.FogParameters;
 import net.caffeinemc.mods.sodium.client.util.iterator.ByteIterator;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.SectionPos;
+import net.minecraft.util.Mth;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -72,6 +73,9 @@ public abstract class MixinDefaultChunkRenderer {
      */
     private static final boolean NO_VANILLA = "1".equals(System.getenv("VOXY_NO_VANILLA"));
 
+    /** Whether this frame's feed runs: true only on the frame the camera entered a new section. */
+    private static boolean voxy$feedThisFrame;
+
     @Redirect(method = "render", at = @At(value = "INVOKE",
             target = "Lnet/caffeinemc/mods/sodium/client/gpu/device/batch/MultiDrawBatch;draw(Lnet/caffeinemc/mods/sodium/client/gpu/device/context/DrawContext;)V"),
             remap = false)
@@ -109,10 +113,18 @@ public abstract class MixinDefaultChunkRenderer {
         // alone would leave a section with no SOLID geometry unclaimed, and that is a section whose
         // surface is grass, leaves or a flower -- at RD 2 that is most of the visible surface, so the
         // LOD survived over exactly the cutout terrain.
+        //
+        // The clear is gated on the CAMERA'S SECTION rather than on the frame, so the culled region's
+        // edges step at chunk boundaries instead of sliding along with the player. See
+        // BuiltSectionMask.beginFrameIfSectionChanged for the measurement behind that and for the one
+        // thing it costs.
         if (renderPass == DefaultTerrainRenderPasses.SOLID) {
-            BuiltSectionMask.beginFrame();
+            voxy$feedThisFrame = BuiltSectionMask.beginFrameIfSectionChanged(
+                    Mth.floor(camera.x) >> 4, Mth.floor(camera.y) >> 4, Mth.floor(camera.z) >> 4);
         }
-        feedBuiltSectionMask(renderLists);
+        if (voxy$feedThisFrame) {
+            feedBuiltSectionMask(renderLists);
+        }
         if (renderPass != DefaultTerrainRenderPasses.SOLID) {
             return;
         }

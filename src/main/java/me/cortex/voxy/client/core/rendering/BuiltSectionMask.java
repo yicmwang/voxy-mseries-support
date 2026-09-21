@@ -43,9 +43,49 @@ public final class BuiltSectionMask {
      */
     private static final LongOpenHashSet DRAWN = new LongOpenHashSet();
 
-    /** Start a frame's feed. Anything not offered again this frame is gone. */
+    /** The camera section this snapshot was taken at, so a sub-section move cannot disturb it. */
+    private static int snapSecX = Integer.MIN_VALUE, snapSecY = 0, snapSecZ = 0;
+
+    /** Start a frame's feed unconditionally. Used by the tests; the mixin uses the section gate. */
     public static synchronized void beginFrame() {
         DRAWN.clear();
+    }
+
+    /**
+     * Start a frame's feed only when the camera has crossed into a new SECTION.
+     *
+     * <p>Without this the culled region's edges follow the player continuously, which is measured
+     * rather than argued. Over 600 frames in which the camera crossed two section boundaries and the
+     * anchor never moved, the mask was rebuilt <b>17</b> times:
+     *
+     * <pre>
+     *   [Metal-VMASK f=1202] anchor=15,-20 cam=21,-15 camSecY=7 uploads=32
+     *   [Metal-VMASK f=1802] anchor=15,-20 cam=20,-14 camSecY=7 uploads=49
+     * </pre>
+     *
+     * That is Sodium's render list changing eight times more often than the camera crosses a
+     * boundary, and it must: it is the exact frustum and occlusion result, and both are continuous
+     * functions of the camera's position. So the set is right at every instant and still wrong as a
+     * <i>region</i> — the edge slides instead of stepping, which is what was reported twice.
+     *
+     * <p>So the snapshot is quantised to the camera's section: the feed runs on the frame the camera
+     * enters a new one and is frozen until it leaves. The trade is explicit and bounded — within a
+     * section the cull mirrors the render list as it was at the crossing, so it can be up to one
+     * section (16 blocks) of travel stale. That is the whole cost, and it is the cost of the boundary
+     * holding still, which is the property that was asked for.
+     *
+     * @return whether the snapshot was restarted, i.e. whether the caller should re-feed
+     */
+    public static synchronized boolean beginFrameIfSectionChanged(final int secX, final int secY,
+                                                                  final int secZ) {
+        if (snapSecX == secX && snapSecY == secY && snapSecZ == secZ) {
+            return false;
+        }
+        snapSecX = secX;
+        snapSecY = secY;
+        snapSecZ = secZ;
+        DRAWN.clear();
+        return true;
     }
 
     /** Offer one section vanilla is drawing this frame. */

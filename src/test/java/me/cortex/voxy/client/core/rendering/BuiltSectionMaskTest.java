@@ -81,6 +81,27 @@ class BuiltSectionMaskTest {
     }
 
     @Test
+    void theSnapshotIsQuantisedToTheCameraSection() {
+        // The culled region's edges must step at chunk boundaries, not slide with the player. Measured
+        // cause: Sodium's render list is the exact frustum and occlusion result, both continuous in
+        // the camera's position, so over 600 frames in which the camera crossed TWO section
+        // boundaries the mask was rebuilt 17 times. So the feed is gated on the camera's section.
+        assertTrue(BuiltSectionMask.beginFrameIfSectionChanged(4, 5, 6), "a new section restarts it");
+        BuiltSectionMask.addDrawn(at(-92, 8, -92));
+        assertEquals(1, BuiltSectionMask.drawnCount());
+
+        // The camera moved, but not out of its section: the snapshot must be left alone.
+        assertFalse(BuiltSectionMask.beginFrameIfSectionChanged(4, 5, 6), "same section holds");
+        assertEquals(1, BuiltSectionMask.drawnCount(), "and nothing was cleared");
+
+        // Any axis crossing a boundary restarts it, because the bit window is biased by camSecY.
+        assertTrue(BuiltSectionMask.beginFrameIfSectionChanged(5, 5, 6), "x crossed");
+        assertTrue(BuiltSectionMask.beginFrameIfSectionChanged(5, 5, 7), "z crossed");
+        assertTrue(BuiltSectionMask.beginFrameIfSectionChanged(5, 6, 7), "y crossed");
+        assertEquals(0, BuiltSectionMask.drawnCount(), "and each restart clears");
+    }
+
+    @Test
     void theSectionIsReconstructedByAddingBeforeFlooring() {
         // The defect nobody caught: quads.frag floored the camera-RELATIVE offset and added it to a
         // FLOORED camera, and floor(cam) + floor(rel) is not floor(cam + rel):
