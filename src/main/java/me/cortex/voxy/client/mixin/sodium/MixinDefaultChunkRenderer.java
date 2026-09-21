@@ -103,6 +103,16 @@ public abstract class MixinDefaultChunkRenderer {
                                    GpuBufferSlice uniformData,
                                    GpuBuffer sectionTimeInfo,
                                    CallbackInfo ci) {
+        // The mask is the union over the frame's terrain passes, not just this one. Sodium renders
+        // SOLID, CUTOUT then TRANSLUCENT in that order (DefaultTerrainRenderPasses.ALL), so SOLID is
+        // the frame boundary: clear there and let every pass contribute. Gating the feed to SOLID
+        // alone would leave a section with no SOLID geometry unclaimed, and that is a section whose
+        // surface is grass, leaves or a flower -- at RD 2 that is most of the visible surface, so the
+        // LOD survived over exactly the cutout terrain.
+        if (renderPass == DefaultTerrainRenderPasses.SOLID) {
+            BuiltSectionMask.beginFrame();
+        }
+        feedBuiltSectionMask(renderLists);
         if (renderPass != DefaultTerrainRenderPasses.SOLID) {
             return;
         }
@@ -110,7 +120,6 @@ public abstract class MixinDefaultChunkRenderer {
         if (renderer == null) {
             return;
         }
-        feedBuiltSectionMask(renderLists);
         Viewport<?> viewport = renderer.setupViewport(matrices, fogParameters, camera.x, camera.y, camera.z);
         renderer.renderOpaque(viewport);
     }
@@ -131,9 +140,11 @@ public abstract class MixinDefaultChunkRenderer {
      * position within its region ({@code x & 7, y & 3, z & 7} — the region is 8x4x8 chunks), and the
      * region carries its own origin. So origin + unpack is the section, with no arithmetic of ours to
      * get wrong.
+     *
+     * <p>The caller clears the mask once per frame, at the first terrain pass, so this accumulates
+     * SOLID + CUTOUT + TRANSLUCENT between calls.
      */
     private static void feedBuiltSectionMask(ChunkRenderListIterable renderLists) {
-        BuiltSectionMask.beginFrame();
         java.util.Iterator<ChunkRenderList> lists = renderLists.iterator();
         while (lists.hasNext()) {
             ChunkRenderList list = lists.next();
@@ -142,6 +153,11 @@ public abstract class MixinDefaultChunkRenderer {
             final int originY = region.getChunkY();
             final int originZ = region.getChunkZ();
             ByteIterator it = list.sectionsWithGeometryIterator(false);
+            // Sodium returns NULL here, not an empty iterator, for a list with no geometry in this
+            // pass -- verified in the shipped bytecode, where `sectionsWithGeometryCount == 0` is an
+            // explicit `return null`. The same pattern is on sectionsWithSpritesIterator and the
+            // block-entity accessors, so it is worth remembering rather than re-learning as an NPE.
+            if (it == null) continue;
             while (it.hasNext()) {
                 final int idx = it.nextByteAsInt();
                 BuiltSectionMask.addDrawn(SectionPos.asLong(
