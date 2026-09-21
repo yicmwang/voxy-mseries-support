@@ -863,11 +863,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // output instead of erroring, so the attachment read empty and nothing anywhere said why.
             // Kept to the non-GL path because GL's pass has one colour attachment.
             if (this.backend.getType() != BackendType.OPENGL) {
+                // GL_R32F, NOT GL_RGBA8. The attachment carries reverse-Z depth, which for distant LOD
+                // terrain is ~1e-4..1e-3; in an 8-bit-per-channel format that quantises to zero, so the
+                // pyramid's textureGather -- which reads the RED channel -- got a buffer of zeros and the
+                // cull had nothing to test. R32F holds it exactly. See AbstractRenderPipeline's
+                // metalDepthTex allocation for the full account of how RGBA8 got here.
                 opaqueFormats = java.util.Arrays.copyOf(opaqueFormats, opaqueFormats.length + 1);
-                opaqueFormats[opaqueFormats.length - 1] = GL_RGBA8;
+                opaqueFormats[opaqueFormats.length - 1] = org.lwjgl.opengl.GL30C.GL_R32F;
                 translucentFormats = java.util.Arrays.copyOf(translucentFormats,
                         translucentFormats.length + 1);
-                translucentFormats[translucentFormats.length - 1] = GL_RGBA8;
+                translucentFormats[translucentFormats.length - 1] = org.lwjgl.opengl.GL30C.GL_R32F;
             }
             this.terrainPipeline = this.backend.createGraphicsPipeline(
                     new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(

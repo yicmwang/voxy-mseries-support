@@ -568,16 +568,23 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.metallumDepth.refresh();
         }
 
-        // 2b) The Voxy-owned depth texture, allocated BEFORE the build because it is the build's source.
-        //     PURE D32F, not packed D24S8: Depth32Float_Stencil8 cannot be sampled as texture2d<float>
-        //     (the Iris-inject depth export read zeros from it and every injected LOD pixel discarded),
-        //     whereas pure D32F is the sampleable format. MetalTexture.store() creates it with
-        //     ShaderRead -- precisely the flag MC's own attachment lacks -- so this is the texture the
-        //     pyramid can actually read.
+        // 2b) The Voxy-owned depth-texture, allocated BEFORE the build because it is the build's source.
+        //
+        //     R32F, and that is load-bearing rather than a preference. An earlier version of this used
+        //     RGBA8, chosen because it is the format the depth readback probe had been PROVEN on -- and
+        //     that choice silently destroyed the data. On this frame's reverse-Z convention the LOD's
+        //     depth is near/d, so distant terrain sits around 1e-4..1e-3; quantised into 8 bits that is
+        //     ZERO. The shader still wrote vec4(gl_FragCoord.z, 0, 0, 1), so the texel's alpha byte made
+        //     the attachment read as "100% non-zero" on a raw byte probe while its RED channel -- the
+        //     only channel the pyramid's textureGather samples -- was empty, and the pyramid min-reduced
+        //     to all zeros. R32F holds the depth exactly.
+        //
+        //     The probe that "proved" RGBA8 was measuring a frame in which the LOD drew nothing at all
+        //     (see the camera note on the harness), so its verdict was about the vantage, not the format.
         if (this.metalDepthTex == null || this.metalDepthWidth != fbw || this.metalDepthHeight != fbh) {
             if (this.metalDepthTex != null) this.metalDepthTex.free();
             this.metalDepthTex = backend.createTexture()
-                    .store(org.lwjgl.opengl.GL30C.GL_RGBA8, 1, fbw, fbh)
+                    .store(org.lwjgl.opengl.GL30C.GL_R32F, 1, fbw, fbh)
                     .name("VoxyLodDepthColour");
             this.metalDepthWidth = fbw;
             this.metalDepthHeight = fbh;
