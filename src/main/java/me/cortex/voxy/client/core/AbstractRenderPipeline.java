@@ -156,6 +156,22 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * stay behind their own switch and cost nothing unless asked for.
      */
     private static final boolean HIZ_PROBES = "1".equals(System.getenv("VOXY_HIZ_PROBE"));
+    /**
+     * {@code VOXY_FLICKER_DIAG=1} turns on the [Metal-FLICKER] renderList-variance probe, which
+     * requires a read of GPU-written memory on EVERY frame. Off by default; see where it is used for
+     * why it cannot simply be sampled once per 600 frames like the other diagnostics.
+     */
+    private static final boolean FLICKER_DIAG = "1".equals(System.getenv("VOXY_FLICKER_DIAG"));
+
+    // Hoisted out of the per-frame body. These were `System.getenv` calls on the render path — three
+    // per render pass for ATTACH_TRACE alone — and an env lookup is a native call, not a field read.
+    // Reading them once at class-init is the same semantics for a variable that cannot change at
+    // runtime, minus the per-pass cost.
+    private static final boolean HIZ_SOURCE_COLOUR = "1".equals(System.getenv("VOXY_HIZ_SOURCE_COLOUR"));
+    private static final boolean BRIDGE_SOLID_TEST = "1".equals(System.getenv("VOXY_BRIDGE_SOLID_TEST"));
+    private static final boolean ATTACH_TRACE = "1".equals(System.getenv("VOXY_ATTACH_TRACE"));
+    private static final boolean LOD_DEBUG_CLEAR = "1".equals(System.getenv("VOXY_LOD_DEBUG_CLEAR"));
+    private static final boolean LOD_FORCE_MAGENTA = "1".equals(System.getenv("VOXY_LOD_FORCE_MAGENTA"));
     /** How many times the attachment probe fires: an early frame and a late one. See {@link #hizProbeFires}. */
     private static final int HIZ_PROBE_FIRES = 2;
     /** Readback of the LOD pass's depth-as-colour attachment; see [Metal-HIZPROBE]. */
@@ -630,7 +646,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             //   pyramid non-zero with this switch -> the colour-attachment BUILD works (Defect A fixed),
             //                                        and the remaining fault is the source (Defect B);
             //   pyramid still zero with a source that has data -> the build is still broken.
-            final boolean sourceIsColour = "1".equals(System.getenv("VOXY_HIZ_SOURCE_COLOUR"));
+            final boolean sourceIsColour = HIZ_SOURCE_COLOUR;
             final me.cortex.voxy.client.core.gpu.IGpuTexture hizSource =
                     sourceIsColour && this.metallumColor != null ? this.metallumColor : this.metalDepthTex;
             viewport.hiZBuffer.buildMipChain(hizSource, viewport.width, viewport.height);
@@ -773,7 +789,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // the green is rock-stable on screen, the IOSurface bridge + composite
         // + sync path is sound and the flicker lives in the LOD draws/content;
         // if the green itself flickers, the bridge/sync is the culprit.
-        boolean bridgeSolidTest = "1".equals(System.getenv("VOXY_BRIDGE_SOLID_TEST"));
+        boolean bridgeSolidTest = BRIDGE_SOLID_TEST;
         if (bridgeSolidTest) {
             clearR = 0.0f; clearG = 1.0f; clearB = 0.0f;
             if ((this.metalFrame % 600) == 1) {
@@ -845,7 +861,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // debug-CLEAR of that attachment to magenta never reaches the screen. If these two handles
         // differ, the pass is drawing into a texture that is never composited -- which explains
         // valid draws producing zero pixels without anything else being wrong.
-        if ("1".equals(System.getenv("VOXY_ATTACH_TRACE")) && (attachTraceCount++ % 600) == 1) {
+        if (ATTACH_TRACE && (attachTraceCount++ % 600) == 1) {
             long voxyColor = me.cortex.voxy.client.core.metal.MetallumBridge.colorAttachment();
             long mcColor = 0;
             try {
@@ -875,7 +891,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             // to the attachments the screen is actually made of: a magenta frame means the
             // target and pass are sound and the fault is downstream in the draws; an unchanged
             // frame means the pass is writing somewhere that never reaches the screen.
-            boolean debugClear = "1".equals(System.getenv("VOXY_LOD_DEBUG_CLEAR"));
+            boolean debugClear = LOD_DEBUG_CLEAR;
             passBuilder.addColorAttachment(this.metallumColor, 0,
                             debugClear
                                     ? me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.CLEAR
@@ -1061,7 +1077,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // shader paints solid magenta as its first statement, and this counts how much of the albedo
         // attachment is magenta. Zero means no LOD fragment reached the framebuffer at all.
         boolean probeMagenta = false;
-        if (!this.magentaProbeDone && "1".equals(System.getenv("VOXY_LOD_FORCE_MAGENTA"))
+        if (!this.magentaProbeDone && LOD_FORCE_MAGENTA
                 && this.metalFrame > 900 && this.metallumColor != null) {
             try {
                 this.magentaProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
@@ -1120,9 +1136,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // export pass or the IOSurface→GL hop. Periodic so world-load
         // progression is visible.
 
-        // [Metal-FLICKER] per-frame: read the renderList section count (shared
-        // storage, valid after submit) and track its variance over the window.
-        if (viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mvf
+        // [Metal-FLICKER] per-frame: read the renderList section count (shared storage, valid after
+        // submit) and track its variance over the window.
+        //
+        // GATED, not moved inside the % 600 log block, and the difference matters: this diagnostic's
+        // entire meaning is variance ACROSS frames — `changes` counts frames where the count moved.
+        // Sampling it once per 600 frames would make `changes` structurally near-zero and `min`/`max`
+        // the extremes of 600 samples rather than of the window, i.e. it would silently start
+        // measuring something else while still printing under the same label. So the per-frame
+        // readback stays per-frame, and the switch that pays for it goes off by default.
+        if (FLICKER_DIAG
+                && viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mvf
                 && mvf.getRenderList() instanceof me.cortex.voxy.client.core.metal.MetalBuffer rlb) {
             int c = MemoryUtil.memGetInt(rlb.getContentsPtr());
             if (this.rlCountLast != -1 && c != this.rlCountLast) this.rlChanges++;
@@ -1146,12 +1170,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             long usedMb = this.nodeManager.getUsedGeometryCapacity() / (1L << 20);
             long capMb  = this.nodeManager.getGeometryCapacity()    / (1L << 20);
             boolean hasWork = this.nodeManager.hasWork();
-            Logger.info(String.format(
-                    "[Metal-FLICKER f=%d] renderList count over last ~600 frames: min=%d max=%d changes=%d  (STATIC camera: changes>0 / min!=max => NON-DETERMINISTIC section selection = GPU traversal race; stable => flicker is frustum-edge view-jitter)",
-                    this.metalFrame,
-                    this.rlCountMin == Integer.MAX_VALUE ? -1 : this.rlCountMin,
-                    this.rlCountMax, this.rlChanges));
-            this.rlCountMin = Integer.MAX_VALUE; this.rlCountMax = 0; this.rlChanges = 0;
+            if (FLICKER_DIAG) {
+                Logger.info(String.format(
+                        "[Metal-FLICKER f=%d] renderList count over last ~600 frames: min=%d max=%d changes=%d  (STATIC camera: changes>0 / min!=max => NON-DETERMINISTIC section selection = GPU traversal race; stable => flicker is frustum-edge view-jitter)",
+                        this.metalFrame,
+                        this.rlCountMin == Integer.MAX_VALUE ? -1 : this.rlCountMin,
+                        this.rlCountMax, this.rlChanges));
+                this.rlCountMin = Integer.MAX_VALUE; this.rlCountMax = 0; this.rlChanges = 0;
+            }
             Logger.info(String.format(
                     "[Metal-DIAG f=%d] sections=%d  geom=%d/%d MB  nodeMgr.hasWork=%s  cam=(%.0f, %.0f, %.0f)",
                     this.metalFrame, sectionCount, usedMb, capMb, hasWork,

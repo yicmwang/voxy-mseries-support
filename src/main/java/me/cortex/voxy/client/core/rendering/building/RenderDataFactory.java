@@ -448,7 +448,27 @@ public class RenderDataFactory {
     public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_DARK_FROM_AIR = new java.util.concurrent.atomic.AtomicLong();
     public static final java.util.concurrent.atomic.AtomicLong DIAG_ALL_DARK_FROM_SOLID = new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * {@code VOXY_FACE_DIAG=1} turns on the per-face light and cull counters. <b>Off by default, and
+     * that is a cost decision.</b>
+     *
+     * <p>Every counter below is an {@code AtomicLong.incrementAndGet()} — an atomic read-modify-write,
+     * on a static field, contended across the mesher's worker threads — executed once per meshed face
+     * or per cull decision, and read exactly once per 600 frames to print a diagnostic line. The
+     * counters were unconditional, so the frame was paying for the instrument continuously to sample it
+     * every ten seconds.
+     *
+     * <p>They are GATED rather than deleted because they are the instrument for an open bug: bug 2
+     * (Voxy ingesting sections before MC lights them) is still open, and the AIR/SOLID split below is
+     * what distinguishes "a face reading light 0 from a solid neighbour" — legitimately black — from
+     * "a surface face reading 0 from an air cell" — the fault. Deleting them would remove the ability
+     * to re-measure that. A {@code static final} boolean is a predictable branch the JIT eliminates
+     * when false, so gating costs nothing and keeps the tool.
+     */
+    public static final boolean FACE_DIAG = "1".equals(System.getenv("VOXY_FACE_DIAG"));
+
     private static void auditFace(long lightBits) {
+        if (!FACE_DIAG) return;
         DIAG_ALL_FACES.incrementAndGet();
         if (lightBits == 0) DIAG_ALL_DARK.incrementAndGet();
     }
@@ -459,6 +479,7 @@ public class RenderDataFactory {
      * zero there means air.
      */
     private static void auditFace(long lightBits, long neighbourModelWord) {
+        if (!FACE_DIAG) return;
         auditFace(lightBits);
         if (lightBits == 0) {
             if (((neighbourModelWord >>> 26) & 0xFFFFL) == 0) {
@@ -475,6 +496,7 @@ public class RenderDataFactory {
      * counted only in the occlusion buckets.
      */
     private static void tallyCull(boolean sameCull, boolean occludesCull, long neighbourMeta) {
+        if (!FACE_DIAG) return;
         if (occludesCull) {
             if (ModelQueries.isFullyOpaque(neighbourMeta)) {
                 DIAG_CULL_OCCLUDES_FULL.incrementAndGet();
@@ -490,23 +512,25 @@ public class RenderDataFactory {
         if (shouldMeshNonOpaqueBlockFace(face, quad, meta, neighborQuad, neighborMeta)) {
             final boolean self = ModelQueries.faceUsesSelfLighting(meta, face);
             final long light = (self ? quad : neighborQuad) & LM;
-            if (self) {
-                DIAG_FACE_SELF.incrementAndGet();
-                if (light == 0) DIAG_FACE_SELF_DARK.incrementAndGet();
-            } else {
-                DIAG_FACE_NEIGH.incrementAndGet();
-                if (light == 0) {
-                    DIAG_FACE_NEIGH_DARK.incrementAndGet();
-                    // An air cell's packed quad is light-only, so a zero model id means the face
-                    // read its light from air; anything else is a real block.
-                    if ((neighborQuad >>> 26) == 0) {
-                        DIAG_NEIGH_DARK_FROM_AIR.incrementAndGet();
-                    } else {
-                        DIAG_NEIGH_DARK_FROM_SOLID.incrementAndGet();
+            if (FACE_DIAG) {
+                if (self) {
+                    DIAG_FACE_SELF.incrementAndGet();
+                    if (light == 0) DIAG_FACE_SELF_DARK.incrementAndGet();
+                } else {
+                    DIAG_FACE_NEIGH.incrementAndGet();
+                    if (light == 0) {
+                        DIAG_FACE_NEIGH_DARK.incrementAndGet();
+                        // An air cell's packed quad is light-only, so a zero model id means the face
+                        // read its light from air; anything else is a real block.
+                        if ((neighborQuad >>> 26) == 0) {
+                            DIAG_NEIGH_DARK_FROM_AIR.incrementAndGet();
+                        } else {
+                            DIAG_NEIGH_DARK_FROM_SOLID.incrementAndGet();
+                        }
                     }
                 }
+                auditFace(light, neighborQuad);
             }
-            auditFace(light, neighborQuad);
             mesher.putNext((long) (face&1) |
                     (quad&~LM) | light);
         } else {
@@ -624,7 +648,7 @@ public class RenderDataFactory {
                             int cid = this.modelMan.getModelId(nib);
                             long meta = this.modelMan.getModelMetadataFromClientId(cid);
                             if (ModelQueries.isFullyOpaque(meta)) {//Dont mesh this face
-                                DIAG_CULL_FULLY_OPAQUE.incrementAndGet();
+                                if (FACE_DIAG) DIAG_CULL_FULLY_OPAQUE.incrementAndGet();
                                 this.blockMesher.skip(1);
                                 continue;
                             }
@@ -1745,7 +1769,7 @@ public class RenderDataFactory {
     public static final java.util.concurrent.atomic.AtomicLong DIAG_GEN_LAST_QUADCOUNT = new java.util.concurrent.atomic.AtomicLong();
 
     public BuiltSection generateMesh(WorldSection section) {
-        DIAG_GEN_CALLED.incrementAndGet();
+        if (FACE_DIAG) DIAG_GEN_CALLED.incrementAndGet();
         //TODO: FIXME: because of the exceptions that are thrown when aquiring modelId
         // this can result in the state of all block meshes and well _everything_ from being incorrect
         //THE EXCEPTION THAT THIS THROWS CAUSES MAJOR ISSUES
@@ -1789,7 +1813,7 @@ public class RenderDataFactory {
         //Prepare everything
         int neighborMsk = this.prepareSectionData(section._unsafeGetRawDataArray());
         if (neighborMsk>>31!=0) {//We failed to get everything so throw exception
-            DIAG_GEN_PREPARE_THROW.incrementAndGet();
+            if (FACE_DIAG) DIAG_GEN_PREPARE_THROW.incrementAndGet();
             throw new IdNotYetComputedException(neighborMsk&(~(1<<31)), true);
         }
         if (CHECK_NEIGHBOR_FACE_OCCLUSION) {
@@ -1800,22 +1824,22 @@ public class RenderDataFactory {
             this.generateYZFaces();
             this.generateXFaces();
         } catch (IdNotYetComputedException e) {
-            DIAG_GEN_FACE_THROW.incrementAndGet();
+            if (FACE_DIAG) DIAG_GEN_FACE_THROW.incrementAndGet();
             e.auxBitMsk = neighborMsk;
             e.auxData = this.neighboringFaces;
             throw e;
         }
 
-        DIAG_GEN_LAST_QUADCOUNT.set(this.quadCount);
+        if (FACE_DIAG) DIAG_GEN_LAST_QUADCOUNT.set(this.quadCount);
 
         //TODO:NOTE! when doing face culling of translucent blocks,
         // if the connecting type of the translucent block is the same AND the face is full, discard it
         // this stops e.g. multiple layers of glass (and ocean) from having 3000 layers of quads etc
         if (this.quadCount == 0) {
-            DIAG_GEN_ZERO_QUADS.incrementAndGet();
+            if (FACE_DIAG) DIAG_GEN_ZERO_QUADS.incrementAndGet();
             return BuiltSection.emptyWithChildren(section.key, section.getNonEmptyChildren());
         }
-        DIAG_GEN_REAL_QUADS.incrementAndGet();
+        if (FACE_DIAG) DIAG_GEN_REAL_QUADS.incrementAndGet();
 
         if (this.quadCount >= 1<<16) {
             Logger.warn("Large quad count for section " + WorldEngine.pprintPos(section.key) + " is " + this.quadCount);

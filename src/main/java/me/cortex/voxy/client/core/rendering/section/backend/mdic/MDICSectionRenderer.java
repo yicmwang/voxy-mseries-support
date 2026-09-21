@@ -1198,9 +1198,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             return;
         }
         int maxDrawCount = Math.min((int)(this.geometryManager.getSectionCount()*4.4+128), 400_000);
-        int rawCount = rawOpaqueCount(viewport, OPAQUE_DRAW_COUNT_OFFSET);
         maxDrawCount = metalDrawCount(viewport, OPAQUE_DRAW_COUNT_OFFSET, maxDrawCount);
-        lodDrawDiag(this.geometryManager.getSectionCount(), rawCount, maxDrawCount);
+        lodDrawDiag(viewport, this.geometryManager.getSectionCount(), maxDrawCount);
         if (maxDrawCount != 0) {
             this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
         }
@@ -1294,8 +1293,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static boolean reverseZLogged = false;
     private static long vpTraceCount = 0;
     private static long LOD_DIAG_FRAME = 0;
-    private static void lodDrawDiag(int sectionCount, int rawOpaque, int maxDrawCount) {
+    private static void lodDrawDiag(MDICViewport viewport, int sectionCount, int maxDrawCount) {
         if ((LOD_DIAG_FRAME++ % 600) != 1) return;
+        // rawOpaqueCount is read HERE rather than by the caller, and the placement is the point: it is
+        // an instantaneous count, so sampling it once per 600 frames measures exactly what reading it
+        // every frame then discarding 599 of the values did. That is unlike [Metal-FLICKER], whose
+        // meaning is variance ACROSS frames and which therefore had to be gated rather than moved.
+        //
+        // The field names and their order, and the two spaces between them, are parsed by the
+        // measurement harness (ab_cull_surface.sh, ab_occ.sh, tools/parse_perf.py). Do not reformat.
+        final int rawOpaque = rawOpaqueCount(viewport, OPAQUE_DRAW_COUNT_OFFSET);
         me.cortex.voxy.common.Logger.info(String.format(
                 "[Metal-LODDRAW f=%d] sections=%d  rawOpaqueCount=%d  maxDrawCount=%d  %s",
                 LOD_DIAG_FRAME, sectionCount, rawOpaque, maxDrawCount,

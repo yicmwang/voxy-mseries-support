@@ -650,6 +650,11 @@ public class MetalRenderBackend implements RenderBackend {
     /** Borrow Metallum's encoder instead of owning one; {@code VOXY_LOD_BORROW_ENCODER=1} for A/B. */
     static final boolean BORROW_ENCODER = "1".equals(System.getenv("VOXY_LOD_BORROW_ENCODER"));
 
+    // Hoisted out of beginRenderPass / createGraphicsPipeline, which run many times per frame.
+    static final boolean PASS_SLOT_PROBE = "1".equals(System.getenv("VOXY_PASS_SLOT_PROBE"));
+    static final boolean PIPELINE_SLOT_PROBE = "1".equals(System.getenv("VOXY_PIPELINE_SLOT_PROBE"));
+    static final boolean ATTACH_TRACE = "1".equals(System.getenv("VOXY_ATTACH_TRACE"));
+
     static final boolean ENC_TRACE = Boolean.getBoolean("voxy.encTrace")
             || "1".equals(System.getenv("VOXY_ENC_TRACE"));
 
@@ -821,7 +826,7 @@ public class MetalRenderBackend implements RenderBackend {
             // is not STORE, every symptom of the missing [[color(1)]] write follows with no error
             // anywhere. Capped at three lines so it is cheap; the LOD pass is the one with BOTH a
             // second colour attachment and a depth attachment.
-            if ("1".equals(System.getenv("VOXY_PASS_SLOT_PROBE"))
+            if (PASS_SLOT_PROBE
                     && nColors >= 2 && passSlotProbeCount < 3) {
                 passSlotProbeCount++;
                 RenderPassDesc.ColorAttachment c1 = desc.colorAttachments().get(1);
@@ -837,7 +842,7 @@ public class MetalRenderBackend implements RenderBackend {
                         + " storeAction=" + store + " (1=Store)"
                         + " MATCH=" + (want == got));
             }
-            if ("1".equals(System.getenv("VOXY_ATTACH_TRACE"))
+            if (ATTACH_TRACE
                     && nColors > 0 && desc.depthAttachment() != null
                     && (passTraceCount++ % 60) == 1) {
                 var c0 = desc.colorAttachments().get(0);
@@ -875,7 +880,7 @@ public class MetalRenderBackend implements RenderBackend {
             // a perfectly-formed pass (correct attachments, correct clear) lands in a command
             // buffer that is never the one presented -- which is indistinguishable from "the pass
             // does nothing" everywhere else in the logs.
-            if ("1".equals(System.getenv("VOXY_ATTACH_TRACE")) && nColors > 0
+            if (ATTACH_TRACE && nColors > 0
                     && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
                 long metallumBuf = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
                 me.cortex.voxy.common.Logger.info("[Metal-PASSBUF] active=0x"
@@ -934,7 +939,7 @@ public class MetalRenderBackend implements RenderBackend {
             // depth export) legitimately has colorHandle==0, and acquireRenderEncoder returns 0 for
             // it by design -- reading such a line as "the LOD pass failed to borrow" is wrong twice
             // over, and I made that mistake. Only a colour+depth pass is the LOD pass.
-            if ("1".equals(System.getenv("VOXY_ATTACH_TRACE")) && nColors > 0
+            if (ATTACH_TRACE && nColors > 0
                     && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
                 me.cortex.voxy.common.Logger.info("[Metal-BORROW] colors=" + nColors
                         + " borrowed=" + borrowed
@@ -1088,7 +1093,7 @@ public class MetalRenderBackend implements RenderBackend {
             // this is the other half, and it is the last link in the MRT chain that had only ever been
             // established by reading code rather than by reading state. A 0 here means "no attachment
             // at this index" as far as Metal is concerned.
-            if ("1".equals(System.getenv("VOXY_PIPELINE_SLOT_PROBE"))
+            if (PIPELINE_SLOT_PROBE
                     && desc.colorAttachmentFormats.length >= 2) {
                 final int f0 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 0);
                 final int f1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 1);
