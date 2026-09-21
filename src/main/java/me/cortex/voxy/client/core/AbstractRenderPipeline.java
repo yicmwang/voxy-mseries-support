@@ -136,15 +136,26 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private boolean passShapeLogged;
 
     /**
-     * VOXY_HIZ_BUILD=1 enables the Hi-Z pyramid build on the Metal path.
+     * The Hi-Z pyramid build. <b>ON by default</b>, because it now culls. {@code VOXY_HIZ_BUILD=0}
+     * turns it off — which leaves a zero-filled pyramid, whose every box answers "not occluded", so the
+     * cull becomes a no-op rather than being disabled outright.
      *
-     * <p>Off by default because the build currently cannot cull: the depth attachment it samples reads
-     * as zeros, so the pyramid is all-zero, the traversal's guard fires for every box, and the only
-     * measurable effect is the cost of building it (+3.7 to +7 ms of `submit`, ~11 mip-chain passes).
-     * The wiring is kept so that the missing piece -- a texture-to-texture copy of MC's depth into a
-     * sampleable Voxy-owned texture -- can be added and A/B'd with this one switch.
+     * <p>It was off by default while it could not cull, and the reason is worth keeping: the pyramid
+     * was attached as a DEPTH attachment while its blit pipeline declares depth DISABLED and an R32F
+     * COLOUR format, so the blit's output was dropped and nothing ever wrote it. On top of that, the
+     * texture feeding it was RGBA8, and reverse-Z LOD depth (~1e-4) quantises to zero in 8 bits.
+     * With both fixed the pyramid holds real depth and the traversal culls: measured same-session and
+     * same-camera, 24 793 -> 14 387 draws (-42 %), `submit` 21.38 -> 18.08 ms, total 26.44 -> 22.25 ms.
+     * See optimisation.MD 8.8.
      */
-    private static final boolean HIZ_BUILD = "1".equals(System.getenv("VOXY_HIZ_BUILD"));
+    private static final boolean HIZ_BUILD = !"0".equals(System.getenv("VOXY_HIZ_BUILD"));
+    /**
+     * {@code VOXY_HIZ_PROBE=1} turns on the one-shot Hi-Z readbacks. SEPARATE from {@link #HIZ_BUILD},
+     * and deliberately so: the build is now on by default, and a readback that fires on the shipping
+     * path is a cost and an instrument on every run. The probes exist to check the pyramid, so they
+     * stay behind their own switch and cost nothing unless asked for.
+     */
+    private static final boolean HIZ_PROBES = "1".equals(System.getenv("VOXY_HIZ_PROBE"));
     /** How many times the attachment probe fires: an early frame and a late one. See {@link #hizProbeFires}. */
     private static final int HIZ_PROBE_FIRES = 2;
     /** Readback of the LOD pass's depth-as-colour attachment; see [Metal-HIZPROBE]. */
@@ -636,13 +647,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             if (!this.hizBuildLogged) {
                 this.hizBuildLogged = true;
                 // Distinguish the two reasons for not building, because they mean opposite things: the
-                // switch being off is the intended default, while a missing attachment is a real fault.
+                // switch being off is a deliberate choice, while a missing attachment is a real fault.
                 // Conflating them in one message is how a diagnostic ends up lying about the state it
                 // was written to report.
                 final String why = !HIZ_BUILD
-                        ? "VOXY_HIZ_BUILD is not set -- this is the default, and the pyramid stays"
-                          + " zero-filled so the cull is a no-op"
-                        : "VOXY_HIZ_BUILD is set but no depth attachment is available";
+                        ? "VOXY_HIZ_BUILD=0 -- the cull is deliberately disabled, and the pyramid stays"
+                          + " zero-filled so it is a no-op"
+                        : "the build is on but no depth attachment is available";
                 me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] not building: " + why
                         + " (target=" + metallumTarget
                         + ", depthHandle=" + (this.metallumDepth == null ? "null"
@@ -1032,7 +1043,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // draws nothing (sections=0), so its all-zero result was the correct answer for an empty frame
         // and was read as a finding anyway. Hence two firings rather than one -- see hizProbeFires.
         boolean probeAttachment = false;
-        if (HIZ_BUILD && this.metalDepthTex != null && this.hizProbeFires < HIZ_PROBE_FIRES
+        if (HIZ_PROBES && this.metalDepthTex != null && this.hizProbeFires < HIZ_PROBE_FIRES
                 && this.metalFrame > (this.hizProbeFires == 0 ? 300L : 600L)) {
             try {
                 if (this.hizProbeBuffer == null) {
@@ -1062,7 +1073,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.magentaProbeDone = true;
         }
         boolean probePyramid = false;
-        if (HIZ_BUILD && !this.hizPyramidProbeDone && this.metalFrame > 900) {
+        if (HIZ_PROBES && !this.hizPyramidProbeDone && this.metalFrame > 900) {
             // Mip 0's dimensions are the highest one bits of the viewport -- HiZBuffer rounds down to a
             // square power of two, so fbw x fbh is NOT the level-0 size.
             final int pw = Integer.highestOneBit(fbw);
