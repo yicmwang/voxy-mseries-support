@@ -60,17 +60,19 @@ layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer B
     int chunkMaskAnchorSecX;
     int chunkMaskCamSecY;
     int chunkMaskAnchorSecZ;
-    // The camera's own world position, as FLOATS. The type is load-bearing, not a convenience: a
-    // fragment's section has to be reconstructed as floor(cameraWorld + rel), i.e. ADD BEFORE
-    // FLOORING. Flooring the camera-relative offset first and adding it to a floored camera is off
-    // by one for every fragment whose in-block fraction is below the camera's:
+    // The LOD FRAME's origin in world blocks, as FLOATS: viewport.section << 5, i.e. an exact
+    // multiple of 32 -- NOT the camera's position, which is what this field used to hold and what
+    // the name still half-suggests. A fragment's section is reconstructed as
+    // floor(frameOrigin + rel), i.e. ADD BEFORE FLOORING. That order is kept deliberately even
+    // though it is now moot -- the origin is integral, so floor(A + r) == A + floor(r) -- because
+    // the camera form made it load-bearing:
     //
     //     floor(camX) + floor(fragX - camX)  ==  floor(fragX) - [frac(fragX) < frac(camX)]
     //
-    // That stray -1 is a band across the world whose position is set by frac(camX) -- where the
-    // camera sits inside its own block -- so the culled region's edges crawl along with the player
-    // at sub-block granularity instead of stepping at chunk boundaries. Keeping the camera's exact
-    // position here is what makes the boundary world-fixed between chunk crossings.
+    // That stray -1 was a band across the world positioned by frac(camX) -- where the camera sits
+    // inside its own block -- which made the culled region's edges crawl with the player at
+    // sub-block granularity instead of stepping at chunk boundaries. Removing the camera from this
+    // lookup is what fixed it; do not put it back. See cull.MD 8.12.
     float chunkMaskFrameOriginX;
     float chunkMaskFrameOriginY;
     float chunkMaskFrameOriginZ;

@@ -132,10 +132,12 @@ public final class BuiltSectionMask {
      * silently shifts every read by four bytes, which is the kind of bug this file has already paid
      * for once.
      *
-     * <p>The block-coordinate camera position is here for the fragment-stage cull: a fragment knows
-     * its camera-relative offset in blocks (quads3.vert interpolates it), so camera block position
-     * plus that offset gives the fragment's own section in all three axes. Without it the shader
-     * would have only the camera's section and could not tell where inside it the camera sits.
+     * <p>The LOD frame's origin in blocks is here for the fragment-stage cull: a fragment knows its
+     * frame-relative position in blocks (quads3.vert interpolates it as {@code voxyFramePos}), so
+     * the frame origin plus that offset gives the fragment's own section in all three axes. It is
+     * {@code viewport.section << 5}, an exact multiple of 32, and deliberately NOT the camera:
+     * centring this lookup on the camera is what made the culled region crawl with the player
+     * (cull.MD 8.12). The camera's section is not enough either -- see sodiumDrawsSection.
      */
     private static final int HEADER_UINTS = 8;
 
