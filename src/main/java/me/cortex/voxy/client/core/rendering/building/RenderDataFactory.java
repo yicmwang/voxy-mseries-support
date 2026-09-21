@@ -378,61 +378,13 @@ public class RenderDataFactory {
         return true;
     }
 
-    /**
-     * Meshed-face light audit. A quad's light byte is either the block's OWN cell light or the
-     * ADJACENT cell's, and for a non-opaque block those differ sharply: light does not propagate
-     * into a leaf cell, so a leaf's own cell holds 0 while the air in front of it holds 15.
-     * Counting the two branches separately, and how often each lands on zero, is what separates
-     * "foliage is dark because it took the neighbour's light and the neighbour is dark" from
-     * "foliage is dark because it took its own light, which is legitimately zero".
-     */
-    /**
-     * Of the dark neighbour-lit faces, how many took their light from an AIR cell versus a SOLID
-     * one. An air cell carries the sky light directly, so a dark air neighbour means the light was
-     * lost in storage or during mipping. A solid neighbour means the mesher is reading a face's
-     * light from a cell that cannot hold light -- and since light does not propagate into a solid
-     * block, that cell is legitimately zero, so the face is black by construction.
-     */
-
-    /**
-     * Every meshed face and how many of them carry light 0, across BOTH the opaque and the
-     * non-opaque path.
-     *
-     * <p>This exists because the earlier instrument was wrong. Comparing screenshots was the only
-     * measure available, and a screenshot measures one camera's view of a world that is still
-     * streaming in: the same build produced 38-76% dark in one run and 12.5-20.3% in the next, a
-     * spread several times larger than any effect being tested. Two candidate fixes were called
-     * regressions against that noise, and both calls were wrong. A face-level ratio over the whole
-     * meshed world is the same question asked of every face instead of one frame's pixels, so it
-     * does not move when the camera or the stream-in order does.
-     */
-
-    /**
-     * Why faces were culled, split by whether the neighbour that culled them was entitled to.
-     *
-     * <p>"The black splotches are missing surface faces" is a claim about culling, and a screenshot
-     * cannot ask which cull dropped a face: the camera moves between runs (the test world's camera
-     * read 83,-187 in one run and 246,-235 in the next), so frames from two builds are not
-     * comparable at all. These four counters are per-mesh and camera-free, so a rate can be compared
-     * across builds and the offending cull named.
-     *
-     * <p>{@code OCCLUDES_FULL} is a neighbour that reports occluding <i>and</i> is a fully opaque
-     * cube -- culling against that is correct. {@code OCCLUDES_PARTIAL} is a neighbour that reports
-     * occluding but is NOT a fully opaque cube: that is the signature of a model whose per-face
-     * coverage claims more than its shape does, and every face it culls is a hole in a neighbour.
-     */
-
-    /**
-     * Of the meshed faces carrying light 0, how many took it from an AIR neighbour and how many from a
-     * SOLID one, counted over BOTH meshing paths.
-     *
-     * <p>This is the split that names the fault. Light does not propagate into a solid block, so a face
-     * reading 0 from a solid neighbour is legitimately black — but a surface face's neighbour is air,
-     * and an air cell carries the sky light directly, so a face reading 0 from an air cell means the
-     * mesher is reading the wrong cell or the stored light is missing. `[Metal-VOXEL2]` says the
-     * ingest-side air above ground is never dark, so those two cannot both be true and the count says
-     * which side is wrong.
-     */
+    // Five javadoc blocks stood here, documenting the dark-face counters (DIAG_FACE_*, DIAG_ALL_*,
+    // DIAG_NEIGH_DARK_*, DIAG_CULL_*) and the reasoning behind splitting dark faces by whether the
+    // neighbouring cell is AIR or SOLID. They are removed with the counters, and the reasoning is worth
+    // keeping in this one line because it is the thing a future reader would want: light does not
+    // propagate into a solid block, so a face reading 0 from a SOLID neighbour is legitimately black,
+    // while a face reading 0 from an AIR cell means the mesher read the wrong cell or the stored light
+    // is missing. That distinction is what named bug 2, which is fixed.
 
 
 

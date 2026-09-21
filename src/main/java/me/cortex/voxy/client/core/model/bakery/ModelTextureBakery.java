@@ -635,7 +635,6 @@ public class ModelTextureBakery {
             this.bakeBlockModel(state, layer);
             isAnyShaded  |= this.vc.anyShaded;
             isAnyDarkend |= this.vc.anyDarkendTex;
-            maybeLogModelExtent(state, layer);
             if (!this.vc.isEmpty()) {
                 this.beginBake(atlasMetalHandle, blockTextureId,
                         this.vc.getAddress(), this.vc.quadCount(), /*clear*/false);
@@ -704,21 +703,10 @@ public class ModelTextureBakery {
         return (isAnyShaded ? 1 : 0) | (isAnyDarkend ? 2 : 0);
     }
 
-    /**
-     * Log the submitted geometry's extent and quad count for the blocks named in
-     * {@code VOXY_BAKE_ONLY}. The bake projects the model orthographically down one axis per face
-     * cell, so a cell can only be empty if the model is flat along that axis -- printing the extent
-     * turns "is this plant really edge-on in its up/down cells" into a reading rather than an
-     * assumption about what {@code block/cross} looks like.
-     */
-    private void maybeLogModelExtent(BlockState state, ChunkSectionLayer layer) {
-        String only = System.getenv("VOXY_BAKE_ONLY");
-        if (only == null || this.vc.isEmpty()) return;
-        String name = state.getBlock().getName().getString();
-        boolean wanted = false;
-        for (String s : only.split("\\s*,\\s*")) if (s.equals(name)) wanted = true;
-        if (!wanted || !EXTENT_SEEN.add(name)) return;
-    }
+    // maybeLogModelExtent stood here: it resolved the block's name, scanned VOXY_BAKE_ONLY for it and
+    // recorded it in EXTENT_SEEN, then fell off the end -- because the log that made all that work
+    // worthwhile was removed with the diagnostics. Removed rather than left as a filter for something
+    // it no longer reports.
 
     private static final java.util.Set<String> EXTENT_SEEN =
             java.util.concurrent.ConcurrentHashMap.newKeySet();

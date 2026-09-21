@@ -169,14 +169,9 @@ public class GlViewCapture {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFb);
         }
 
-        // Sample non-zero pixel detection — count this bake invocation as
-        // producing real output if ANY pixel has non-zero colour or depth.
-        boolean sawNonZero = false;
-        for (int i = 0; i < totalPixels && !sawNonZero; i++) {
-            int rgba = MemoryUtil.memGetInt(this.colourScratch + i * 4L);
-            int ds   = MemoryUtil.memGetInt(this.depthScratch  + i * 4L);
-            if (rgba != 0 || ds != 0) sawNonZero = true;
-        }
+        // A scan over every pixel of the colour and depth scratch buffers stood here, computing
+        // `sawNonZero` for a counter that no longer exists. Removed -- it read the whole bake target
+        // back through the CPU to produce a boolean nothing consumed.
 
         // Pack into the legacy uvec2-per-pixel format the consumer expects:
         //   outPoint.x = RGBA packed

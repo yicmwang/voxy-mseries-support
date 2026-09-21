@@ -23,8 +23,6 @@ import java.util.Arrays;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 public class VoxelIngestService {
-    /** M13 diagnostic counters — read by AbstractRenderPipeline's Metal-DIAG dump. */
-
     /**
      * Fill an all-air, no-light-layer section with air at FULL SKY instead of zero
      * ({@code VOXY_AIR_SECTION_SKY_LIGHT=1}).
