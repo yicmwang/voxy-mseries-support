@@ -306,13 +306,10 @@ dependencies {
     include(runtimeOnly "org.lwjgl:lwjgl-shaderc:$lwjglVersion:natives-macos-arm64")
     include(runtimeOnly "org.lwjgl:lwjgl-spvc:$lwjglVersion:natives-macos-arm64")
 
-    // Vulkan bindings (used only by VulkanRenderBackend on macOS — Win/Linux
-    // stay on GL through M9). LWJGL's lwjgl-vulkan module is a thin Java
-    // wrapper; the actual Vulkan loader is MoltenVK on macOS, shipped at
-    // /natives/macos-arm64/libMoltenVK.dylib in the mod jar. macOS still
-    // needs the macos-arm64 classifier for the LWJGL JNI shim.
-    implementation "org.lwjgl:lwjgl-vulkan"
-    runtimeOnly "org.lwjgl:lwjgl-vulkan:$lwjglVersion:natives-macos-arm64"
+    // lwjgl-vulkan is GONE, with the Vulkan backend and its four smoke tests. Its only purpose here
+    // was as a Metal compatibility layer on macOS, and this project renders through Metal directly.
+    // lwjgl-shaderc and lwjgl-spvc stay: RuntimeShaderCompiler compiles GLSL -> SPIR-V -> MSL, so the
+    // SPIR-V toolchain is the shader path, not a Vulkan backend.
 
     // Core LWJGL natives for macos-arm64 dev/test only — at game runtime MC ships
     // its own copy, but standalone JavaExec tasks like testShaderCompiler need
@@ -506,72 +503,6 @@ tasks.register('testMetalCompute', JavaExec) {
     workingDir = rootProject.projectDir
     standardOutput = System.out
     errorOutput = System.err
-}
-
-// M4 Stage A: bootstrap MoltenVK via LWJGL Vulkan and enumerate the GPU.
-// Tells us the loader/dylib path is wired correctly before we invest in the
-// rest of VulkanRenderBackend.
-tasks.register('testVulkanLoader', JavaExec) {
-    group = 'verification'
-    description = 'Smoke-test that MoltenVK loads through LWJGL Vulkan bindings.'
-    classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'me.cortex.voxy.tools.VulkanLoaderSmokeTest'
-    workingDir = rootProject.projectDir
-    standardOutput = System.out
-    errorOutput = System.err
-    def moltenVkIcd = file('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json')
-    if (moltenVkIcd.exists()) {
-        environment 'VK_ICD_FILENAMES', moltenVkIcd.absolutePath
-    }
-}
-
-// M8 Vulkan: equivalent of M7 — dispatch increment.comp via a Vulkan
-// compute pipeline with descriptor-set-bound SSBO and verify the values.
-tasks.register('testVulkanCompute', JavaExec) {
-    group = 'verification'
-    description = 'Smoke-test the Vulkan compute pipeline + dispatch chain.'
-    classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'me.cortex.voxy.tools.VulkanComputeSmokeTest'
-    workingDir = rootProject.projectDir
-    standardOutput = System.out
-    errorOutput = System.err
-    def moltenVkIcd = file('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json')
-    if (moltenVkIcd.exists()) {
-        environment 'VK_ICD_FILENAMES', moltenVkIcd.absolutePath
-    }
-}
-
-// M6 Vulkan: equivalent of M5 — render the triangle through a Vulkan
-// graphics pipeline + dynamic_rendering + readback verification.
-tasks.register('testVulkanTriangle', JavaExec) {
-    group = 'verification'
-    description = 'Smoke-test a Vulkan triangle render via dynamic_rendering + graphics pipeline.'
-    classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'me.cortex.voxy.tools.VulkanTriangleSmokeTest'
-    workingDir = rootProject.projectDir
-    standardOutput = System.out
-    errorOutput = System.err
-    def moltenVkIcd = file('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json')
-    if (moltenVkIcd.exists()) {
-        environment 'VK_ICD_FILENAMES', moltenVkIcd.absolutePath
-    }
-}
-
-// M4 Stages B-D: full Vulkan clear-color render pass on MoltenVK.
-// Runs the device + image + dynamic_rendering setup and reads pixels back
-// to confirm the GPU wrote the expected RGBA8 values.
-tasks.register('testVulkanClear', JavaExec) {
-    group = 'verification'
-    description = 'Smoke-test a Vulkan clear-color render pass via MoltenVK + dynamic_rendering.'
-    classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'me.cortex.voxy.tools.VulkanClearSmokeTest'
-    workingDir = rootProject.projectDir
-    standardOutput = System.out
-    errorOutput = System.err
-    def moltenVkIcd = file('/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json')
-    if (moltenVkIcd.exists()) {
-        environment 'VK_ICD_FILENAMES', moltenVkIcd.absolutePath
-    }
 }
 
 // A second test source set that puts a fake com.metallum.render.MetalInterop on the classpath.
