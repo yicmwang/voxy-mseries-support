@@ -375,11 +375,6 @@ void main() {
 // gated on IrisUtil.vxContractActive(), which this port does not have, so it was doubly inert -- and
 // it was a footgun: had the vx contract returned, it would have fought the section cull with a
 // distance. Deleted rather than left disabled.
-    if (voxyLodParams2.x > 0.0 && voxyNearCullDist < voxyLodParams2.x) {
-        discard;
-        return;
-    }
-#endif
 
     //vec2 uv = vec2(0);
     //Tile is the tile we are in
