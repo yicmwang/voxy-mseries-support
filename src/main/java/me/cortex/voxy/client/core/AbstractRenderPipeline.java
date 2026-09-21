@@ -143,6 +143,31 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * sampleable Voxy-owned texture -- can be added and A/B'd with this one switch.
      */
     private static final boolean HIZ_BUILD = "1".equals(System.getenv("VOXY_HIZ_BUILD"));
+    /** One-shot readback of the Voxy-owned depth copy; see [Metal-HIZPROBE]. */
+    private me.cortex.voxy.client.core.gpu.IGpuBuffer hizProbeBuffer;
+    private boolean hizProbeDone;
+
+    /** Report the distribution of a full-screen depth readback. Shared by the two [Metal-HIZPROBE] calls. */
+    private static void logDepthProbe(final String what,
+                                      final me.cortex.voxy.client.core.gpu.IGpuBuffer buf, final int n) {
+        if (!(buf instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) {
+            me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] " + what + ": not a CPU-visible buffer");
+            return;
+        }
+        final long ptr = mb.getContentsPtr() + 16;
+        int nonZero = 0;
+        float min = Float.MAX_VALUE, max = -Float.MAX_VALUE, sum = 0;
+        for (int i = 0; i < n; i++) {
+            final float v = MemoryUtil.memGetFloat(ptr + (long) i * 4L);
+            if (v != 0.0f) nonZero++;
+            if (v < min) min = v;
+            if (v > max) max = v;
+            sum += v;
+        }
+        me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] " + what + ": " + n + " texels, nonZero="
+                + nonZero + " min=" + min + " max=" + max + " mean=" + (sum / n)
+                + (nonZero == 0 ? "  <-- EMPTY" : "  <-- has data"));
+    }
     /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
@@ -747,8 +772,29 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                                     : me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
                             debugClear ? 1f : 0f, 0f, debugClear ? 1f : 0f, 1f)
-                    .depthAttachment(this.metallumDepth, 0,
-                            me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
+                    // Depth: Voxy's OWN texture, not MC's attachment.
+                    //
+                    // MC's attachment cannot be read back -- a blit of it returns all zeros, measured at
+                    // both timings (frame start and after the pass closed), while the identical readback
+                    // of a COLOUR attachment returns data, so the mechanism works and the depth really
+                    // does come back empty. Whatever the cause, the Hi-Z pyramid needs a depth image it
+                    // can sample, and MC's is not one. This texture is: MetalTexture.store() creates it
+                    // with ShaderRead, which is precisely the flag MC's attachment lacks, and it is
+                    // therefore readable by the pyramid with no copy at all.
+                    //
+                    // CLEAR to 0.0, which is FAR in this frame's reverse-Z convention (near is 1, far is
+                    // 0) -- so "nothing drawn here yet" reads as far, which is the conservative value for
+                    // an occlusion test.
+                    //
+                    // What this gives up: the LOD no longer depth-tests against vanilla terrain in this
+                    // pass. That is covered by the built-section mask instead, which culls LOD across
+                    // exactly the sections vanilla draws -- that is the whole purpose it was built for,
+                    // and it is the verified mechanism (`refused == 0`). What it buys is LOD
+                    // self-occlusion, which nothing had before.
+                    .depthAttachment(this.metalDepthTex != null ? this.metalDepthTex : this.metallumDepth, 0,
+                            this.metalDepthTex != null
+                                    ? me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.CLEAR
+                                    : me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
                             0f);
         }
@@ -858,27 +904,33 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         final long perfT3 = System.nanoTime();
         this.perfEncode += perfT3 - perfT2;  // encoding the LOD pass (CPU side)
 
-        // Copy this frame's combined depth into the Voxy-owned sampleable texture, for next frame's
-        // Hi-Z build. Taken HERE -- after the LOD passes, before submit() -- because at this point MC's
-        // attachment holds vanilla terrain AND the LOD just drawn, so one copy carries both the terrain
-        // occlusion and the LOD self-occlusion the pyramid needs. Encoded before submit() so it rides
-        // the same command buffer rather than adding a wait.
-        if (HIZ_BUILD && metallumTarget && this.metalDepthTex != null
-                && this.metallumDepth != null && this.metallumDepth.id() != -1) {
-            // The destination handle comes from MetalHandleMap, NOT from MetallumBridge.textureHandle:
-            // that bridge resolves a BLAZE3D texture via reflection (it exists so Voxy can sample MC's
-            // own atlas) and throws "argument type mismatch" on a Voxy IGpuTexture. MetalTexture
-            // registers its raw handle here in store(), which is the lookup that matches the type.
-            final long dstHandle = me.cortex.voxy.client.core.metal.MetalHandleMap
-                    .getHandle(this.metalDepthTex.id());
-            if (dstHandle != 0) {
-                voxyMb.copyTextureToTexture(this.metallumDepth.metalHandle(), dstHandle, fbw, fbh);
+        // No depth copy any more: the LOD pass renders straight into metalDepthTex (see its
+        // depthAttachment above), so the pyramid reads the very texture the geometry was drawn
+        // into. The blit that used to feed it is gone with the MC-depth dependency.
+        // One-shot probe, encoded before submit so it rides this command buffer: read the LOD pass's
+        // OWN depth attachment back. That texture is the pyramid's source now, so if it is empty the
+        // cull has nothing to test and no amount of pyramid wiring helps. Encoded here, read after the
+        // drain below.
+        if (HIZ_BUILD && !this.hizProbeDone && this.hizProbeBuffer == null && this.metalDepthTex != null) {
+            try {
+                this.hizProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
+                voxyMb.copyTextureToBuffer(this.metalDepthTex, this.hizProbeBuffer, fbw, fbh, 16);
+            } catch (Throwable t) {
+                this.hizProbeDone = true;
+                me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] readback unavailable: " + t);
             }
         }
         backend.submit();
         this.perfSubmit += System.nanoTime() - perfT3;
         this.perfReport();
         this.metalFrame++;
+
+        // Report once the drain has returned, so the buffer is CPU-visible and complete.
+        if (!this.hizProbeDone && this.hizProbeBuffer != null) {
+            this.hizProbeDone = true;
+            logDepthProbe("the LOD pass's own depth attachment (the pyramid's source)",
+                    this.hizProbeBuffer, fbw * fbh);
+        }
 
         // [Metal-VXPLANES] one-shot CPU read-back of the material g-buffer planes
         // (VOXY_VX_DUMP_PLANES=1). submit() waited, so the IOSurface holds the exact
