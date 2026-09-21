@@ -44,6 +44,11 @@ public final class ShaderCompilerSmokeTest {
                 "HAS_STATISTICS", "1",
                 "STATISTICS_BUFFER_BINDING", "8");
 
+        // The reverse-Z Hi-Z variant. Both shaders branch on this define, and both branches are only
+        // ever compiled under it -- so without a case here the first compiler to see them would be the
+        // running client, where a GLSL error is a crash on startup rather than a failed test.
+        Map<String, String> hizReverseZ = Map.of("VOXY_HIZ_REVERSE_Z", "");
+
         // Defines for M9-migrated shaders — keep in sync with the Java callers
         // (FullscreenBlit constructors in AbstractRenderPipeline / NormalRenderPipeline).
         Map<String, String> blitDepthCutoutFog = Map.of("EMIT_COLOUR", "", "USE_ENV_FOG", "");
@@ -56,6 +61,19 @@ public final class ShaderCompilerSmokeTest {
                 new ShaderCase("post/blit_texture_depth_cutout.frag", RuntimeShaderCompiler.Stage.FRAGMENT, empty, "post/blit_texture_depth_cutout.frag (Iris path — no EMIT_COLOUR)"),
                 new ShaderCase("post/blit_texture_depth_cutout.frag", RuntimeShaderCompiler.Stage.FRAGMENT, blitDepthCutoutFog, "post/blit_texture_depth_cutout.frag (NormalRenderPipeline — EMIT_COLOUR + USE_ENV_FOG)"),
                 new ShaderCase("hiz/blit.fsh", RuntimeShaderCompiler.Stage.FRAGMENT, empty, "hiz/blit.fsh"),
+                // The reverse-Z variant of both Hi-Z shaders. These compile only under this define, so
+                // without the cases the branches would be first compiled by the running client -- where
+                // a GLSL error is a crash on startup rather than a failed test. The Metal path injects
+                // VOXY_HIZ_REVERSE_Z and takes exactly these two branches.
+                new ShaderCase("hiz/blit.fsh", RuntimeShaderCompiler.Stage.FRAGMENT, hizReverseZ,
+                        "hiz/blit.fsh (+ VOXY_HIZ_REVERSE_Z)"),
+                // NOT added: the same case for lod/hierarchical/traversal_dev.comp, which is where
+                // screenspace.glsl's reverse-Z branch lives. This harness cannot compile that shader at
+                // all -- it rejects its macro-valued `layout(binding = ...)` with "non-literal layout-id
+                // value" and wants an extension for a string literal, both independent of any define --
+                // which is why no traversal case existed here before. That branch is therefore verified
+                // by the client compiling it at startup and by a run, not by this test; a syntax error in
+                // it surfaces as a crash on launch.
                 new ShaderCase("post/fullscreen.vert", RuntimeShaderCompiler.Stage.VERTEX, empty, "post/fullscreen.vert"),
                 new ShaderCase("hiz/blit.vsh", RuntimeShaderCompiler.Stage.VERTEX, empty, "hiz/blit.vsh (M9 — TRIANGLE_STRIP corners)"),
                 new ShaderCase("chunkoutline/outline.vsh", RuntimeShaderCompiler.Stage.VERTEX, empty, "chunkoutline/outline.vsh (M9 — integer-mix extension)"),

@@ -153,6 +153,13 @@ public class HierarchicalOcclusionTraverser {
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                 != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
             m.put("VOXY_NO_HIZ", "");
+            // The whole-frame Metal path is reverse-Z (near 1, far 0), so the pyramid it reads is
+            // min-reduced and the box test is flipped -- see screenspace.glsl and hiz/blit.fsh. The
+            // define is injected here even while the pyramid is unbuilt: with the zero-filled pyramid
+            // every sample is 0.0, which hits the guard and means "not occluded", so the cull stays a
+            // no-op until the build is wired up. That keeps the flip and the enablement independently
+            // verifiable instead of landing as one change whose failure has two possible causes.
+            m.put("VOXY_HIZ_REVERSE_Z", "");
         }
         m.put("HIZ_BINDING", Integer.toString(HIZ_BINDING));
         m.put("SCENE_UNIFORM_BINDING", Integer.toString(SCENE_UNIFORM_BINDING));

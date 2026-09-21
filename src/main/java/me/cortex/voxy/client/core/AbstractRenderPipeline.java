@@ -128,6 +128,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      */
     private me.cortex.voxy.client.core.metal.MetallumAttachmentTexture metallumColor;
     private me.cortex.voxy.client.core.metal.MetallumAttachmentTexture metallumDepth;
+    /** One-shot guard for the [Metal-DEPTHFMT] report; see where the depth attachment is refreshed. */
+    private boolean depthFormatLogged;
     /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
@@ -587,6 +589,23 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             }
             this.metallumColor.refresh();
             this.metallumDepth.refresh();
+            // One-shot: what FORMAT is MC's Metal depth attachment? This decides whether Voxy's
+            // hierarchical occlusion pyramid can be built straight from it or needs a sampleable copy
+            // first. A *Stencil8 format cannot be reliably sampled as texture2d<float> -- that is the
+            // documented failure behind both the Iris depth export reading zeros and the parked Hi-Z
+            // build -- while a pure Depth32Float can. Numeric values are MTLPixelFormat: 252 =
+            // Depth32Float, 260 = Depth32Float_Stencil8. Logged once: it is a property of the frame,
+            // not of any particular frame, and the answer is not deducible from source because
+            // Metallum maps the format through from whatever MC requested.
+            if (!this.depthFormatLogged && this.metallumDepth.mtlPixelFormat() != 0) {
+                this.depthFormatLogged = true;
+                final int fmt = this.metallumDepth.mtlPixelFormat();
+                me.cortex.voxy.common.Logger.info("[Metal-DEPTHFMT] MC depth attachment pixelFormat=" + fmt
+                        + (fmt == 252 ? " Depth32Float -- sampleable, the Hi-Z can read it directly"
+                        : fmt == 260 ? " Depth32Float_Stencil8 -- NOT reliably sampleable as texture2d<float>,"
+                                     + " so the Hi-Z needs a pure-D32F copy (metalDepthTex is exactly that)"
+                        : " unrecognised -- check MTLPixelFormat"));
+            }
         }
         // Both attachments are only ASSIGNED inside the `if` above, so on a frame where the target is
         // unavailable they are still null -- and the diag line below dereferences them. Guarding here

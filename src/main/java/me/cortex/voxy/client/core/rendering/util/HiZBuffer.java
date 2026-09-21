@@ -75,10 +75,20 @@ public class HiZBuffer {
                 new PipelineState.DepthState(true, true, PipelineState.CompareOp.ALWAYS),
                 PipelineState.BlendState.OPAQUE,
                 PipelineState.RasterState.NO_CULL);
+        // The frame's depth convention decides the whole pyramid: GL is standard-Z (near 0, far 1) and
+        // reduces with a max; the whole-frame Metal path is reverse-Z (near 1, far 0) and must reduce
+        // with a min. Getting this wrong does not fail to compile -- it produces a pyramid whose
+        // "farthest occluder" is actually the nearest one, which culls geometry that is in front of
+        // everything. Injected rather than branched at runtime so the two variants are separately
+        // compiled and separately testable.
+        java.util.Map<String, String> blitDefines = new java.util.LinkedHashMap<>();
+        if (this.backend.getType() != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+            blitDefines.put("VOXY_HIZ_REVERSE_Z", "");
+        }
         this.blitPipeline = this.backend.createGraphicsPipeline(new GraphicsPipelineDesc(
                 ShaderLoader.parse("voxy:hiz/blit.vsh"),
                 ShaderLoader.parse("voxy:hiz/blit.fsh"),
-                null,                       // no defines
+                blitDefines,
                 null, null,                  // no MSL
                 null, null,                  // no SPIRV
                 0,                           // no color format — depth-only pass

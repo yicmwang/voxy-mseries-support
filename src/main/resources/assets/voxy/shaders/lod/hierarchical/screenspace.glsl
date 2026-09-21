@@ -159,14 +159,24 @@ bool isCulledByHiz() {
     ivec2 mxbb = min(ivec2(maxBB.xy*ssize),ssize-1);
     ivec2 mnbb = ivec2(minBB.xy*ssize);
 
+#ifdef VOXY_HIZ_REVERSE_Z
+    // Reverse-Z frame: near is 1, far is 0, and the pyramid holds the tile's FARTHEST occluder --
+    // the smallest value -- so this is a min-reduce. It starts at 1.0 (the near plane) rather than
+    // -1.0, because a min over non-negative depths would otherwise just return the initial value.
+    float pointSample = 1.0f;
+#else
     float pointSample = -1.0f;
-    //float pointSample2 = 0.0f;
+#endif
     for (int x = mnbb.x; x<=mxbb.x; x++) {
         for (int y = mnbb.y; y<=mxbb.y; y++) {
             float sp = texelFetch(hizDepthSampler, ivec2(x, y), ml).r;
             //pointSample2 = max(sp, pointSample2);
             //sp = mix(sp, pointSample, 0.9999999f<=sp);
+#ifdef VOXY_HIZ_REVERSE_Z
+            pointSample = min(sp, pointSample);
+#else
             pointSample = max(sp, pointSample);
+#endif
         }
     }
     //pointSample = mix(pointSample, pointSample2, pointSample<=0.000001f);
@@ -174,16 +184,28 @@ bool isCulledByHiz() {
     // M13 2026-05-15: on backends that haven't built the HiZ pyramid yet
     // (Metal still uses ensureAllocated only — the zero-init pyramid is
     // a parked stub until cross-context MC-depth import lands), every
-    // texelFetch returns 0.0. The original `pointSample <= minBB.z`
+    // texelFetch returns 0.0. The GL branch's `pointSample <= minBB.z`
     // returns TRUE for any box with minBB.z >= 0 — i.e. every visible
     // box — which culls all top-level LOD nodes and leaves renderList
     // empty. Skip the occlusion test when the HiZ is uninitialised
     // (pointSample == 0) so the stub becomes a true "always pass"
-    // instead of an "always reject". Real GL-path HiZ writes 1.0 in
-    // sky regions so pointSample is positive everywhere and this guard
-    // doesn't change its behaviour.
+    // instead of an "always reject".
+    //
+    // The guard is convention-independent, which is why it needs no
+    // reverse-Z variant: sky is 0.0 in the GL pipeline too (initDepthStencil
+    // blits depth 0 wherever the stencil is 0 -- the earlier claim here that
+    // "Real GL-path HiZ writes 1.0 in sky regions" was wrong), and a
+    // min-reduce over a sky-containing footprint lands on 0.0 as well.
     if (pointSample <= 0.0) return false;
+#ifdef VOXY_HIZ_REVERSE_Z
+    // A box is occluded when it lies entirely BEHIND the tile's farthest occluder. Under reverse-Z
+    // "behind" means a SMALLER depth, and the box's nearest point is maxBB.z (its largest corner, since
+    // larger is nearer), so the test is `tileFarthest > boxNearest` -- the GL branch with both sides
+    // flipped.
+    return pointSample > maxBB.z;
+#else
     return pointSample<=minBB.z;
+#endif
 }
 
 
