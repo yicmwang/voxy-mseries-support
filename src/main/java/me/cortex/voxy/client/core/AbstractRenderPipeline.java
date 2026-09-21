@@ -162,6 +162,44 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     /** Readback of the pyramid's mip 0 -- the thing the cull actually samples; see [Metal-HIZPROBE]. */
     private me.cortex.voxy.client.core.gpu.IGpuBuffer hizPyramidProbeBuffer;
     private boolean hizPyramidProbeDone;
+    /** Readback of the albedo attachment under FORCE_MAGENTA; see [Metal-MAGENTAPROBE]. */
+    private me.cortex.voxy.client.core.gpu.IGpuBuffer magentaProbeBuffer;
+    private boolean magentaProbeDone;
+
+    /**
+     * Counts MAGENTA texels in a readback of the LOD pass's ALBEDO attachment.
+     *
+     * <p>This exists to answer a question that has been assumed rather than measured: does the LOD pass
+     * rasterize anything at all? With {@code VOXY_LOD_FORCE_MAGENTA=1} the terrain shader writes solid
+     * magenta as its first statement, so every fragment that reaches the framebuffer and survives the
+     * depth test paints magenta. A zero count means no LOD fragment is reaching the attachment, which
+     * would explain an empty second attachment with one cause instead of two -- and would make every
+     * MRT measurement in optimisation.MD 9.6 a measurement of nothing.
+     *
+     * <p>Non-uniformity of the albedo attachment does NOT answer this: that attachment is MC's own
+     * colour target, so it is full of vanilla terrain whatever the LOD does.
+     */
+    private static void logMagentaProbe(final String what,
+                                        final me.cortex.voxy.client.core.gpu.IGpuBuffer buf,
+                                        final int n) {
+        if (!(buf instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) {
+            me.cortex.voxy.common.Logger.info("[Metal-MAGENTAPROBE] " + what + ": not a CPU-visible buffer");
+            return;
+        }
+        final long ptr = mb.getContentsPtr() + 16;
+        int magenta = 0, nonZero = 0;
+        for (int i = 0; i < n; i++) {
+            // An RGBA8 texel read as a little-endian int is R | G<<8 | B<<16 | A<<24.
+            final int v = MemoryUtil.memGetInt(ptr + (long) i * 4L);
+            if (v != 0) nonZero++;
+            final int r = v & 0xFF, g = (v >>> 8) & 0xFF, b = (v >>> 16) & 0xFF;
+            if (r > 200 && g < 60 && b > 200) magenta++;
+        }
+        me.cortex.voxy.common.Logger.info("[Metal-MAGENTAPROBE] " + what + ": " + n + " texels, magenta="
+                + magenta + " nonZero=" + nonZero
+                + (magenta == 0 ? "  <-- NO LOD FRAGMENT REACHED THIS ATTACHMENT"
+                        : "  <-- the LOD rasterizes (" + (100.0 * magenta / n) + "% magenta)"));
+    }
 
     /** Report the distribution of a full-screen depth readback. Shared by the two [Metal-HIZPROBE] calls. */
     private static void logDepthProbe(final String what,
@@ -426,6 +464,10 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (this.hizPyramidProbeBuffer != null) {
             this.hizPyramidProbeBuffer.free();
             this.hizPyramidProbeBuffer = null;
+        }
+        if (this.magentaProbeBuffer != null) {
+            this.magentaProbeBuffer.free();
+            this.magentaProbeBuffer = null;
         }
         super.free0();
     }
@@ -997,6 +1039,21 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                 me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] attachment readback unavailable: " + t);
             }
         }
+        // Only meaningful under VOXY_LOD_FORCE_MAGENTA, so it costs nothing on a normal run: the LOD
+        // shader paints solid magenta as its first statement, and this counts how much of the albedo
+        // attachment is magenta. Zero means no LOD fragment reached the framebuffer at all.
+        boolean probeMagenta = false;
+        if (!this.magentaProbeDone && "1".equals(System.getenv("VOXY_LOD_FORCE_MAGENTA"))
+                && this.metalFrame > 900 && this.metallumColor != null) {
+            try {
+                this.magentaProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
+                voxyMb.copyTextureToBuffer(this.metallumColor, this.magentaProbeBuffer, fbw, fbh, 16);
+                probeMagenta = true;
+            } catch (Throwable t) {
+                me.cortex.voxy.common.Logger.info("[Metal-MAGENTAPROBE] readback unavailable: " + t);
+            }
+            this.magentaProbeDone = true;
+        }
         boolean probePyramid = false;
         if (HIZ_BUILD && !this.hizPyramidProbeDone && this.metalFrame > 900) {
             // Mip 0's dimensions are the highest one bits of the viewport -- HiZBuffer rounds down to a
@@ -1028,6 +1085,9 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (probePyramid) {
             logDepthProbe("pyramid mip0 (what the cull samples)",
                     this.hizPyramidProbeBuffer, Integer.highestOneBit(fbw) * Integer.highestOneBit(fbh));
+        }
+        if (probeMagenta) {
+            logMagentaProbe("albedo (attachment 0) under FORCE_MAGENTA", this.magentaProbeBuffer, fbw * fbh);
         }
 
         // [Metal-VXPLANES] one-shot CPU read-back of the material g-buffer planes

@@ -14,30 +14,33 @@ import me.cortex.voxy.client.core.metal.MetalRenderBackend;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * Two-colour-attachment MRT harness, built to make the occlusion cull's last blocker reproducible in
  * seconds instead of six minutes.
  *
- * <p>What it answers, and why it is the right question. The pyramid's source is quads.frag's SECOND
- * colour output, and in the game that attachment reads empty while every structural link around it
- * checks out: the define reaches the shader, the compiled MSL declares {@code [[color(1)]]} and
- * assigns it, the pipeline declares two colour formats, the pass carries two attachments with STORE,
- * the wiring loops are indexed correctly, and a write mask is now set explicitly. So the fault is
- * either below all of that -- in {@code createGraphicsPipeline} or {@code beginRenderPass} -- or in
- * something about the game's configuration that this harness deliberately excludes.
+ * <p>The pyramid's source is quads.frag's SECOND colour output, and in the game that attachment reads
+ * empty while every measurable link around it is correct: the pass descriptor carries two colour
+ * attachments with slot 1 bound to the right texture at RGBA8Unorm and a Store action
+ * ({@code [Metal-PASSSLOT]}), the pipeline descriptor carries two RGBA8Unorm attachments with write
+ * mask All ({@code [Metal-PIPESLOT]}), the compiled MSL declares and assigns {@code [[color(1)]]}, the
+ * define reaches the shader, and this harness proves the backend delivers a second colour output.
  *
- * <p>It excludes Metallum, the LOD pass, indirect draws, depth attachments and the traversal. If
- * attachment 1 comes back with the shader's constant, MRT works end to end at the backend level and
- * the fault is in the game's configuration. If it comes back with its clear colour, the fault is in
- * the backend and this test now reproduces it in seconds.
+ * <p>What is left is the one input never varied: the SHADER'S OWN SHAPE. The game's quads.frag is a
+ * large shader with {@code discard} paths and a {@code gl_FragCoord} input; this harness's fragment
+ * shader had neither. So this runs the same pass four times over variants of that shader, which is the
+ * cheapest way to find out whether the shader is the difference.
  *
  * <p>Run with {@code ./gradlew testMetalMrt}.
  */
 public final class MetalMrtSmokeTest {
 
     private MetalMrtSmokeTest() {}
+
+    /** The one varying the harness vertex shader supplies. */
+    private static final String VERT = "tools/triangle.vert";
 
     public static void main(String[] args) throws Exception {
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -51,116 +54,115 @@ public final class MetalMrtSmokeTest {
             System.exit(2);
         }
 
-        Path shadersRoot = Path.of("src/main/resources/assets/voxy/shaders/tools").toAbsolutePath();
-        String vertGlsl = Files.readString(shadersRoot.resolve("triangle.vert"), StandardCharsets.UTF_8);
-        String fragGlsl = Files.readString(shadersRoot.resolve("mrt.frag"), StandardCharsets.UTF_8);
+        Path shadersRoot = Path.of("src/main/resources/assets/voxy/shaders").toAbsolutePath();
+        String vertGlsl = Files.readString(shadersRoot.resolve(VERT), StandardCharsets.UTF_8);
+        String fragGlsl = Files.readString(shadersRoot.resolve("tools/mrt.frag"), StandardCharsets.UTF_8);
 
         RuntimeShaderCompiler.Result vertCompiled = RuntimeShaderCompiler.compile(
                 vertGlsl, RuntimeShaderCompiler.Stage.VERTEX, Map.of(),
                 RuntimeShaderCompiler.Target.METAL_MSL);
-        RuntimeShaderCompiler.Result fragCompiled = RuntimeShaderCompiler.compile(
-                fragGlsl, RuntimeShaderCompiler.Stage.FRAGMENT, Map.of(),
-                RuntimeShaderCompiler.Target.METAL_MSL);
 
-        // The MSL is the first thing worth asserting: SPIRV-Cross dropping or renaming the second
-        // output would make every downstream check moot, and it is the one link this harness can
-        // inspect directly.
-        String fragMsl = fragCompiled.mslSource();
-        boolean mslHasColor1 = fragMsl.contains("[[color(1)]]");
-        System.out.println("mrt.frag MSL declares [[color(1)]]: " + (mslHasColor1 ? "YES" : "NO"));
-        if (!mslHasColor1) {
-            System.out.println(fragMsl);
-            throw new RuntimeException("SPIRV-Cross did not emit a second colour output for mrt.frag");
-        }
-
-        // GL_RGBA8 = 0x8058, GL_TEXTURE_2D = 0x0DE1, GL_DEPTH_COMPONENT32F = 0x8CAC.
+        // GL_RGBA8 = 0x8058, GL_DEPTH_COMPONENT32F = 0x8CAC, GL_TEXTURE_2D = 0x0DE1.
         final int GL_RGBA8 = 0x8058;
         final int GL_DEPTH_COMPONENT32F = 0x8CAC;
         final int GL_TEXTURE_2D = 0x0DE1;
         final int W = 256, H = 256;
 
+        // The variants, in the order that isolates one feature at a time. The baseline has neither
+        // feature; each step adds one.
+        String[][] variants = {
+                {"baseline (constant, no discard, no gl_FragCoord)", ""},
+                {"+ gl_FragCoord.z (adds a [[position]] fragment input)", "MRT_FRAGCOORD"},
+                {"+ a never-taken discard (mirrors quads.frag's cutout)", "MRT_DISCARD"},
+                {"+ both", "MRT_FRAGCOORD,MRT_DISCARD"},
+        };
+
         MetalRenderBackend backend = new MetalRenderBackend();
-        IGpuPipeline plain = null;
-        IGpuPipeline withDepth = null;
         try {
-            // Phase 1 -- the minimal shape: two colour attachments, nothing else.
-            plain = backend.createGraphicsPipeline(new GraphicsPipelineDesc(
-                    vertGlsl, fragGlsl, Map.of(),
-                    vertCompiled.mslSource(), fragCompiled.mslSource(),
-                    vertCompiled.spirv(), fragCompiled.spirv(),
-                    new int[]{GL_RGBA8, GL_RGBA8},
-                    VertexLayout.EMPTY,
-                    PipelineState.DEFAULT,
-                    "voxy:tools/mrt"));
-            System.out.println("=== phase 1: two colour attachments, no depth ===");
-            boolean plainOk = phase(backend, plain, null, W, H, GL_RGBA8, GL_TEXTURE_2D);
+            int failures = 0;
+            for (String[] variant : variants) {
+                String label = variant[0];
+                Map<String, String> defines = new LinkedHashMap<>();
+                for (String d : variant[1].split(",")) {
+                    if (!d.isEmpty()) defines.put(d, "");
+                }
 
-            // Phase 2 -- the one shape this harness was built to add, because it is the largest
-            // structural difference between it and the game's LOD pass. The game attaches MC's
-            // Depth32Float depth target and depth-tests against it; phase 1 attaches nothing and its
-            // pipeline has depth disabled. Everything else about the pass is identical.
-            IGpuTexture depth = backend.createTexture(GL_TEXTURE_2D)
-                    .store(GL_DEPTH_COMPONENT32F, 1, W, H).name("voxy-mrt-depth");
-            withDepth = backend.createGraphicsPipeline(new GraphicsPipelineDesc(
-                    vertGlsl, fragGlsl, Map.of(),
-                    vertCompiled.mslSource(), fragCompiled.mslSource(),
-                    vertCompiled.spirv(), fragCompiled.spirv(),
-                    new int[]{GL_RGBA8, GL_RGBA8},
-                    VertexLayout.EMPTY,
-                    PipelineState.OPAQUE_MESH,
-                    "voxy:tools/mrt-depth"));
-            System.out.println();
-            System.out.println("=== phase 2: two colour attachments PLUS a depth attachment ===");
-            boolean depthOk = phase(backend, withDepth, depth, W, H, GL_RGBA8, GL_TEXTURE_2D);
+                RuntimeShaderCompiler.Result fragCompiled = RuntimeShaderCompiler.compile(
+                        fragGlsl, RuntimeShaderCompiler.Stage.FRAGMENT, defines,
+                        RuntimeShaderCompiler.Target.METAL_MSL);
+                boolean mslHasColor1 = fragCompiled.mslSource().contains("[[color(1)]]");
 
-            System.out.println();
-            if (depthOk) {
-                System.out.println("MRT OK in BOTH shapes — a second colour attachment receives its "
-                        + "write with and without a depth attachment present.");
-                System.out.println("The game's fault is therefore in something this harness still "
-                        + "excludes: Metallum's own attachments in slots 0/depth, the LOD pass's "
-                        + "specific depth state, or the traversal's frame ordering.");
-            } else {
-                System.out.println("REPRODUCED: attachment 1 lands without a depth attachment and is "
-                        + "dropped with one. See optimisation.MD 8.6.");
+                String pipeLabel = "voxy:tools/mrt[" + variant[1] + "]";
+                IGpuPipeline pipeline = backend.createGraphicsPipeline(new GraphicsPipelineDesc(
+                        vertGlsl, fragGlsl, defines,
+                        vertCompiled.mslSource(), fragCompiled.mslSource(),
+                        vertCompiled.spirv(), fragCompiled.spirv(),
+                        new int[]{GL_RGBA8, GL_RGBA8},
+                        VertexLayout.EMPTY,
+                        PipelineState.OPAQUE_MESH,
+                        pipeLabel));
+                try {
+                    System.out.println("=== " + label);
+                    if (!mslHasColor1) {
+                        System.out.println("  MSL declares [[color(1)]]: NO — the output is gone before "
+                                + "Metal ever sees it");
+                        failures++;
+                        continue;
+                    }
+                    System.out.println("  MSL declares [[color(1)]]: YES");
+                    if (!phase(backend, pipeline, W, H, GL_RGBA8, GL_DEPTH_COMPONENT32F, GL_TEXTURE_2D,
+                            defines.containsKey("MRT_FRAGCOORD"))) {
+                        failures++;
+                    }
+                } finally {
+                    pipeline.close();
+                }
             }
-            if (!plainOk || !depthOk) {
-                throw new RuntimeException("MRT harness FAILED — see the per-phase lines above");
+            System.out.println();
+            if (failures == 0) {
+                System.out.println("MRT OK in all " + variants.length + " shader variants — the shader's "
+                        + "shape is NOT the difference. What remains excluded is the frame orchestration "
+                        + "around the pass (Metallum's attachments in slots 0 and depth, the LOD pass's "
+                        + "specific depth state).");
+            } else {
+                System.out.println(failures + " of " + variants.length + " variants FAILED — the shader "
+                        + "shape IS the difference; bisect from the first failing variant.");
+                throw new RuntimeException("MRT harness found a failing variant");
             }
         } finally {
-            if (plain != null) plain.close();
-            if (withDepth != null) withDepth.close();
             backend.shutdown();
         }
     }
 
     /**
-     * Renders the two-output triangle into a fresh pair of colour attachments and reports what landed
-     * in each. {@code depth} may be null for a pass with no depth attachment at all.
+     * Renders the two-output triangle into a fresh pair of colour attachments, with a depth attachment
+     * present (the game's pass has one), and reports what landed in each.
      *
      * <p>Attachment 0 is cleared to a distinct colour and attachment 1 to black, so "the write landed",
      * "the attachment kept its clear colour" and "the value is wrong" are three distinguishable
      * outcomes rather than one zero.
+     *
+     * @param fragCoordVariant true when this variant writes {@code gl_FragCoord.z}, whose expected value
+     *                         depends on the triangle's depth rather than being a known constant
      */
-    private static boolean phase(MetalRenderBackend backend, IGpuPipeline pipeline, IGpuTexture depth,
-                                 int W, int H, int GL_RGBA8, int GL_TEXTURE_2D) {
+    private static boolean phase(MetalRenderBackend backend, IGpuPipeline pipeline, int W, int H,
+                                 int GL_RGBA8, int GL_DEPTH_COMPONENT32F, int GL_TEXTURE_2D,
+                                 boolean fragCoordVariant) {
         IGpuTexture target0 = backend.createTexture(GL_TEXTURE_2D).store(GL_RGBA8, 1, W, H)
                 .name("voxy-mrt-target0");
         IGpuTexture target1 = backend.createTexture(GL_TEXTURE_2D).store(GL_RGBA8, 1, W, H)
                 .name("voxy-mrt-target1");
+        IGpuTexture depth = backend.createTexture(GL_TEXTURE_2D)
+                .store(GL_DEPTH_COMPONENT32F, 1, W, H).name("voxy-mrt-depth");
 
-        RenderPassDesc.Builder b = RenderPassDesc.builder(W, H)
+        RenderPassDesc pass = RenderPassDesc.builder(W, H)
                 .clearColor(target0, 0.1f, 0.1f, 0.15f, 1.0f)
                 .addColorAttachment(target1, 0,
                         RenderPassDesc.LoadAction.CLEAR, RenderPassDesc.StoreAction.STORE,
-                        0f, 0f, 0f, 0f);
-        if (depth != null) {
-            b.depthAttachment(depth, 0,
-                    RenderPassDesc.LoadAction.CLEAR, RenderPassDesc.StoreAction.STORE, 1.0f);
-        }
-        RenderPassDesc pass = b.build();
-        System.out.println("  pass colourAttachments=" + pass.colorAttachments().size()
-                + " depthAttachment=" + (pass.depthAttachment() == null ? "none" : "present"));
+                        0f, 0f, 0f, 0f)
+                .depthAttachment(depth, 0,
+                        RenderPassDesc.LoadAction.CLEAR, RenderPassDesc.StoreAction.STORE, 1.0f)
+                .build();
 
         try (RenderEncoder enc = backend.beginRenderPass(pass)) {
             enc.setPipeline(pipeline);
@@ -173,9 +175,8 @@ public final class MetalMrtSmokeTest {
 
         int clear0 = packRgba(0.1f, 0.1f, 0.15f, 1.0f);
         int clear1 = packRgba(0f, 0f, 0f, 0f);
-        int want1 = packRgba(0.25f, 0.5f, 0.75f, 1.0f);
+        int want1 = fragCoordVariant ? packRgba(0f, 0f, 0f, 1f) : packRgba(0.25f, 0.5f, 0.75f, 1.0f);
 
-        // The triangle's interior; NDC y is up, pixel y is down.
         int interior0 = sample(px0, W, W / 2, H * 5 / 8);
         int interior1 = sample(px1, W, W / 2, H * 5 / 8);
         int corner1 = sample(px1, W, 4, 4);
