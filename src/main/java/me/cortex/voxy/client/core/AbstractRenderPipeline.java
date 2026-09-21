@@ -911,7 +911,12 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // OWN depth attachment back. That texture is the pyramid's source now, so if it is empty the
         // cull has nothing to test and no amount of pyramid wiring helps. Encoded here, read after the
         // drain below.
-        if (HIZ_BUILD && !this.hizProbeDone && this.hizProbeBuffer == null && this.metalDepthTex != null) {
+        // The frame gate is the whole point: an earlier version of this probe latched on the FIRST LOD
+        // frame, which draws nothing (the log shows sections=0 on frame 1), so its all-zero result
+        // said nothing about whether depth can be read -- it was the correct answer for an empty
+        // frame, and it was read as a finding anyway. Wait until the scene is populated.
+        if (HIZ_BUILD && !this.hizProbeDone && this.hizProbeBuffer == null
+                && this.metalDepthTex != null && this.metalFrame > 300) {
             try {
                 this.hizProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
                 voxyMb.copyTextureToBuffer(this.metalDepthTex, this.hizProbeBuffer, fbw, fbh, 16);
