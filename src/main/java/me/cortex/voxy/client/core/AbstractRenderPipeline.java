@@ -130,6 +130,19 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private me.cortex.voxy.client.core.metal.MetallumAttachmentTexture metallumDepth;
     /** One-shot guard for the [Metal-DEPTHFMT] report; see where the depth attachment is refreshed. */
     private boolean depthFormatLogged;
+    /** One-shot guard for [Metal-HIZBUILD]: which branch the pyramid build took, and why. */
+    private boolean hizBuildLogged;
+
+    /**
+     * VOXY_HIZ_BUILD=1 enables the Hi-Z pyramid build on the Metal path.
+     *
+     * <p>Off by default because the build currently cannot cull: the depth attachment it samples reads
+     * as zeros, so the pyramid is all-zero, the traversal's guard fires for every box, and the only
+     * measurable effect is the cost of building it (+3.7 to +7 ms of `submit`, ~11 mip-chain passes).
+     * The wiring is kept so that the missing piece -- a texture-to-texture copy of MC's depth into a
+     * sampleable Voxy-owned texture -- can be added and A/B'd with this one switch.
+     */
+    private static final boolean HIZ_BUILD = "1".equals(System.getenv("VOXY_HIZ_BUILD"));
     /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
@@ -437,7 +450,63 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //    Metal at (re)allocation — MTLTexture contents are otherwise
         //    UNDEFINED and the screenspace.glsl "pointSample <= 0.0" guard
         //    needs real zeros, not luck.
-        viewport.hiZBuffer.ensureAllocated(viewport.width, viewport.height);
+        // 2) Build the Hi-Z pyramid from THIS frame's depth, so the traversal below can cull occluded
+        //    subtrees -- the thing upstream has and this build has never had on Metal.
+        //
+        //    Two facts make it possible now, and neither held when the build was parked in 2026-05:
+        //      - MC's depth attachment is Depth32Float (see the [Metal-DEPTHFMT] report below), i.e. a
+        //        format a sampler can read. The parked attempt blamed a packed Depth32Float_Stencil8,
+        //        which genuinely cannot be sampled as texture2d<float>. That is not what this path has.
+        //      - ensureAllocated zero-fills every mip, so an unbuilt or partly-built pyramid reads as
+        //        "nothing occludes" instead of the garbage that made the original attempt cull subtrees
+        //        on noise. buildMipChain calls it itself.
+        //
+        //    ORDERING, which is the only real constraint: the hook fires at the TAIL of Sodium's SOLID
+        //    pass (MixinDefaultChunkRenderer), so vanilla's terrain for this frame is already in the
+        //    attachment -- this is NOT last frame's depth. Build after that is populated and before
+        //    doTraversal, and nothing else matters. The refresh therefore has to happen HERE rather than
+        //    in the passBuilder block below, which runs after the traversal.
+        //
+        //    If the attachment is unavailable (no Metallum target this frame) the pyramid stays
+        //    zero-filled and the traversal's guard makes the cull a no-op -- i.e. exactly the previous
+        //    behaviour, so this cannot regress that case.
+        if (metallumTarget) {
+            if (this.metallumDepth == null) {
+                this.metallumDepth = me.cortex.voxy.client.core.metal.MetallumAttachmentTexture.depth();
+            }
+            this.metallumDepth.refresh();
+        }
+        //    OFF BY DEFAULT, and that is a measured decision rather than caution. The build works --
+        //    it runs clean, no Metal validation errors -- but it culls nothing, because the depth
+        //    attachment it samples reads as zeros: MC's attachment is Depth32Float (fmt 252) yet cannot
+        //    be sampled, which is a USAGE-flag problem, not a format one, and is exactly why the
+        //    orphaned metalDepthTex was created as a copy target. Until that copy exists the pyramid is
+        //    pure cost: measured +3.7 to +7 ms of `submit` across two runs, for zero culled sections
+        //    (`maxDrawCount` unchanged at ~27k). Roughly eleven mip-chain render passes per frame.
+        //
+        //    So the default path is ensureAllocated -- a zero-filled pyramid, whose guard makes the cull
+        //    a no-op, which is the behaviour verified before this was written. VOXY_HIZ_BUILD=1 turns
+        //    the build on, which is what makes the eventual fix A/B-able with one switch.
+        if (HIZ_BUILD && this.metallumDepth != null && this.metallumDepth.id() != -1) {
+            viewport.hiZBuffer.buildMipChain(this.metallumDepth, viewport.width, viewport.height);
+            if (!this.hizBuildLogged) {
+                this.hizBuildLogged = true;
+                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] built pyramid from depth attachment"
+                        + " handle=" + this.metallumDepth.metalHandle()
+                        + " fmt=" + this.metallumDepth.mtlPixelFormat()
+                        + " " + viewport.width + "x" + viewport.height
+                        + " levels=" + viewport.hiZBuffer.getPackedLevels());
+            }
+        } else {
+            viewport.hiZBuffer.ensureAllocated(viewport.width, viewport.height);
+            if (!this.hizBuildLogged) {
+                this.hizBuildLogged = true;
+                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] NO depth attachment"
+                        + " (target=" + metallumTarget + ", depth=" + this.metallumDepth
+                        + (this.metallumDepth == null ? "" : " id=" + this.metallumDepth.id())
+                        + ") -- pyramid stays zero-filled and the cull is a no-op");
+            }
+        }
 
         // 2b) Lazy-allocate the Metal-side depth texture for our render pass.
         //     PURE depth format (not D24S8): the packed Depth32Float_Stencil8

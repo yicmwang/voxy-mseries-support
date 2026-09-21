@@ -141,24 +141,24 @@ public class HierarchicalOcclusionTraverser {
         m.put("MAX_ITERATIONS", Integer.toString(MAX_ITERATIONS));
         m.put("LOCAL_SIZE_BITS", Integer.toString(LOCAL_WORK_SIZE_BITS));
         m.put("MAX_REQUEST_QUEUE_SIZE", Integer.toString(MAX_REQUEST_QUEUE_SIZE));
-        // Metal never builds the Hi-Z pyramid: the only caller of HiZBuffer.buildMipChain is
-        // AbstractRenderPipeline.innerPrimaryWork, and the Metal path deliberately runs a copy of that
-        // method "minus the GL bits (HiZBuffer.buildMipChain, ...)" (AbstractRenderPipeline:458). The
-        // traversal then samples that unbuilt texture, and the shader's guard against an unbuilt
-        // pyramid assumes it reads zeros -- but a Metal Shared texture is not zeroed on allocation, so
-        // it reads garbage. The result is a subtree-cull test driven by noise: sections drop out at
-        // random (empty chunks, including near the player) and distant coarse nodes flicker in and out
-        // as opaque black masses. Disabled here rather than left to chance; Voxy draws into MC's depth,
-        // so the real depth test already provides the occlusion the LOD needs.
+        // The occlusion test is now ENABLED on Metal, and this is deliberately landing as its own step
+        // with no other change so that it can be checked for being a no-op.
+        //
+        // It should be one. The pyramid is zero-filled by ensureAllocated on (re)allocation -- which is
+        // the fix for the original failure, where a Metal Shared texture is NOT zeroed and the test
+        // therefore culled subtrees on noise (sections dropping out at random, distant nodes flickering
+        // in as black masses). With real zeros every sample is 0.0, which is <= the guard, so
+        // isCulledByHiz() returns false for every box and nothing is culled. Identical behaviour to
+        // VOXY_NO_HIZ, by a different route.
+        //
+        // So if the frame time or the draw count moves here, the guard reasoning is wrong -- not the
+        // build, which does not exist yet. That is the whole reason to land this alone.
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                 != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            m.put("VOXY_NO_HIZ", "");
             // The whole-frame Metal path is reverse-Z (near 1, far 0), so the pyramid it reads is
-            // min-reduced and the box test is flipped -- see screenspace.glsl and hiz/blit.fsh. The
-            // define is injected here even while the pyramid is unbuilt: with the zero-filled pyramid
-            // every sample is 0.0, which hits the guard and means "not occluded", so the cull stays a
-            // no-op until the build is wired up. That keeps the flip and the enablement independently
-            // verifiable instead of landing as one change whose failure has two possible causes.
+            // min-reduced and the box test is flipped -- see screenspace.glsl and hiz/blit.fsh. Both
+            // branches compile only under this define, so it has to be injected wherever the traversal
+            // is built, not only once the pyramid starts being populated.
             m.put("VOXY_HIZ_REVERSE_Z", "");
         }
         m.put("HIZ_BINDING", Integer.toString(HIZ_BINDING));

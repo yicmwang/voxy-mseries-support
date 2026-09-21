@@ -46,8 +46,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * </ul>
  *
  * <p>What remains is the part that is backend-independent: on Sodium's SOLID pass,
- * set up the viewport and run Voxy's pipeline. The hook fires at SOLID head so the
- * near scene overdraws the LODs through the shared depth buffer.
+ * set up the viewport and run Voxy's pipeline. The hook fires at the SOLID <b>tail</b>
+ * (see {@code voxy$injectRender}'s {@code shift = At.Shift.BEFORE} on
+ * {@code ShaderChunkRenderer.end}), not the head — Sodium has already drawn its terrain
+ * by then, which is what lets the LOD share the pass's depth and lets a Hi-Z built from
+ * that depth contain this frame's terrain. An earlier version of this sentence said
+ * "head", which contradicted the injection point and would have made the pyramid's
+ * contents ambiguous to anyone reading only the javadoc.
  */
 @Mixin(value = DefaultChunkRenderer.class, remap = false)
 public abstract class MixinDefaultChunkRenderer {
