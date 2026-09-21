@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.core.model;
 
-import me.cortex.voxy.client.core.gpu.GlCompat;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
@@ -8,16 +7,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.resources.Identifier;
 
-import static org.lwjgl.opengl.GL11.*;
-import static org.lwjgl.opengl.GL11C.GL_NEAREST;
-import static org.lwjgl.opengl.GL11C.GL_NEAREST_MIPMAP_LINEAR;
-import static org.lwjgl.opengl.GL12C.GL_TEXTURE_MAX_LOD;
-import static org.lwjgl.opengl.GL12C.GL_TEXTURE_MIN_LOD;
-import static org.lwjgl.opengl.GL30.glBindBufferBase;
-import static org.lwjgl.opengl.GL33.*;
-import static org.lwjgl.opengl.GL33C.glSamplerParameteri;
-import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
-import static me.cortex.voxy.client.core.gl.GLCompat.bindTextureUnit;
+// GL_RGBA8 is a format TOKEN handed to the backend (MetalFormatUtil.glFormatToMetal), not a GL call.
+import static org.lwjgl.opengl.GL11.GL_RGBA8;
 
 public class ModelStore {
     public static final int MODEL_SIZE = 64;
@@ -25,27 +16,16 @@ public class ModelStore {
     final IGpuBuffer modelColourBuffer;
     final IGpuTexture textures;
     /**
-     * GL sampler for {@link #textures}. Zero under a non-GL backend: the raw-GL
-     * {@code glGenSamplers}/{@code glSamplerParameteri} calls abort the JVM with no context, and
-     * nothing reads this on Metal (the render encoder uses {@link #atlasSampler}).
-     */
-    public final int blockSampler;
-    /**
-     * Cross-backend sampler for {@link #textures}. Used by Metal's render
-     * encoder path (MDIC's renderTerrainMetal). On GL we keep the legacy
-     * {@link #blockSampler} that {@code glBindSampler}-binds directly.
-     * Both samplers use the same filter/wrap state so visual output stays
-     * consistent across backends.
+     * Sampler for {@link #textures}, used by the render encoder path
+     * (MDIC's renderTerrainMetal).
      */
     public final me.cortex.voxy.client.core.gpu.IGpuSampler atlasSampler;
 
     public ModelStore() {
         this.modelBuffer = RenderBackendFactory.get().createBuffer(MODEL_SIZE * (1<<16));
         this.modelColourBuffer = RenderBackendFactory.get().createBuffer(4 * (1<<16));
-        // M13 chunk 1: allocate the model atlas as CPU-uploadable. On Metal
-        // this is Shared storage so `uploadSubImage2D` can push the bakery
-        // results into it; on GL the call is identical to `store`. Default
-        // sampler/sampling state stays GL-side.
+        // Allocate the model atlas as CPU-uploadable: Shared storage so
+        // `uploadSubImage2D` can push the bakery results into it.
         this.textures = RenderBackendFactory.get().createTexture()
                 .storeUploadable(GL_RGBA8,
                         Integer.numberOfTrailingZeros(ModelFactory.MODEL_TEXTURE_SIZE),
@@ -59,20 +39,6 @@ public class ModelStore {
                 .getTexture(Identifier.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png")))
                 .maxMipLevel;
 
-        if (RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            this.blockSampler = glGenSamplers();
-            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MIN_LOD, 0);
-            glSamplerParameteri(this.blockSampler, GL_TEXTURE_MAX_LOD, mipLvl);//Integer.numberOfTrailingZeros(ModelFactory.MODEL_TEXTURE_SIZE)
-        } else {
-            this.blockSampler = 0;
-        }
-
-        // Cross-backend mirror of blockSampler — same filter/wrap state.
-        // Used by Metal's RenderEncoder.setSampler path; GL still uses
-        // glBindSampler(unit, this.blockSampler) for its raw-GL draws.
         this.atlasSampler = RenderBackendFactory.get().createSampler(
                 me.cortex.voxy.client.core.gpu.SamplerDesc.builder()
                         .filter(me.cortex.voxy.client.core.gpu.SamplerDesc.Filter.NEAREST,
@@ -91,12 +57,6 @@ public class ModelStore {
         this.modelColourBuffer.free();
         this.textures.free();
         this.atlasSampler.close();
-        // blockSampler is a raw GL sampler name. The backend-agnostic frees above must still run on
-        // Metal (they release the MTLBuffers); only this one is GL-only, and calling it without a
-        // context aborts the JVM rather than throwing.
-        if (GlCompat.isGlBackend()) {
-            glDeleteSamplers(this.blockSampler);
-        }
     }
 
 
@@ -109,17 +69,9 @@ public class ModelStore {
         return this.modelBuffer;
     }
 
-    public void bind(int modelBindingIndex, int colourBindingIndex, int textureBindingIndex) {
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, modelBindingIndex, this.modelBuffer.id());
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, colourBindingIndex, this.modelColourBuffer.id());
-        bindTextureUnit(textureBindingIndex, this.textures.id());
-        glBindSampler(textureBindingIndex, this.blockSampler);
-    }
-
     /**
-     * Encoder-aware overload — binds model + colour SSBOs and (M13 chunk 1
-     * onward) the model atlas texture + cross-backend sampler. Used by
-     * Metal's MDIC render path.
+     * Encoder-aware bind — model + colour SSBOs plus the model atlas
+     * texture + sampler. Used by Metal's MDIC render path.
      */
     public void bindBuffers(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,
                             int modelBindingIndex, int colourBindingIndex,

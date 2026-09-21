@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.core.util;
 
-import me.cortex.voxy.client.core.gpu.GlCompat;
 
 import it.unimi.dsi.fastutil.ints.IntArrayFIFOQueue;
 import it.unimi.dsi.fastutil.objects.ObjectArrayFIFOQueue;
@@ -119,18 +118,12 @@ public class GPUTiming {
         @Override
         public void free() {
             super.free0();
-            // Query names are GL objects; on a non-GL backend none were ever created, and
-            // glDeleteQueries without a context aborts the JVM. The queues are still drained so the
-            // pools do not hold references.
-            boolean gl = GlCompat.isGlBackend();
-            while (!POOL.isEmpty()) {
-                int query = POOL.dequeueInt();
-                if (gl) glDeleteQueries(query);
-            }
-            while (!INFLIGHT.isEmpty()) {
-                var inflight = INFLIGHT.dequeue();
-                if (gl) glDeleteQueries(inflight.queries);
-            }
+            // Query names were GL objects, so on this backend none were ever created and there is
+            // nothing to delete. The queues are still drained so the pools do not hold references.
+            // (`GlCompat.isGlBackend()` guarded this and was always false here; it and the GL backend
+            // are deleted.)
+            while (!POOL.isEmpty()) POOL.dequeueInt();
+            while (!INFLIGHT.isEmpty()) INFLIGHT.dequeue();
         }
     }
     /*

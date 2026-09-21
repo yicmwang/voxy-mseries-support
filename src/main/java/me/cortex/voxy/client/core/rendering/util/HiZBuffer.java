@@ -1,6 +1,6 @@
 package me.cortex.voxy.client.core.rendering.util;
 
-import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
+import me.cortex.voxy.client.core.gpu.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc;
 import me.cortex.voxy.client.core.gpu.IGpuPipeline;
 import me.cortex.voxy.client.core.gpu.IGpuSampler;

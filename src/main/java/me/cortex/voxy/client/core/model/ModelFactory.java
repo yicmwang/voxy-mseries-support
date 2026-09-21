@@ -5,7 +5,7 @@ import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import it.unimi.dsi.fastutil.objects.ObjectSet;
-import me.cortex.voxy.client.core.gl.Capabilities;
+import me.cortex.voxy.client.core.gpu.Capabilities;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.model.bakery.ModelTextureBakery;
@@ -46,8 +46,10 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static me.cortex.voxy.client.core.model.ModelStore.MODEL_SIZE;
-import static me.cortex.voxy.client.core.gl.GLCompat.textureSubImage2D;
-import static org.lwjgl.opengl.GL11.*;
+// GL_RGBA / GL_UNSIGNED_BYTE are pixel-transfer FORMAT TOKENS on the backend-agnostic
+// IGpuTexture.uploadSubImage2D API (MetalFormatUtil.glFormatToMetal consumes them), not GL calls.
+import static org.lwjgl.opengl.GL11.GL_RGBA;
+import static org.lwjgl.opengl.GL11.GL_UNSIGNED_BYTE;
 
 //Manages the storage and updating of model states, textures and colours
 
@@ -189,19 +191,10 @@ public class ModelFactory {
         public boolean isShaded;
         public boolean hasDarkenedTextures;
 
-        public RawBakeResult(int blockId, BlockState blockState, MemoryBuffer rawData) {
+        public RawBakeResult(int blockId, BlockState blockState) {
             this.blockId = blockId;
             this.blockState = blockState;
-            this.rawData = rawData;
-        }
-
-        public RawBakeResult(int blockId, BlockState blockState) {
-            this(blockId, blockState, new MemoryBuffer(MODEL_TEXTURE_SIZE*MODEL_TEXTURE_SIZE*2*4*6));
-        }
-
-        public RawBakeResult cpyBuf(long ptr) {
-            this.rawData.cpyFrom(ptr);
-            return this;
+            this.rawData = new MemoryBuffer(MODEL_TEXTURE_SIZE*MODEL_TEXTURE_SIZE*2*4*6);
         }
     }
 
@@ -249,26 +242,10 @@ public class ModelFactory {
 
 
         RawBakeResult result = new RawBakeResult(blockId, blockState);
-        if (this.bakery.shouldUseMetalDefaultBake()) {
-            int flags = this.bakery.renderDefaultBakeToHeap(blockState, result.rawData.address);
-            result.hasDarkenedTextures = (flags&2)!=0;
-            result.isShaded = (flags&1)!=0;
-            this.rawBakeResults.add(result);
-            return true;
-        }
-
-        int allocation = this.downstream.download(MODEL_TEXTURE_SIZE*MODEL_TEXTURE_SIZE*2*4*6, ptr -> {
-            this.rawBakeResults.add(result.cpyBuf(ptr));
-        });
-        // M13 chunk 1: renderToStream now takes the CPU-mapped destination
-        // address directly; the bakery does a glFinish + glGetTexImage CPU
-        // readback into this addr instead of issuing a GL 4.3 compute that
-        // writes the persistent buffer through an SSBO bind. Works on
-        // Apple's GL 4.1 cap; the downstream fence still signals on next
-        // tick so callbacks fire in normal order.
-        int flags = this.bakery.renderToStream(blockState, this.downstream.getBufferAddr() + allocation);
+        int flags = this.bakery.renderDefaultBakeToHeap(blockState, result.rawData.address);
         result.hasDarkenedTextures = (flags&2)!=0;
         result.isShaded = (flags&1)!=0;
+        this.rawBakeResults.add(result);
         return true;
     }
 
@@ -334,15 +311,6 @@ public class ModelFactory {
         var upload = this.uploadResults.poll();
         if (upload==null) return;
 
-        // GL unpack state for the texture uploads below. Metal's uploadSubImage2D takes an explicit
-        // region and has no equivalent global state; glPixelStorei with no context aborts the JVM.
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-            glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        }
         do {
             // Register water-animated cells on the render thread while the
             // upload still carries its modelId (upload() resets it to -1).
@@ -395,11 +363,9 @@ public class ModelFactory {
 
             long cAddr = this.texture.address;
             for (int lvl = 0; lvl < LAYERS; lvl++) {
-                // M13 chunk 1: route the atlas upload through the cross-backend
-                // primitive so the Metal-side atlas (Shared-storage MetalTexture
-                // allocated via storeUploadable) receives the data correctly.
-                // On the GL backend this still lowers to glTextureSubImage2D /
-                // glTexSubImage2D via GLCompat.
+                // Route the atlas upload through the cross-backend primitive so the
+                // Metal-side atlas (Shared-storage MetalTexture allocated via
+                // storeUploadable) receives the data correctly.
                 atlas.uploadSubImage2D(lvl, X >> lvl, Y >> lvl, (MODEL_TEXTURE_SIZE*3) >> lvl, (MODEL_TEXTURE_SIZE*2) >> lvl, GL_RGBA, GL_UNSIGNED_BYTE, cAddr);
                 cAddr += (MODEL_TEXTURE_SIZE*MODEL_TEXTURE_SIZE*3*2*4)>>(lvl<<1);
             }
@@ -491,20 +457,15 @@ public class ModelFactory {
 
         // Which channel says "the bake drew this pixel".
         //
-        // On the Metal path the answer is always the marker byte, whatever the layer: the bake writes
-        // no depth or stencil, so the low byte of the metadata word is filled with a synthetic marker
-        // taken from PRE-dilation coverage (BakeCoverage). Reading the colour alpha instead would read
-        // the DILATED tile, which reports every texel of every non-empty cell as written — a 4-quad
-        // plant then occludes like a stone cube and the mesher culls real faces off its neighbours,
-        // which is a hole in the terrain exactly where a solid block meets a plant. Measured on the
-        // cull counters: 534,811 faces culled by a non-cube neighbour before the marker came from
+        // The answer is always the marker byte, whatever the layer: the bake writes no depth or
+        // stencil, so the low byte of the metadata word is filled with a synthetic marker taken from
+        // PRE-dilation coverage (BakeCoverage). Reading the colour alpha instead would read the
+        // DILATED tile, which reports every texel of every non-empty cell as written — a 4-quad plant
+        // then occludes like a stone cube and the mesher culls real faces off its neighbours, which is
+        // a hole in the terrain exactly where a solid block meets a plant. Measured on the cull
+        // counters: 534,811 faces culled by a non-cube neighbour before the marker came from
         // pre-dilation data.
-        //
-        // GL bakes real depth/stencil per pixel, so its existing per-layer split stands unchanged.
-        int checkMode = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL
-                ? TextureUtils.WRITE_CHECK_STENCIL
-                : (blockRenderLayer==ChunkSectionLayer.SOLID?TextureUtils.WRITE_CHECK_STENCIL:TextureUtils.WRITE_CHECK_ALPHA);
+        int checkMode = TextureUtils.WRITE_CHECK_STENCIL;
 
 
 
@@ -548,7 +509,7 @@ public class ModelFactory {
         // here → faceExists()=false → the mesher culled the water surface (the
         // "grey seafloor"). Fixed at the source: the Metal bake projection now
         // compresses z to NDC [0.25, 0.75], so water faces bake real alpha and
-        // computeModelDepth (WRITE_CHECK_ALPHA for TRANSLUCENT) keeps them.
+        // computeModelDepth (marker-byte checkMode) keeps them.
         //
         // VOXY_WATER_FORCE_FACES therefore stays DEFAULT OFF: with the bake
         // fixed it is a no-op (sizes[face] >= 0 already), and when a face bake
@@ -571,11 +532,8 @@ public class ModelFactory {
         // block top (1.0) instead of MC's 8/9 ≈ 0.889 — a visible step at the
         // LOD<->MC water seam and a 0.111-block eye-level window where the two
         // sides disagree about "above water". Use the fluid's real own height
-        // (packs enc=7 → plane at 0.8906, within 0.002 of MC). GL bakes real
-        // depth and never hits the ==0 condition.
-        if (isFluid
-                && me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                        != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+        // (packs enc=7 → plane at 0.8906, within 0.002 of MC).
+        if (isFluid) {
             int up = Direction.UP.get3DDataValue();
             float ownHeight = blockState.getFluidState().getOwnHeight();
             if (sizes[up] >= 0.0f && sizes[up] < 0.01f && ownHeight > 0.0f && ownHeight < 1.0f) {
@@ -801,8 +759,6 @@ public class ModelFactory {
                         || BAKE_DUMP_ONLY.contains(blockState.getBlock().getName().getString()))) {
             dumpAtlasLevels(blockState, darkenedTinting, uploadResult.texture.address);
         }
-
-        //glGenerateTextureMipmap(this.textures.id);
 
         //Set the mapping at the very end
         this.idMappings[blockId] = modelId;

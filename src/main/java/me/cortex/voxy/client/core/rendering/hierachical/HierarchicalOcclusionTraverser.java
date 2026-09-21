@@ -3,7 +3,7 @@ package me.cortex.voxy.client.core.rendering.hierachical;
 import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import me.cortex.voxy.client.RenderStatistics;
 import me.cortex.voxy.client.config.VoxyConfig;
-import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
+import me.cortex.voxy.client.core.gpu.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gpu.ComputeEncoder;
 import me.cortex.voxy.client.core.gpu.ComputePipelineDesc;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
@@ -15,7 +15,6 @@ import me.cortex.voxy.client.core.gpu.SamplerDesc;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.building.RenderGenerationService;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
-import me.cortex.voxy.client.core.rendering.util.PrintfDebugUtil;
 import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.MemoryBuffer;
@@ -25,13 +24,6 @@ import org.lwjgl.system.MemoryUtil;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
-
-import static org.lwjgl.opengl.GL11.GL_UNPACK_ROW_LENGTH;
-import static org.lwjgl.opengl.GL11.GL_UNPACK_SKIP_PIXELS;
-import static org.lwjgl.opengl.GL11.GL_UNPACK_SKIP_ROWS;
-import static org.lwjgl.opengl.GL11.glPixelStorei;
-import static org.lwjgl.opengl.GL12.GL_UNPACK_IMAGE_HEIGHT;
-import static org.lwjgl.opengl.GL12.GL_UNPACK_SKIP_IMAGES;
 
 /**
  * Hierarchical occlusion traverser. Walks the LOD octree on the GPU via a
@@ -245,11 +237,9 @@ public class HierarchicalOcclusionTraverser {
     }
 
     private static void setFrustum(Viewport<?> viewport, long ptr) {
-        boolean isGl = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
-        // GL always culls. On Metal, cull by default (with margin) unless the
-        // user disables it (VOXY_LOD_NO_CULL=1 -> pass-all, zero flicker, low fps).
-        boolean doCull = isGl || !CULL_DISABLED;
+        // On Metal, cull by default (with margin) unless the user disables it
+        // (VOXY_LOD_NO_CULL=1 -> pass-all, zero flicker, low fps).
+        boolean doCull = !CULL_DISABLED;
         if (!doCull) {
             if (!frustumModeLogged) {
                 frustumModeLogged = true;
@@ -265,8 +255,8 @@ public class HierarchicalOcclusionTraverser {
             }
             return;
         }
-        float margin = isGl ? 0.0f : FRUSTUM_MARGIN;
-        if (!frustumModeLogged && !isGl) {
+        float margin = FRUSTUM_MARGIN;
+        if (!frustumModeLogged) {
             frustumModeLogged = true;
             me.cortex.voxy.common.Logger.info(
                     "[Metal] HOT frustum cull ON, margin=" + margin + " blocks (terrain solid; water still flickers — deferred; VOXY_LOD_FRUSTUM_MARGIN to tune, VOXY_LOD_NO_CULL=1 to disable)");
@@ -284,7 +274,7 @@ public class HierarchicalOcclusionTraverser {
         boolean projNaN = Float.isNaN(viewport.projection.m00())
                 || Float.isNaN(viewport.frustumPlanes[0].x);
         if (projNaN) frustumNanCount++;
-        if ((frustumFrameCount % 600) == 1 && !isGl) {
+        if ((frustumFrameCount % 600) == 1) {
             float m00 = viewport.projection.m00();
             float m11 = viewport.projection.m11();
             var win = net.minecraft.client.Minecraft.getInstance().getWindow();
@@ -356,12 +346,8 @@ public class HierarchicalOcclusionTraverser {
             // discovery trickling; the bakery warmup burst
             // (VoxyRenderSystem.computeBakeBudgetNs) drains the resulting
             // bake demand. VOXY_HOT_REQUEST_FLOOR tunes it (0 restores the
-            // old cliff). GL keeps upstream behaviour byte-identical.
-            boolean isGlBackend = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                    == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
-            if (!isGlBackend) {
-                requestSize = Math.max(REQUEST_FLOOR, requestSize);
-            }
+            // old cliff).
+            requestSize = Math.max(REQUEST_FLOOR, requestSize);
             MemoryUtil.memPutInt(ptr, Math.max(0, Math.min(MAX_REQUEST_QUEUE_SIZE, requestSize))); ptr += 4;
         }
     }
@@ -369,10 +355,11 @@ public class HierarchicalOcclusionTraverser {
     public void doTraversal(Viewport<?> viewport) {
         this.uploadUniform(viewport);
 
-        // PrintfDebugUtil binds a debug SSBO on its own pre-existing path;
-        // gated on -Dvoxy.enableShaderDebugPrintf=true (default off). Stays
-        // outside the encoder for now.
-        PrintfDebugUtil.bind();
+        // PrintfDebugUtil.bind() (raw glBindBufferBase for the printf debug SSBO,
+        // gated on -Dvoxy.enableShaderDebugPrintf=true, default off) is gone with the
+        // GL path, so the printf feature can no longer bind its output buffer.
+        // tick()/addToOut() and the shader-source injection are unaffected; reviving
+        // it would mean a ComputeEncoder.setBuffer inside this pass.
 
         if (RenderStatistics.enabled) {
             this.statisticsBuffer.zero();
@@ -397,17 +384,8 @@ public class HierarchicalOcclusionTraverser {
     }
 
     private void traverseInternal(Viewport<?> viewport) {
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            // Mesa workaround: these stick around between texture uploads and need resetting.
-            // GL-only state; Metal has no such global unpack state, and calling glPixelStorei
-            // with no context aborts the JVM.
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
-            glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-            glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-            glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
-        }
+        // (The Mesa glPixelStorei unpack-state reset that used to run here was GL-only: Metal
+        // has no such global unpack state.)
 
         int firstDispatchSize = (this.topNodeCount + LOCAL_WORK_SIZE - 1) >> LOCAL_WORK_SIZE_BITS;
 
@@ -427,7 +405,7 @@ public class HierarchicalOcclusionTraverser {
             UploadStream.INSTANCE.commit();
         }
 
-        if (this.backend.getType() != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+        {
             // METAL: one compute encoder PER ITERATION. Inside a single Metal
             // compute encoder, memoryBarrier(scope:) orders shader memory
             // access between dispatches but does NOT reliably fence the
@@ -476,61 +454,6 @@ public class HierarchicalOcclusionTraverser {
                     }
                 }
             }
-            return;
-        }
-
-        try (ComputeEncoder encoder = this.backend.beginComputePass();
-             MemoryStack stack = MemoryStack.stackPush()) {
-            long pushAddr = stack.nmalloc(4);
-
-            encoder.setPipeline(this.traversal);
-
-            // Bindings that don't change between iterations — bound once.
-            encoder.setBuffer(SCENE_UNIFORM_BINDING, this.uniformBuffer, 0);
-            encoder.setBuffer(REQUEST_QUEUE_BINDING, this.requestBuffer, 0);
-            encoder.setBuffer(RENDER_QUEUE_BINDING, viewport.getRenderList(), 0);
-            encoder.setBuffer(NODE_DATA_BINDING, this.nodeBuffer, 0);
-            encoder.setBuffer(NODE_QUEUE_META_BINDING, this.queueMetaBuffer, 0);
-            encoder.setBuffer(RENDER_TRACKER_BINDING, this.nodeCleaner.visibilityBuffer, 0);
-            if (RenderStatistics.enabled) {
-                encoder.setBuffer(STATISTICS_BUFFER_BINDING, this.statisticsBuffer, 0);
-            }
-            encoder.setTexture(HIZ_BINDING, viewport.hiZBuffer.getHizTexture());
-            encoder.setSampler(HIZ_BINDING, this.hizSampler);
-
-            // --- Iteration 0: direct dispatch with explicit group count.
-            MemoryUtil.memPutInt(pushAddr, 0);
-            encoder.setBytes(PUSH_BINDING, pushAddr, 4);
-            encoder.setBuffer(NODE_QUEUE_SOURCE_BINDING, this.topNodeIds, 0);
-            encoder.setBuffer(NODE_QUEUE_SINK_BINDING, this.scratchQueueB, 0);
-
-            encoder.barrier(
-                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT | ComputeEncoder.BARRIER_TRANSFER,
-                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-            encoder.dispatch(firstDispatchSize, 1, 1);
-            encoder.barrier(
-                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
-                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-
-            // --- Iterations 1..MAX-1: indirect dispatch, flip-flop source/sink.
-            for (int iter = 1; iter < MAX_ITERATIONS; iter++) {
-                MemoryUtil.memPutInt(pushAddr, iter);
-                encoder.setBytes(PUSH_BINDING, pushAddr, 4);
-
-                IGpuBuffer source = ((iter & 1) == 0 ? this.scratchQueueA : this.scratchQueueB);
-                IGpuBuffer sink = ((iter & 1) == 0 ? this.scratchQueueB : this.scratchQueueA);
-                encoder.setBuffer(NODE_QUEUE_SOURCE_BINDING, source, 0);
-                encoder.setBuffer(NODE_QUEUE_SINK_BINDING, sink, 0);
-
-                encoder.barrier(
-                        ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
-                        ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-                encoder.dispatchIndirect(this.queueMetaBuffer, iter * 4L * 4);
-            }
-
-            encoder.barrier(
-                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
-                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_TRANSFER);
         }
     }
 
@@ -539,8 +462,7 @@ public class HierarchicalOcclusionTraverser {
 
 
     private void downloadResetRequestQueue() {
-        if (this.backend.getType() == me.cortex.voxy.client.core.gpu.BackendType.METAL
-                && this.requestBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer metalBuffer) {
+        if (this.requestBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer metalBuffer) {
             // Metal encodes traversal into the backend's active command buffer,
             // while DownloadStream uses a separate blit command buffer. If we
             // schedule a DownloadStream read before submitting traversal, the

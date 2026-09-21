@@ -1,8 +1,8 @@
 package me.cortex.voxy.client.core.rendering.util;
 
-import me.cortex.voxy.client.core.gl.shader.IShaderProcessor;
-import me.cortex.voxy.client.core.gl.shader.PrintfInjector;
-import me.cortex.voxy.client.core.gl.shader.ShaderType;
+import me.cortex.voxy.client.core.gpu.shader.IShaderProcessor;
+import me.cortex.voxy.client.core.gpu.shader.PrintfInjector;
+import me.cortex.voxy.client.core.gpu.shader.ShaderType;
 import me.cortex.voxy.common.Logger;
 
 import java.util.ArrayList;
@@ -56,9 +56,10 @@ public final class PrintfDebugUtil {
         }
     }
 
-    public static void bind() {
-        if (ENABLE_PRINTF_DEBUGGING) {
-            PRINTF_object.bind();
-        }
-    }
+    // `bind()` stood here. It did a raw `glBindBufferBase`, which is gone with the GL backend — and
+    // that is the whole of the printf-output binding on this backend: there is no cross-backend way to
+    // bind an SSBO outside an encoder. `tick()`/`addToOut()` and the shader source injection are
+    // unaffected, so the feature still collects and prints if enabled; reviving the BIND means a
+    // `ComputeEncoder.setBuffer` inside the traverser's compute pass, which is where the printf buffer
+    // is read. Off by default (`-Dvoxy.enableShaderDebugPrintf=true`).
 }

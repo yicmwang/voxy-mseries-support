@@ -9,11 +9,6 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.lwjgl.opengl.GL11.glGetInteger;
-import static org.lwjgl.opengl.GL30.GL_FRAMEBUFFER;
-import static org.lwjgl.opengl.GL30.GL_FRAMEBUFFER_BINDING;
-import static org.lwjgl.opengl.GL30C.glBindFramebuffer;
-
 public class ModelBakerySubsystem {
     //Redo to just make it request the block faces with the async texture download stream which
     // basicly solves all the render stutter due to the baking
@@ -49,28 +44,13 @@ public class ModelBakerySubsystem {
         Integer i = this.blockIdQueue.poll();
         if (i != null) {
             int j = 0;
-            if (i != null) {
-                // The save/restore pair exists only to stop the GL factory from re-binding the
-                // framebuffer a thousand times. On Metal there is no default-framebuffer binding to
-                // preserve, and issuing these calls with no GL context current aborts the JVM
-                // ("FATAL ERROR in native method: No context is current") -- it is not a catchable
-                // exception, so the calls have to be skipped rather than guarded by a try.
-                boolean isGlBackend = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                        == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
-                int fbBinding = isGlBackend ? glGetInteger(GL_FRAMEBUFFER_BINDING) : 0;
-
-                do {
-                    this.factory.addEntry(i);
-                    j++;
-                    if (4<j&&(totalBudget<(System.nanoTime() - start)+50_000))//20<j||
-                        break;
-                    i = this.blockIdQueue.poll();
-                } while (i != null);
-
-                if (isGlBackend) {
-                    glBindFramebuffer(GL_FRAMEBUFFER, fbBinding);//This is done here as stops needing to set then unset the fb in the thing 1000x
-                }
-            }
+            do {
+                this.factory.addEntry(i);
+                j++;
+                if (4<j&&(totalBudget<(System.nanoTime() - start)+50_000))//20<j||
+                    break;
+                i = this.blockIdQueue.poll();
+            } while (i != null);
             this.blockIdCount.addAndGet(-j);
         }
 

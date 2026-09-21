@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.core.rendering.util;
 
-import me.cortex.voxy.client.core.gpu.GlCompat;
 
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
@@ -81,7 +80,6 @@ public class UploadStream {
                 Logger.error("Upload stream full, preemptively committing, this could cause bad things to happen");
                 int attempts = 10;
                 while (--attempts != 0 && this.caddr == SIZE_LIMIT) {
-                    GlCompat.finish();
                     flushBackendFences();
                     this.tick(false);
                     this.caddr = this.allocationArena.alloc((int) size);

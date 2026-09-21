@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.core.rendering.util;
 
-import me.cortex.voxy.client.core.gpu.GlCompat;
 
 
 import me.cortex.voxy.client.core.gpu.IGpuFence;
@@ -38,7 +37,6 @@ public class RawDownloadStream {
         if (allocation == AllocationArena.SIZE_LIMIT) {
             Logger.warn("Raw download stream full, preemptively committing, this could cause bad things to happen");
             //Hit the download limit, attempt to free
-            GlCompat.finish();
             UploadStream.flushBackendFences();
             this.tick();
             allocation = (int) this.allocationArena.alloc(size);
@@ -95,12 +93,10 @@ public class RawDownloadStream {
     }
 
     public void free() {
-        GlCompat.finish();
         this.tick();
         UploadStream.flushBackendFences();
         IGpuFence fence = RenderBackendFactory.get().createFence();
         while (!fence.signaled()) {
-            GlCompat.finish();
         }
         fence.free();
         this.tick();

@@ -55,7 +55,7 @@ public final class MetalRenderBackendSmokeTest {
             backend.submit();
 
             System.out.println("M3 SMOKE OK — Metal clear-color render pass committed and completed");
-            System.out.println("  Backend: " + backend.getType());
+            System.out.println("  Backend: METAL");   // the only one there is; getType() is gone
             System.out.println("  Target:  256x256 RGBA8 (id=" + target.id() + ")");
             System.out.println("  Clear:   (1.0, 0.5, 0.25, 1.0)");
         } finally {

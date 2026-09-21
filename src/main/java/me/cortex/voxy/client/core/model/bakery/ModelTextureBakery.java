@@ -25,15 +25,6 @@ import org.jetbrains.annotations.Nullable;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
-import org.lwjgl.opengl.GL14;
-
-import static org.lwjgl.opengl.GL11.*;
-import static org.lwjgl.opengl.GL14C.glBlendFuncSeparate;
-import static org.lwjgl.opengl.GL30.*;
-import static org.lwjgl.opengl.GL42C.GL_FRAMEBUFFER_BARRIER_BIT;
-import static org.lwjgl.opengl.GL42C.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT;
-import static org.lwjgl.opengl.GL42C.GL_TEXTURE_FETCH_BARRIER_BIT;
-import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 
@@ -41,13 +32,7 @@ public class ModelTextureBakery {
     //Note: the first bit of metadata is if alpha discard is enabled
     private static final Matrix4f[] VIEWS = new Matrix4f[6];
 
-    /**
-     * GL capture target for the GL bake path. Null under a non-GL backend: constructing it calls
-     * glGenTextures, which aborts the JVM with no context. Metal uses {@link #metalCapture}, and the
-     * GL path is only entered when {@code isMetal} is false.
-     */
-    private final GlViewCapture capture;
-    /** M13 chunk 1: Metal-side bake target + atlas mirror + renderer. Lazy. */
+    /** Metal-side bake target + atlas mirror + renderer. Lazy. */
     private MetalViewCapture metalCapture;
     /** Cached {@code FluidRenderer} for the fluid bake, rebuilt if MC swaps the model set. */
     private net.minecraft.client.renderer.block.FluidRenderer fluidRenderer;
@@ -57,10 +42,6 @@ public class ModelTextureBakery {
     private final int width;
     private final int height;
     public ModelTextureBakery(int width, int height) {
-        this.capture = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL
-                ? new GlViewCapture(width, height)
-                : null;
         this.width = width;
         this.height = height;
     }
@@ -86,7 +67,7 @@ public class ModelTextureBakery {
      * what made {@link #bakeFluidState} a no-op and removed water from the LOD entirely; see that
      * method. Default off so the fluid bake actually runs.
      */
-    private static final boolean SKIP_GL_FLUID_BAKE =
+    private static final boolean SKIP_FLUID_BAKE =
             "1".equals(System.getenv("VOXY_SKIP_FLUID_BAKE"));
 
     public static int getMetaFromLayer(ChunkSectionLayer layer) {
@@ -143,7 +124,7 @@ public class ModelTextureBakery {
      *
      * <p><b>This was a no-op and water's LOD geometry did not exist.</b> The P1 port to MC 26.2 found
      * {@code BlockRenderDispatcher#renderLiquid} gone and replaced the body with
-     * {@code if (SKIP_GL_FLUID_BAKE) return;} — which returns before emitting a single vertex. The
+     * {@code if (SKIP_FLUID_BAKE) return;} — which returns before emitting a single vertex. The
      * fluid branch of {@link #renderToStreamMetal} then always saw {@code vc.isEmpty()}, skipped every
      * face, and left the bake target at its clear, so {@code ModelFactory} marked every water face
      * non-existent and the mesher emitted no water at all.
@@ -166,7 +147,7 @@ public class ModelTextureBakery {
         // since it wont have the colour provider
         metadata |= 4;//Has tint
         this.vc.setDefaultMeta(metadata);//Set the meta while baking
-        if (SKIP_GL_FLUID_BAKE) { return; }
+        if (SKIP_FLUID_BAKE) { return; }
 
         var fluidModels = Minecraft.getInstance().getModelManager().getFluidStateModelSet();
         if (this.fluidRenderer == null || this.fluidRendererModels != fluidModels) {
@@ -249,9 +230,6 @@ public class ModelTextureBakery {
     }
 
     public void free() {
-        if (this.capture != null) {
-            this.capture.free();
-        }
         if (this.metalCapture != null) {
             this.metalCapture.free();
             this.metalCapture = null;
@@ -260,265 +238,13 @@ public class ModelTextureBakery {
     }
 
 
-    /**
-     * Run the bake for {@code state} into the capture FBO, then CPU-read the
-     * FBO into {@code destAddr} (the persistent-buffer mapped CPU address
-     * provided by {@link me.cortex.voxy.client.core.rendering.util.RawDownloadStream}).
-     *
-     * Works on every Voxy backend now (M13 chunk 1): the bake itself uses
-     * MC's GL context (always present), and the readback is CPU-side via
-     * {@code glGetTexImage}. The result bytes flow through the same
-     * downstream callback the GL 4.3 compute path used.
-     */
-    public int renderToStream(BlockState state, long destAddr) {
-        // GL backend path. Metal callers use renderDefaultBakeToHeap()
-        // through ModelFactory so they do not write into RawDownloadStream's
-        // persistent GL-mapped buffer.
-        boolean isMetal = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get()
-                .getType() == me.cortex.voxy.client.core.gpu.BackendType.METAL;
-        boolean bakeOff = "1".equals(System.getenv("VOXY_BAKERY_OFF"));
-        boolean forceOn = "1".equals(System.getenv("VOXY_BAKERY_FORCE"));
-        if (bakeOff) {
-            return 0;
-        }
-        if (isMetal && !forceOn) throw new IllegalStateException(
-                "Metal bakery must use renderDefaultBakeToHeap()");
-        if (isMetal) {
-            // VOXY_BAKERY_FORCE=1 — experimental Metal bakery
-            return renderToStreamMetal(state, destAddr);
-        }
-        this.capture.clear();
-        boolean isBlock = true;
-        ChunkSectionLayer layer = layerFor(state);
-        if (state.getBlock() instanceof LiquidBlock) {
-            isBlock = false;
-        }
-
-        //TODO: support block model entities
-        //BakedBlockEntityModel bbem = null;
-        if (state.hasBlockEntity()) {
-            //bbem = BakedBlockEntityModel.bake(state);
-        }
-
-        //Setup GL state
-        int[] viewdat = new int[4];
-        int blockTextureId;
-        // Save MC's draw framebuffer so we can restore it on the way out —
-        // unbinding to 0 would direct MC's compositor to the OS default
-        // framebuffer instead of its post-FX target.
-        int prevDrawFb = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
-
-        {
-            glEnable(GL_STENCIL_TEST);
-            glEnable(GL_DEPTH_TEST);
-            glEnable(GL_CULL_FACE);
-            if (layer == ChunkSectionLayer.TRANSLUCENT) {
-                glEnable(GL_BLEND);
-                glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_DST_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            } else {
-                glDisable(GL_BLEND);//FUCK YOU INTEL (screams), for _some reason_ discard or something... JUST DOESNT WORK??
-                //glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ONE);
-            }
-
-            glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
-            glStencilFunc(GL_ALWAYS, 1, 0xFF);
-            glStencilMask(0xFF);
-
-            glGetIntegerv(GL_VIEWPORT, viewdat);//TODO: faster way todo this, or just use main framebuffer resolution
-
-            //Bind the capture framebuffer
-            glBindFramebuffer(GL_FRAMEBUFFER, this.capture.framebufferId);
-
-            var tex = Minecraft.getInstance().getTextureManager().getTexture(Identifier.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png")).getTexture();
-            blockTextureId = ((com.mojang.blaze3d.opengl.GlTexture)tex).glId();
-        }
-
-        boolean isAnyShaded = false;
-        boolean isAnyDarkend = false;
-        if (isBlock) {
-            this.vc.reset();
-            this.bakeBlockModel(state, layer);
-            isAnyShaded |= this.vc.anyShaded;
-            isAnyDarkend |= this.vc.anyDarkendTex;
-            if (!this.vc.isEmpty()) {//only render if there... is shit to render
-
-                //Setup for continual emission
-                BudgetBufferRenderer.setup(this.vc.getAddress(), this.vc.quadCount(), blockTextureId);//note: this.vc.buffer.address NOT this.vc.ptr
-
-                var mat = new Matrix4f();
-                for (int i = 0; i < VIEWS.length; i++) {
-                    if (i==1||i==2||i==4) {
-                        glCullFace(GL_FRONT);
-                    } else {
-                        glCullFace(GL_BACK);
-                    }
-
-                    glViewport((i % 3) * this.width, (i / 3) * this.height, this.width, this.height);
-
-                    //The projection matrix
-                    mat.set(2, 0, 0, 0,
-                            0, 2, 0, 0,
-                            0, 0, -1f, 0,
-                            -1, -1, 0, 1)
-                            .mul(VIEWS[i]);
-
-                    BudgetBufferRenderer.render(mat);
-                }
-            }
-            glBindVertexArray(0);
-        } else {//Is fluid, slow path :(
-
-            if (!(state.getBlock() instanceof LiquidBlock)) throw new IllegalStateException();
-
-            var mat = new Matrix4f();
-            for (int i = 0; i < VIEWS.length; i++) {
-                if (i==1||i==2||i==4) {
-                    glCullFace(GL_FRONT);
-                } else {
-                    glCullFace(GL_BACK);
-                }
-
-                this.vc.reset();
-                this.bakeFluidState(state, layer, i);
-                if (this.vc.isEmpty()) continue;
-                isAnyShaded |= this.vc.anyShaded;
-                isAnyDarkend |= this.vc.anyDarkendTex;
-                BudgetBufferRenderer.setup(this.vc.getAddress(), this.vc.quadCount(), blockTextureId);
-
-                glViewport((i % 3) * this.width, (i / 3) * this.height, this.width, this.height);
-
-                //The projection matrix
-                // M13 chunk 1: Metal-friendly projection matrix. Two
-                // adjustments vs the GL version:
-                //   (1) m22 = +1 (was -1): GL accepts NDC z ∈ [-1, 1] so
-                //       mapping world z [0, 1] → NDC [0, -1] works; Metal
-                //       only accepts NDC z ∈ [0, 1] and clips anything
-                //       below 0 — that's what produced the "stretched
-                //       triangles from the ground" the LOD chunks showed.
-                //       Mapping z [0, 1] → NDC z [0, 1] keeps the cube
-                //       inside the clip volume.
-                //   (2) m11 = -2, m31 = +1 (was 2, -1): flip Y. GL stores
-                //       framebuffer bottom-row-first in memory and the
-                //       LOD shader was written for that — UV (0, 0)
-                //       maps to the first byte = bottom-left of the
-                //       rendered image. Metal stores top-row-first, so
-                //       without a flip UV (0, 0) would map to top-left
-                //       of the bake. Y-negating the projection makes the
-                //       Metal output's first memory row contain the
-                //       original image's bottom row, matching GL bytes.
-                // Depth ordering between faces is irrelevant — the Metal
-                // bakery pipeline runs with DepthState.DISABLED.
-                mat.set(2, 0, 0, 0,
-                        0, -2, 0, 0,
-                        0, 0, 1f, 0,
-                        -1, 1, 0, 1)
-                        .mul(VIEWS[i]);
-
-                BudgetBufferRenderer.render(mat);
-            }
-            glBindVertexArray(0);
-        }
-
-        //Render block model entity data if it exists
-        /*
-        if (bbem != null) {
-            //Rerender everything again ;-; but is ok (is not)
-
-            var mat = new Matrix4f();
-            for (int i = 0; i < VIEWS.length; i++) {
-                if (i==1||i==2||i==4) {
-                    glCullFace(GL_FRONT);
-                } else {
-                    glCullFace(GL_BACK);
-                }
-
-                glViewport((i % 3) * this.width, (i / 3) * this.height, this.width, this.height);
-
-                //The projection matrix
-                // M13 chunk 1: Metal-friendly projection matrix. Two
-                // adjustments vs the GL version:
-                //   (1) m22 = +1 (was -1): GL accepts NDC z ∈ [-1, 1] so
-                //       mapping world z [0, 1] → NDC [0, -1] works; Metal
-                //       only accepts NDC z ∈ [0, 1] and clips anything
-                //       below 0 — that's what produced the "stretched
-                //       triangles from the ground" the LOD chunks showed.
-                //       Mapping z [0, 1] → NDC z [0, 1] keeps the cube
-                //       inside the clip volume.
-                //   (2) m11 = -2, m31 = +1 (was 2, -1): flip Y. GL stores
-                //       framebuffer bottom-row-first in memory and the
-                //       LOD shader was written for that — UV (0, 0)
-                //       maps to the first byte = bottom-left of the
-                //       rendered image. Metal stores top-row-first, so
-                //       without a flip UV (0, 0) would map to top-left
-                //       of the bake. Y-negating the projection makes the
-                //       Metal output's first memory row contain the
-                //       original image's bottom row, matching GL bytes.
-                // Depth ordering between faces is irrelevant — the Metal
-                // bakery pipeline runs with DepthState.DISABLED.
-                mat.set(2, 0, 0, 0,
-                        0, -2, 0, 0,
-                        0, 0, 1f, 0,
-                        -1, 1, 0, 1)
-                        .mul(VIEWS[i]);
-
-                bbem.render(mat, blockTextureId);
-            }
-            glBindVertexArray(0);
-
-            bbem.release();
-        }*/
-
-
-
-        //"Restore" gl state
-        glViewport(viewdat[0], viewdat[1], viewdat[2], viewdat[3]);
-        glDisable(GL_STENCIL_TEST);
-        glDisable(GL_BLEND);
-
-        // M13 chunk 1: release the bakery's program / VAO / sampler / UBO
-        // bindings. Without this, downstream consumers (Sodium chunk
-        // renderer, MC UI) inherit our GL state. Apple GL has been observed
-        // to return null from glMapBufferRange mid-frame when the bakery's
-        // VAO is still bound, raising "Failed to map buffer" inside
-        // SharedQuadIndexBuffer.grow.
-        BudgetBufferRenderer.endRender();
-
-        //Finish and download.
-        this.capture.emitToStream(destAddr);
-
-        // Clear the depth target for the next bake, then restore MC's
-        // pre-bake draw framebuffer so its compositor keeps writing to the
-        // post-FX target (not the OS default).
-        glBindFramebuffer(GL_FRAMEBUFFER, this.capture.framebufferId);
-        glClearDepth(1);
-        glClear(GL_DEPTH_BUFFER_BIT);
-        if (layer == ChunkSectionLayer.TRANSLUCENT) {
-            //reset the blend func
-            GL14.glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        glBindFramebuffer(GL_FRAMEBUFFER, prevDrawFb);
-
-        return (isAnyShaded?1:0)|(isAnyDarkend?2:0);
-    }
-
-    /**
-     * True when Metal should bypass RawDownloadStream and write bake bytes
-     * directly into heap-owned memory.
-     */
-    public boolean shouldUseMetalDefaultBake() {
-        boolean isMetal = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get()
-                .getType() == me.cortex.voxy.client.core.gpu.BackendType.METAL;
-        return isMetal;
-    }
 
     /**
      * Metal bake entry used by {@link me.cortex.voxy.client.core.model.ModelFactory}.
      *
      * <p>Default: run the real Metal-native bakery into heap-owned bake
      * memory, then ModelFactory processes that memory normally and uploads
-     * real block textures into ModelStore.textures. This avoids the previous
-     * RawDownloadStream path, which wrote bake bytes through a persistent
-     * GL-mapped buffer and was implicated in Apple GL/Sodium map failures.
+     * real block textures into ModelStore.textures.
      *
      * <p>Kill switch: {@code VOXY_BAKERY_OFF=1} keeps the old hash-colour
      * fallback alive by writing only synthetic face-visibility data. The
@@ -540,15 +266,13 @@ public class ModelTextureBakery {
 
 
     /**
-     * M13 chunk 1: Metal-side renderToStream. Same overall shape as the GL
-     * path — pick a layer for the state, walk the model parts into the
+     * The bake: pick a layer for the state, walk the model parts into the
      * {@link ReuseVertexConsumer}, project 6 cube faces, emit packed pixels
-     * into {@code destAddr} — but every GPU resource (vertex buffer, index
-     * buffer, atlas texture, bake target) lives on the Metal backend, so
-     * Apple's GL pixel-processor never enters the picture. The 6 face draws
-     * for non-fluid blocks share a single render pass; the fluid path
-     * re-uploads the mesh per face (each in its own LOAD-action pass so the
-     * accumulated pixels survive).
+     * into {@code destAddr}. Every GPU resource (vertex buffer, index
+     * buffer, atlas texture, bake target) lives on the Metal backend. The 6
+     * face draws for non-fluid blocks share a single render pass; the fluid
+     * path re-uploads the mesh per face (each in its own LOAD-action pass so
+     * the accumulated pixels survive).
      */
     /**
      * Adapter over MC's block atlas when it is already a Metallum texture, created once and
@@ -565,8 +289,8 @@ public class ModelTextureBakery {
 
     /**
      * Open the bake pass with whichever atlas source this backend has. Split out because the two
-     * paths take different arguments: the Metal one an {@link IGpuTexture} over MC's own texture, the
-     * GL one a raw GL id for the mirror to read back.
+     * sources take different arguments: the Metallum-backed one an {@link IGpuTexture} over MC's own
+     * texture, the non-Metallum one a raw texture id for the mirror to read back.
      */
     private void beginBake(long atlasMetalHandle, int blockTextureId,
                            long meshAddr, int quadCount, boolean clear) {
@@ -584,8 +308,7 @@ public class ModelTextureBakery {
 
     private int renderToStreamMetal(BlockState state, long destAddr) {
         if (state.getRenderShape() == RenderShape.INVISIBLE && !(state.getBlock() instanceof LiquidBlock)) {
-            // Mirror the GL path's empty-bake behaviour — write zeros to
-            // destAddr so the model store sees a blank slot.
+            // Invisible block: write zeros to destAddr so the model store sees a blank slot.
             zeroDestAddr(destAddr);
             return 0;
         }
@@ -593,20 +316,19 @@ public class ModelTextureBakery {
             this.metalCapture = new MetalViewCapture(this.width, this.height);
         }
 
-        // Mirror the GL setup() block's layer / isBlock decision.
         boolean isBlock = true;
         ChunkSectionLayer layer = layerFor(state);
         if (state.getBlock() instanceof LiquidBlock) {
             isBlock = false;
         }
 
-        // MC's block atlas, resolved to something the Metal bake can sample.
+        // MC's block atlas, resolved to something the bake can sample.
         //
         // Under whole-frame Metal the atlas is already an MTLTexture on Metallum's device, so it is
-        // sampled directly and the AtlasMirror is bypassed entirely. Only when it is a GL texture
-        // (the hybrid/GL backends) does the mirror's readback-and-upload path get used, and only
-        // then is `glId()` meaningful — casting unconditionally is what made this method throw
-        // ClassCastException on Metal and forced the whole bakery behind VOXY_BAKERY_OFF.
+        // sampled directly and the AtlasMirror is bypassed entirely. Only when it is not a Metallum
+        // texture does the mirror's readback-and-upload path get used, and only then is `glId()`
+        // meaningful — casting unconditionally is what made this method throw ClassCastException on
+        // Metal and forced the whole bakery behind VOXY_BAKERY_OFF.
         GpuTexture atlasTexture = mcBlockAtlas();
         long atlasMetalHandle = MetallumBridge.textureHandle(atlasTexture);
         int blockTextureId = 0;
@@ -760,18 +482,18 @@ public class ModelTextureBakery {
     /**
      * Write a synthetic "all 6 faces fully opaque + 'drawn' marker" bake
      * pattern into {@code destAddr}. Used by the Metal-default path where
-     * the real bakery is gated off — keeps every face passing both of
-     * Voxy's face-visibility checks downstream so real quads get
+     * the real bakery is gated off — keeps every face passing
+     * Voxy's face-visibility check downstream so real quads get
      * generated:
      *
      * <ul>
-     *   <li>{@code WRITE_CHECK_ALPHA} (CUTOUT/TRANSLUCENT): passes when
+     *   <li>{@code WRITE_CHECK_ALPHA}: passes when
      *       {@code (colour >>> 24) > 1}. We write {@code colour=0xFFFFFFFF}
      *       — alpha = 255.</li>
-     *   <li>{@code WRITE_CHECK_STENCIL} (SOLID, the majority of blocks):
-     *       passes when {@code (depth & 0xFF) != 0}. The real GL bakery's
+     *   <li>{@code WRITE_CHECK_STENCIL} (the mode the model factory uses):
+     *       passes when {@code (depth & 0xFF) != 0}. The real bakery's
      *       output packs the tint bit at position 7 of the depth uint;
-     *       SOLID blocks rely on that low byte being non-zero to mark a
+     *       blocks rely on that low byte being non-zero to mark a
      *       pixel as "drawn". We set {@code value=0x80} — bit 7 lit. The
      *       block ends up flagged as tinted for downstream tint-state
      *       computation, but the LOD shader's VOXY_NO_ATLAS path ignores

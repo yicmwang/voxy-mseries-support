@@ -1,7 +1,7 @@
 package me.cortex.voxy.client.core.rendering.hierachical;
 
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
-import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
+import me.cortex.voxy.client.core.gpu.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gpu.ComputeEncoder;
 import me.cortex.voxy.client.core.gpu.ComputePipelineDesc;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;

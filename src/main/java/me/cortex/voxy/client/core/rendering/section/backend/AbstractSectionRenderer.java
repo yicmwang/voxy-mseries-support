@@ -2,16 +2,10 @@ package me.cortex.voxy.client.core.rendering.section.backend;
 
 
 import me.cortex.voxy.client.core.AbstractRenderPipeline;
-import me.cortex.voxy.client.core.gl.shader.Shader;
-import me.cortex.voxy.client.core.gl.shader.ShaderType;
 import me.cortex.voxy.client.core.model.ModelStore;
 import me.cortex.voxy.client.core.rendering.Viewport;
-import me.cortex.voxy.client.core.rendering.section.geometry.BasicSectionGeometryData;
 import me.cortex.voxy.client.core.rendering.section.geometry.IGeometryData;
 import me.cortex.voxy.common.Logger;
-import net.minecraft.client.multiplayer.ClientLevel;
-import net.minecraft.core.Direction;
-import net.minecraft.world.level.dimension.DimensionType;
 
 import java.lang.reflect.InvocationTargetException;
 import java.util.List;
@@ -69,36 +63,4 @@ public abstract class AbstractSectionRenderer <T extends Viewport<T>, J extends 
     }
 
     public void addDebug(List<String> lines) {}
-
-    protected static void addDirectionalFaceTint(Shader.Builder<?> builder, ClientLevel cl) {
-        builder.define("NO_SHADE_FACE_TINT", cl.cardinalLighting().byFace(Direction.UP));
-        builder.define("UP_FACE_TINT", cl.cardinalLighting().byFace(Direction.UP));
-        builder.define("DOWN_FACE_TINT", cl.cardinalLighting().byFace(Direction.DOWN));
-        builder.define("Z_AXIS_FACE_TINT", cl.cardinalLighting().byFace(Direction.NORTH));//assumed here that Direction.SOUTH returns the same value
-        builder.define("X_AXIS_FACE_TINT", cl.cardinalLighting().byFace(Direction.EAST));//assumed here that Direction.WEST returns the same value
-        /*
-        //TODO: generate the tinting table here and use the replacement feature
-        float[] tints = new float[7];
-        tints[6] = cl.cardinalLighting().byFace(Direction.UP);
-        for (Direction direction : Direction.values()) {
-            tints[direction.get3DDataValue()] = cl.cardinalLighting().byFace(direction);
-        }*/
-    }
-
-    protected static Shader tryCompilePatchedOrNormal(Shader.Builder<?> builder, String shader, String original) {
-        boolean patched = shader != original;//This is the correct comparison type (reference)
-        try {
-            return builder.clone()
-                    .defineIf("PATCHED_SHADER", patched)
-                    .addSource(ShaderType.FRAGMENT, shader)
-                    .compile();
-        } catch (RuntimeException e) {
-            if (patched) {
-                Logger.error("Failed to compile shader patch, using normal pipeline to prevent errors", e);
-                return tryCompilePatchedOrNormal(builder, original, original);
-            } else {
-                throw e;
-            }
-        }
-    }
 }

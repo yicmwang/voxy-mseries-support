@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.core.rendering.util;
 
-import me.cortex.voxy.client.core.gpu.BackendType;
 import me.cortex.voxy.client.core.gpu.IGpuSampler;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import me.cortex.voxy.client.core.gpu.RenderBackend;
@@ -80,14 +79,9 @@ public final class AtlasMirror {
      * the Metal-side {@link IGpuTexture} the bakery should bind. Cheap when
      * the source id hasn't changed since the last call (single int compare).
      *
-     * <p>Throws on non-Metal backends — the GL bakery samples MC's atlas
-     * directly, no mirror needed.
+     * <p>Metal-only by construction — there is no GL render path to mirror for.
      */
     public IGpuTexture syncMetal(int mcAtlasGlId) {
-        if (this.backend.getType() == BackendType.OPENGL) {
-            throw new IllegalStateException(
-                    "AtlasMirror is Metal-only — GL bakery samples MC's atlas directly.");
-        }
         if (mcAtlasGlId == 0) {
             return this.mirror; // possibly null on the very first call before MC is ready
         }

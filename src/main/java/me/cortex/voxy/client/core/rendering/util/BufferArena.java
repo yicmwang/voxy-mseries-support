@@ -1,6 +1,6 @@
 package me.cortex.voxy.client.core.rendering.util;
 
-import me.cortex.voxy.client.core.gl.Capabilities;
+import me.cortex.voxy.client.core.gpu.Capabilities;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
 import me.cortex.voxy.common.util.AllocationArena;

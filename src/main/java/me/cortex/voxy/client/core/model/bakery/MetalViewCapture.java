@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.core.model.bakery;
 
-import me.cortex.voxy.client.core.gpu.BackendType;
 import me.cortex.voxy.client.core.gpu.IGpuSampler;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
 import me.cortex.voxy.client.core.gpu.RenderBackend;
@@ -14,13 +13,10 @@ import static org.lwjgl.opengl.GL11C.GL_RGBA8;
 import static org.lwjgl.opengl.GL11C.GL_TEXTURE_2D;
 
 /**
- * M13 chunk 1 (2026-05-13): Metal-side counterpart to {@link GlViewCapture}.
  * Owns the 48×32 Shared-storage Metal bake target, the
  * {@link MetalBudgetBufferRenderer}, and the {@link AtlasMirror} that lifts
- * MC's GL atlas onto Metal. Exposes the same API shape
- * ({@link #emitToStream}) so {@link ModelTextureBakery} can dispatch to
- * either GL or Metal at run-time without per-pixel format conversion in
- * the caller.
+ * MC's atlas onto Metal. Exposes the same API shape
+ * ({@link #emitToStream}) {@link ModelTextureBakery} consumes.
  *
  * <p>Per-bake flow used by {@code renderToStreamMetal}:
  * <pre>
@@ -32,8 +28,7 @@ import static org.lwjgl.opengl.GL11C.GL_TEXTURE_2D;
  *   capture.emitToStream(dest);  // CPU read + pack into uvec2-per-pixel
  * </pre>
  *
- * <p>Output format matches {@link GlViewCapture#emitToStream} pixel-for-pixel
- * so {@code ModelStore} consumers don't need to branch on backend:
+ * <p>Output layout (a uvec2 per pixel):
  * <pre>
  *   outA[0..3] = packed RGBA (little-endian: R at lowest byte)
  *   outA[4..7] = (depthBits &lt;&lt; 8) | (tintBit &lt;&lt; 7)
@@ -80,10 +75,6 @@ public final class MetalViewCapture {
         this.totalW = width * 3;
         this.totalH = height * 2;
         this.backend = RenderBackendFactory.get();
-        if (this.backend.getType() == BackendType.OPENGL) {
-            throw new IllegalStateException(
-                    "MetalViewCapture is Metal-only — GL goes through GlViewCapture.");
-        }
 
         MetalTexture t = (MetalTexture) this.backend.createTexture(GL_TEXTURE_2D);
         t.storeRenderTargetUploadable(GL_RGBA8, 1, this.totalW, this.totalH);
@@ -100,8 +91,8 @@ public final class MetalViewCapture {
     /**
      * Open the render pass with a clear-to-zero load and stage the mesh +
      * atlas + sampler bindings. {@code meshAddr} must point at packed
-     * quad vertex data in the same {@link BudgetBufferRenderer#VERTEX_FORMAT_SIZE}-stride
-     * layout the GL path uses; {@code mcAtlasGlId} is MC's
+     * quad vertex data in the same {@link ReuseVertexConsumer#VERTEX_FORMAT_SIZE}-stride
+     * layout the mesher produces; {@code mcAtlasGlId} is MC's
      * {@code textures/atlas/blocks.png} GL texture id (the
      * {@link AtlasMirror} CPU-reads it via {@code nglGetTexImage} and uploads
      * to the Metal mirror only when the id changes).
@@ -183,8 +174,7 @@ public final class MetalViewCapture {
     /**
      * Render the per-block mesh once into the 16×16 cell at
      * {@code (faceX, faceY)} of the 3×2 grid, using {@code matrix} as the
-     * cube-projection transform. Mirrors the per-face draw the GL bakery
-     * does at {@link ModelTextureBakery#renderToStream}.
+     * cube-projection transform.
      */
     public void renderFace(int faceX, int faceY, Matrix4f matrix) {
         if (!this.activeBake) return; // beginBake bailed (atlas not ready)
@@ -207,7 +197,7 @@ public final class MetalViewCapture {
 
     /**
      * Read the bake target via {@link MetalTexture#getBytes} and pack into the uvec2-per-pixel layout
-     * {@link GlViewCapture#emitToStream} produces, with the metadata word carrying true coverage.
+     * the bakery consumes, with the metadata word carrying true coverage.
      *
      * <p>Two things here are load-bearing and were each the source of the missing-surface-face
      * symptom. The GPU must be synchronised before the readback (see the sync block below), and the

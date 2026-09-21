@@ -1,7 +1,6 @@
 package me.cortex.voxy.client.core.model.bakery;
 
-import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
-import me.cortex.voxy.client.core.gpu.BackendType;
+import me.cortex.voxy.client.core.gpu.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.IGpuPipeline;
@@ -19,55 +18,38 @@ import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 
+// GL_RGBA8 is a format TOKEN handed to the backend (MetalFormatUtil.glFormatToMetal), not a GL call.
 import static org.lwjgl.opengl.GL11C.GL_RGBA8;
-import static org.lwjgl.opengl.GL11C.GL_TEXTURE_2D;
 
 /**
- * M13 chunk 1 foundation (2026-05-13): Metal-native counterpart to
- * {@link BudgetBufferRenderer}. Same shape — upload a quad mesh, bind a
- * source texture, draw into the bake target — but every GPU resource lives
- * on the Voxy {@link RenderBackend} abstraction (which on Metal lowers to
- * MTLBuffer / MTLTexture / MTLRenderCommandEncoder), so it bypasses Apple's
- * GL pixel-processor entirely and sidesteps the {@code glReadPixels}
- * SIGBUS chain that gated the original bakery off.
+ * The bakery's Metal renderer: upload a quad mesh, bind a source texture,
+ * draw into the bake target. Every GPU resource lives on the Voxy
+ * {@link RenderBackend} abstraction (which lowers to MTLBuffer / MTLTexture /
+ * MTLRenderCommandEncoder).
  *
- * <p><strong>This class is dormant.</strong> It compiles, allocates resources
- * on first use, and is ready to be invoked by a future Metal-aware variant
- * of {@link ModelTextureBakery#renderToStream}; but the bakery's auto-gate
- * is still active, so no call site exists yet. Wiring it in requires:
- * <ol>
- *   <li>Allocating a Shared-storage bake-target {@link MetalTexture} via
- *       {@link MetalTexture#storeRenderTargetUploadable} sized to the same
- *       48×32 RGBA8 layout {@code GlViewCapture} uses.</li>
- *   <li>Per-block: {@link AtlasMirror#syncMetal} on MC's atlas, then
- *       {@link #setup} / {@link #render} for each of the 6 cube faces.</li>
- *   <li>A Metal equivalent of {@link GlViewCapture#emitToStream} that
- *       memcpys the bake target's Shared storage into the persistent-mapped
- *       {@code destAddr} the caller provides — the simplest shape since the
- *       texture is already CPU-readable on Apple Silicon.</li>
- *   <li>Dropping the {@code isMetal} gate at
- *       {@link ModelTextureBakery#renderToStream}.</li>
- * </ol>
+ * <p>Per-block: {@link #setup} / {@link #render} for each of the 6 cube faces,
+ * with the readback done by {@link MetalViewCapture#emitToStream}. The atlas
+ * comes either as MC's own Metallum texture or — when it is not
+ * Metallum-backed — through {@link AtlasMirror#syncMetal}.
  *
- * <p>Caveats versus the GL path:
+ * <p>Shape notes:
  * <ul>
  *   <li>Single colour attachment (no R32UI metadata buffer). The
- *       depth/stencil/tint bits {@code GlViewCapture} packs into the second
- *       uvec2 component default to 0 — sufficient for "real texture pixels
- *       on LOD chunks", insufficient for per-pixel tint state. A second
- *       attachment can be added once {@link RenderPassDesc} is confirmed to
- *       support multi-colour attachments on Metal (verified via a new smoke
- *       test before any per-pixel tint correctness work).</li>
- *   <li>No depth-stencil testing during the bake. The bakery's stencil
- *       dance counted overdraw between block faces; without it the simple
+ *       depth/stencil/tint bits live in the second uvec2 component packed by
+ *       {@link MetalViewCapture#emitToStream} instead — sufficient for "real
+ *       texture pixels on LOD chunks" plus the synthetic coverage marker. A
+ *       second attachment can be added once {@link RenderPassDesc} is
+ *       confirmed to support multi-colour attachments on Metal (verified via
+ *       a new smoke test before any per-pixel tint correctness work).</li>
+ *   <li>No depth-stencil testing during the bake. The stencil dance counted
+ *       overdraw between block faces; without it the simple
  *       case (single-cube models) works correctly via the cube projection
  *       matrices, but partially-transparent geometry (glass, slabs, etc.)
  *       may over-draw incorrectly. Acceptable for the MVP.</li>
- *   <li>{@link PipelineState#OPAQUE_MESH} with NO_CULL — the bakery's GL
- *       path toggles {@code glCullFace} between faces; Metal bakes cull
- *       mode into pipeline state so a single NO_CULL pipeline keeps the
- *       implementation small and matches the GL behaviour at the cost of
- *       drawing one extra triangle's worth of fragments per face.</li>
+ *   <li>{@link PipelineState#OPAQUE_MESH} with NO_CULL — cull mode is baked
+ *       into pipeline state, so a single NO_CULL pipeline keeps the
+ *       implementation small at the cost of drawing one extra triangle's
+ *       worth of fragments per face.</li>
  * </ul>
  */
 public final class MetalBudgetBufferRenderer {
@@ -77,9 +59,9 @@ public final class MetalBudgetBufferRenderer {
     /** Sampler unit for {@code position_tex.fsh}'s {@code tex}. */
     private static final int TEX_BINDING = 0;
 
-    /** Matches {@link BudgetBufferRenderer#VERTEX_FORMAT_SIZE}: vec4 pos + vec2 uv. */
-    private static final int STRIDE = 24;
-    /** Matches the GL path: 4096 quads × 6 indices × 2 bytes = 48 KB. */
+    /** Vertex format: vec4 pos + vec2 uv, 24 bytes. */
+    private static final int STRIDE = ReuseVertexConsumer.VERTEX_FORMAT_SIZE;
+    /** 4096 quads × 6 indices × 2 bytes = 48 KB. */
     private static final int INDEX_BUFFER_BYTES = 3 * 2 * 2 * 4096;
 
     private final RenderBackend backend;
@@ -97,10 +79,6 @@ public final class MetalBudgetBufferRenderer {
 
     public MetalBudgetBufferRenderer() {
         this.backend = RenderBackendFactory.get();
-        if (this.backend.getType() == BackendType.OPENGL) {
-            throw new IllegalStateException(
-                    "MetalBudgetBufferRenderer is Metal-only — GL goes through BudgetBufferRenderer.");
-        }
     }
 
     /**
@@ -114,8 +92,8 @@ public final class MetalBudgetBufferRenderer {
         String vsh = ShaderLoader.parse("voxy:bakery/position_tex.vsh");
         String fsh = ShaderLoader.parse("voxy:bakery/position_tex.fsh");
 
-        // Vertex layout mirrors the GL VAO: attribute 0 = vec4 (pos + meta),
-        // attribute 1 = vec2 (uv). Both interleaved at STRIDE bytes in
+        // Vertex layout mirrors the mesher's VAO: attribute 0 = vec4 (pos +
+        // meta), attribute 1 = vec2 (uv). Both interleaved at STRIDE bytes in
         // buffer slot 0.
         VertexLayout layout = VertexLayout.builder()
                 .buffer(0, STRIDE, VertexLayout.StepRate.PER_VERTEX)
@@ -132,11 +110,9 @@ public final class MetalBudgetBufferRenderer {
                 PipelineState.BlendState.OPAQUE,
                 PipelineState.RasterState.NO_CULL);
 
-        // M13 chunk 1: BAKERY_SINGLE_ATTACHMENT gates out the fragment shader's
-        // metaOut declaration so position_tex.fsh transpiles to MSL with a
-        // single colour output — matches the single-attachment Metal bake
-        // target. The GL path keeps both outputs (it has the multi-attachment
-        // FBO from GlViewCapture).
+        // BAKERY_SINGLE_ATTACHMENT gates out the fragment shader's metaOut
+        // declaration so position_tex.fsh transpiles to MSL with a single
+        // colour output — matches the single-attachment bake target.
         java.util.Map<String, String> defines = java.util.Map.of("BAKERY_SINGLE_ATTACHMENT", "");
         this.pipeline = this.backend.createGraphicsPipeline(new GraphicsPipelineDesc(
                 vsh, fsh, defines,
@@ -144,10 +120,9 @@ public final class MetalBudgetBufferRenderer {
                 GL_RGBA8,
                 layout, state, "MetalBudgetBufferRenderer"));
 
-        // Sequential 0,1,2 / 2,3,0 quad indices, same shape as the GL path's
-        // copy from MC's sequential-buffer. We build them once on CPU and
+        // Sequential 0,1,2 / 2,3,0 quad indices. We build them once on CPU and
         // upload via UploadStream; for the bakery's tiny mesh this is
-        // cheaper than chasing MC's blaze3d helper from the Metal side.
+        // cheaper than chasing MC's blaze3d helper.
         this.indexBuffer = this.backend.createBuffer(INDEX_BUFFER_BYTES);
         long ixDst = UploadStream.INSTANCE.upload(this.indexBuffer, 0, INDEX_BUFFER_BYTES);
         for (int q = 0; q < 4096; q++) {
@@ -207,7 +182,7 @@ public final class MetalBudgetBufferRenderer {
     /**
      * Upload {@code quads} quads of vertex data starting at {@code dataPtr},
      * bind the source texture, and remember the count for the next
-     * {@link #render} call. Mirrors {@link BudgetBufferRenderer#setup}.
+     * {@link #render} call.
      */
     public void setup(long dataPtr, int quads, IGpuTexture sourceTex,
                       me.cortex.voxy.client.core.gpu.IGpuSampler sourceSampler) {
@@ -247,7 +222,6 @@ public final class MetalBudgetBufferRenderer {
 
     /**
      * Issue the indexed draw with {@code matrix} pushed at {@link #PUSH_BINDING}.
-     * Mirrors {@link BudgetBufferRenderer#render}.
      */
     public void render(Matrix4f matrix) {
         if (this.activeEncoder == null) {
@@ -269,8 +243,8 @@ public final class MetalBudgetBufferRenderer {
 
     /**
      * Close the render pass and submit. After this returns, the bake target
-     * is readable on the CPU side (Shared storage) — callers read it via
-     * a future {@code MetalViewCapture.emitToStream} equivalent.
+     * is readable on the CPU side (Shared storage) — {@link MetalViewCapture#emitToStream}
+     * reads it back.
      */
     public void endPass() {
         if (this.activeEncoder == null) return;

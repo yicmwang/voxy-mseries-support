@@ -4,14 +4,11 @@ package me.cortex.voxy.client.core.rendering.section.backend.mdic;
 import me.cortex.voxy.client.RenderStatistics;
 import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.core.AbstractRenderPipeline;
-import me.cortex.voxy.client.core.gl.Capabilities;
-import me.cortex.voxy.client.core.gpu.BackendType;
+import me.cortex.voxy.client.core.gpu.Capabilities;
 import me.cortex.voxy.client.core.gpu.ComputeEncoder;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
-import me.cortex.voxy.client.core.gl.shader.Shader;
-import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
-import me.cortex.voxy.client.core.gl.shader.ShaderType;
+import me.cortex.voxy.client.core.gpu.shader.ShaderLoader;
 import me.cortex.voxy.client.core.model.ModelStore;
 import me.cortex.voxy.client.core.rendering.section.backend.AbstractSectionRenderer;
 import me.cortex.voxy.client.core.rendering.section.geometry.BasicSectionGeometryData;
@@ -29,25 +26,9 @@ import org.lwjgl.system.MemoryUtil;
 
 import java.util.List;
 
-import static org.lwjgl.opengl.ARBIndirectParameters.GL_PARAMETER_BUFFER_ARB;
-import static org.lwjgl.opengl.ARBIndirectParameters.glMultiDrawElementsIndirectCountARB;
-import static org.lwjgl.opengl.GL11.*;
+// GL_RGBA8 survives as a plain format tag in GraphicsPipelineDesc (the backend maps it); it is the
+// only OpenGL symbol left in this file now that the draw path is Metal-only.
 import static org.lwjgl.opengl.GL11C.GL_RGBA8;
-import static org.lwjgl.opengl.GL11C.GL_TEXTURE_2D;
-import static org.lwjgl.opengl.GL15C.GL_ELEMENT_ARRAY_BUFFER;
-import static org.lwjgl.opengl.GL15C.glBindBuffer;
-import static org.lwjgl.opengl.GL15C.glGetBufferSubData;
-import static org.lwjgl.opengl.GL30.glBindBufferBase;
-import static org.lwjgl.opengl.GL30.glBindVertexArray;
-import static org.lwjgl.opengl.GL31C.GL_COPY_READ_BUFFER;
-import static org.lwjgl.opengl.GL31.GL_UNIFORM_BUFFER;
-import static org.lwjgl.opengl.GL33.glBindSampler;
-import static org.lwjgl.opengl.GL40C.GL_DRAW_INDIRECT_BUFFER;
-import static org.lwjgl.opengl.GL42.glMemoryBarrier;
-import static org.lwjgl.opengl.GL43.*;
-import static org.lwjgl.opengl.GL43.glMultiDrawElementsIndirect;
-import static me.cortex.voxy.client.core.gl.GLCompat.bindTextureUnit;
-import static org.lwjgl.opengl.NVRepresentativeFragmentTest.GL_REPRESENTATIVE_FRAGMENT_TEST_NV;
 
 //Uses MDIC to render the sections
 public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, BasicSectionGeometryData> {
@@ -68,35 +49,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static final int BUILT_MASK_CHUNK_BINDING = 10;
     /**
-     * Terrain shaders. Two paths:
-     *   - Iris-patched (legacy {@link Shader.Builder}, GL-only by definition since
-     *     the Iris pipeline is GL-gated in RenderPipelineFactory).
-     *   - Unpatched ({@link me.cortex.voxy.client.core.gpu.IGpuPipeline} via
-     *     createGraphicsPipeline). On Metal this is the only path that ever
-     *     runs; on GL it's used when no Iris pack is active.
-     * Exactly one of each pair is non-null per opaque/translucent slot.
+     * Terrain pipelines, {@link me.cortex.voxy.client.core.gpu.IGpuPipeline} via
+     * createGraphicsPipeline — the only path there is. (The Iris-patched
+     * Shader.Builder pair that used to sit beside them is gone with the GL path:
+     * patchOpaqueShader/patchTranslucentShader are abstract-pipeline hooks nothing
+     * overrides any more, so the branch that built them could never be taken.)
      */
-    private final Shader terrainShader;
-    private final Shader translucentTerrainShader;
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline terrainPipeline;
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline translucentTerrainPipeline;
-    private final int terrainProgram;
-    private final int translucentTerrainProgram;
-    /**
-     * NEAREST/CLAMP sampler for the chunk-bound depth mask at texture
-     * binding 2 (quads.frag's {@code depthTex}; pattern: HiZBuffer's blit
-     * sampler). Metal-only — the GL path binds the raw texture unit in
-     * {@link #bindRenderingBuffers}; null on OpenGL.
-     */
-
-    // M9 migration: MDIC's 5 non-Iris-patched shaders (4 compute + 1 graphics)
-    // now flow through RenderBackend.create*Pipeline so they compile cleanly on
-    // Metal/Vulkan. terrainShader + translucentTerrainShader stay on the legacy
-    // Shader.Builder path because they thread Iris's patchOpaqueShader /
-    // patchTranslucentShader callbacks; that path is GL-only after the
-    // RenderPipelineFactory gate (commit 1e2a1190). Bind/draw stays raw GL —
-    // MDIC operates inside AbstractRenderPipeline's FBO context, not a
-    // RenderEncoder.
 
     private final me.cortex.voxy.client.core.gpu.RenderBackend backend = RenderBackendFactory.get();
 
@@ -125,17 +85,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     // glProgram id needed (encoder pulls it from GlComputePipeline on GL,
     // MTLComputePipelineState on Metal).
 
-    private final me.cortex.voxy.client.core.gpu.IGpuPipeline cullPipeline = this.backend.createGraphicsPipeline(
-            new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(
-                    ShaderLoader.parse("voxy:lod/gl46/cull/raster.vert"),
-                    ShaderLoader.parse("voxy:lod/gl46/cull/raster.frag"),
-                    java.util.Map.of(),
-                    null, null, null, null,
-                    GL_RGBA8,
-                    me.cortex.voxy.client.core.gpu.VertexLayout.EMPTY,
-                    me.cortex.voxy.client.core.gpu.PipelineState.DEFAULT,
-                    "MDICSectionRenderer.cull"));
-    private final int cullProgram = mdicProgramId(this.cullPipeline);
+    // The cull graphics pipeline (lod/gl46/cull/raster.vert|frag) was built here and dispatched
+    // ONLY by the GL occlusion-cull arm in buildDrawCalls; that arm is deleted, so the pipeline
+    // and its two shader sources are gone. The Metal cull is forceAllVisiblePipeline below plus
+    // quads.frag's per-column built-mask test.
 
     /**
      * M12 chunk 5 Metal stub: substitutes for the depth-test-based cull pass
@@ -230,12 +183,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             m.put("STATISTICS_BUFFER_BINDING", Integer.toString(STATISTICS_BUFFER_BINDING));
         }
         return m;
-    }
-
-    private static int mdicProgramId(me.cortex.voxy.client.core.gpu.IGpuPipeline p) {
-        if (p instanceof me.cortex.voxy.client.core.gl.GlGraphicsPipeline gg) return gg.program();
-        if (p instanceof me.cortex.voxy.client.core.gl.GlComputePipeline gc) return gc.program();
-        return 0;
     }
 
     /**
@@ -343,53 +290,19 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         //The pipeline can be used to transform the renderer in abstract ways
 
         // The bound-depth sampler used to be created here, for the depth mask at binding 2. Removed
-        // with the binding: the mask is never rasterized on Metal (ChunkBoundRenderer.renderMetal has
-        // no callers), quads.frag's depth-bound sample is compiled out by default anyway, and a sampler
-        // for a texture nothing samples is a GPU object created to sit idle for the session.
+        // with the binding: the mask is never rasterized on Metal, quads.frag's depth-bound sample is
+        // compiled out by default anyway, and a sampler for a texture nothing samples is a GPU object
+        // created to sit idle for the session.
         String vertex = ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
         String taa = pipeline.taaFunction("taaShift");
         if (taa != null) {
             vertex += "\n"+taa;//inject it at the end
         }
-        var builder = Shader.make()
-                .defineIf("TAA_PATCH", taa != null)
-                .defineIf("DEBUG_RENDER", false)
-
-                //.defineIf("USE_NV_BARRY", Capabilities.INSTANCE.nvBarryCoords)
-
-                .addSource(ShaderType.VERTEX, vertex);
-
-        //Apply per face tinting
-        addDirectionalFaceTint(builder, Minecraft.getInstance().level);
-
         String frag = ShaderLoader.parse("voxy:lod/gl46/quads.frag");
 
-        String opaqueFrag = pipeline.patchOpaqueShader(this, frag);
-        boolean opaquePatched = opaqueFrag != null;
-        if (!opaquePatched) opaqueFrag = frag;
-
-        String translucentFrag = pipeline.patchTranslucentShader(this, frag);
-        boolean translucentPatched = translucentFrag != null;
-        if (!translucentPatched) translucentFrag = frag;
-
-        if (opaquePatched || translucentPatched) {
-            // Iris-patched path stays on the legacy Shader.Builder. It's GL-only
-            // because the Iris pipeline itself is now gated to OpenGL in
-            // RenderPipelineFactory (commit 1e2a1190).
-            this.terrainShader = tryCompilePatchedOrNormal(builder, opaqueFrag, frag);
-            this.translucentTerrainShader = tryCompilePatchedOrNormal(
-                    builder.define("TRANSLUCENT"), translucentFrag, frag);
-            this.terrainPipeline = null;
-            this.translucentTerrainPipeline = null;
-            this.terrainProgram = 0;
-            this.translucentTerrainProgram = 0;
-        } else {
-            // Unpatched path — runs on every backend including Metal. Build the
-            // two pipelines via the cross-backend abstraction. Defines mirror
-            // what Shader.Builder collected above (face-tint floats from
-            // addDirectionalFaceTint + TAA_PATCH if a TAA function exists).
-            this.terrainShader = null;
-            this.translucentTerrainShader = null;
+        {
+            // Defines mirror the face-tint floats from addDirectionalFaceTint plus
+            // TAA_PATCH if a TAA function exists (see buildTerrainDefines).
             java.util.Map<String, String> commonDefines = buildTerrainDefines(taa);
             java.util.Map<String, String> opaqueDefines = new java.util.LinkedHashMap<>(commonDefines);
             java.util.Map<String, String> translucentDefines = new java.util.LinkedHashMap<>(commonDefines);
@@ -422,7 +335,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 translucentDefines.put("VOXY_VX_GBUFFER", "");
                 if (gbufferDebug) translucentDefines.put("VOXY_VX_GBUFFER_DEBUG", "");
             }
-            if (this.backend.getType() != BackendType.OPENGL) {
+            {
                 // NO depth-bound mask on the whole-frame Metal path. Voxy renders straight into MC's
                 // own depth attachment, so the ordinary depth test already IS the occlusion, per
                 // pixel, for free -- there is nothing for a mask to add. This is the Metal-native
@@ -452,10 +365,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // pyramid's source. Metal ONLY, and that is not tidiness -- a shader declaring an output
                 // the pipeline has no attachment for is a Metal validation failure, and the GL pass has
                 // one colour attachment where the Metal pass now has two.
-                if (this.backend.getType() != BackendType.OPENGL) {
-                    opaqueDefines.put("VOXY_LOD_DEPTH_COLOUR", "");
-                    translucentDefines.put("VOXY_LOD_DEPTH_COLOUR", "");
-                }
+                opaqueDefines.put("VOXY_LOD_DEPTH_COLOUR", "");
+                translucentDefines.put("VOXY_LOD_DEPTH_COLOUR", "");
                 // With the mask gone, vanilla and the LOD are compared purely by depth -- and since
                 // the LOD approximates the surface vanilla draws, their depths agree to float
                 // precision where they overlap and they z-fight. Bias the LOD behind so vanilla
@@ -768,7 +679,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // (smoke-tested independently) for future simpler-shader use cases.
             //
             // M12 chunk 6 polish: on non-GL backends the pipeline state uses
-            // NO_CULL because the GL renderTerrain path explicitly calls
+            // NO_CULL because the deleted GL draw path explicitly called
             // glDisable(GL_CULL_FACE) at draw time — that override doesn't
             // apply to Metal where the cull mode is baked into the pipeline.
             // Without this, ~half the LOD triangles disappear due to wrong-
@@ -777,7 +688,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     = me.cortex.voxy.client.core.gpu.PipelineState.OPAQUE_MESH;
             me.cortex.voxy.client.core.gpu.PipelineState translucentState
                     = me.cortex.voxy.client.core.gpu.PipelineState.TRANSLUCENT_MESH;
-            if (this.backend.getType() != BackendType.OPENGL) {
+            {
                 // DIAGNOSTIC (2026-05-25): VOXY_LOD_NO_DEPTH=1 disables the LOD
                 // opaque depth test/write to check whether the view-dependent
                 // flicker is z-fighting in the LOD's own depth buffer (overlapping
@@ -845,8 +756,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // format for it, and this is the step that was missing: with the define injected and the
             // attachment on the pass but only one format declared, Metal DROPS the shader's second
             // output instead of erroring, so the attachment read empty and nothing anywhere said why.
-            // Kept to the non-GL path because GL's pass has one colour attachment.
-            if (this.backend.getType() != BackendType.OPENGL) {
+            {
                 // GL_R32F, NOT GL_RGBA8. The attachment carries reverse-Z depth, which for distant LOD
                 // terrain is ~1e-4..1e-3; in an 8-bit-per-channel format that quantises to zero, so the
                 // pyramid's textureGather -- which reads the RED channel -- got a buffer of zeros and the
@@ -874,8 +784,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                             me.cortex.voxy.client.core.gpu.VertexLayout.EMPTY,
                             translucentState,
                             "MDIC.translucentTerrain"));
-            this.terrainProgram = mdicProgramId(this.terrainPipeline);
-            this.translucentTerrainProgram = mdicProgramId(this.translucentTerrainPipeline);
         }
     }
 
@@ -1065,70 +973,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     }
 
 
-    private void bindRenderingBuffers(MDICViewport viewport) {
-        // SceneUniform is now an SSBO (see bindings.glsl); bind it to the
-        // GL_SHADER_STORAGE_BUFFER target so the in-shader binding=0 matches.
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniformFor(viewport).id());
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, this.geometryManager.getGeometryBuffer().id());
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, this.geometryManager.getMetadataBuffer().id());
-        this.modelStore.bind(3, 4, 0);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, viewport.positionScratchBuffer.id());
-        LightMapHelper.bind(1);
-        bindTextureUnit(2, GL_TEXTURE_2D, viewport.depthBoundingBuffer.getDepthTex().id());
-
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, SharedIndexBuffer.INSTANCE.id());
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, viewport.drawCallBuffer.id());
-        glBindBuffer(GL_PARAMETER_BUFFER_ARB, viewport.drawCountCallBuffer.id());
-    }
-
-    private void renderTerrain(MDICViewport viewport, long indirectOffset, long drawCountOffset, int maxDrawCount) {
-        //RenderLayer.getCutoutMipped().startDrawing();
-
-
-        glDisable(GL_CULL_FACE);
-        glEnable(GL_DEPTH_TEST);
-        if (this.terrainShader != null) {
-            this.terrainShader.bind();
-        } else if (this.terrainProgram != 0) {
-            org.lwjgl.opengl.GL20C.glUseProgram(this.terrainProgram);
-        }
-        glBindVertexArray(RenderBackendFactory.get().getStaticVAO());//Needs to be before binding
-        this.pipeline.setupAndBindOpaque(viewport);
-        this.bindRenderingBuffers(viewport);
-
-        glMemoryBarrier(GL_COMMAND_BARRIER_BIT|GL_SHADER_STORAGE_BARRIER_BIT);//Barrier everything is needed
-        glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
-
-        if (VoxyClient.getOcclusionDebugState()==3) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        }
-        if (Capabilities.INSTANCE.indirectCount) {
-            glMultiDrawElementsIndirectCountARB(GL_TRIANGLES, GL_UNSIGNED_SHORT, indirectOffset, drawCountOffset, maxDrawCount, 0);
-        } else {
-            int drawCount = Math.min(readDrawCount(viewport.drawCountCallBuffer.id(), drawCountOffset), maxDrawCount);
-            glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_SHORT, indirectOffset, drawCount, 0);
-        }
-        if (VoxyClient.getOcclusionDebugState()==3) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        }
-
-        glEnable(GL_CULL_FACE);
-        glBindVertexArray(0);
-        glBindSampler(0, 0);
-        bindTextureUnit(0, GL_TEXTURE_2D, 0);
-        glBindSampler(1, 0);
-        bindTextureUnit(1, GL_TEXTURE_2D, 0);
-
-        //RenderLayer.getCutoutMipped().endDrawing();
-    }
-
+    /**
+     * The GL opaque/temporal/translucent draw entry points are gone: this renderer has no GL draw
+     * path. The abstract superclass still declares them, and the live path is
+     * {@link #renderOpaqueMetal}/{@link #renderTemporalMetal}/{@link #renderTranslucentMetal},
+     * which {@code AbstractRenderPipeline.runPipelineMetal} calls directly with a {@link RenderEncoder}.
+     */
     @Override
     public void renderOpaque(MDICViewport viewport) {
-        if (this.geometryManager.getSectionCount() == 0) return;
-
-        this.uploadUniformBuffer(viewport);
-
-        this.renderTerrain(viewport, 0, 4*3, Math.min((int)(this.geometryManager.getSectionCount()*4.4+128), 400_000));
     }
 
     /**
@@ -1137,11 +989,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * render pass that targets the IOSurface bridge color + Voxy's
      * Metal-side depth texture.
      *
-     * Differences from the GL {@link #renderTerrain}:
+     * <p>This is the only terrain draw there is; the raw-GL {@code renderTerrain}
+     * it used to be contrasted with is deleted.
      * <ul>
-     *   <li>No raw {@code glUseProgram} / {@code glBindBufferBase} / vertex
-     *       array binding — all flows through {@link RenderEncoder.setPipeline}
-     *       / {@code setBuffer}.</li>
+     *   <li>All state flows through {@link RenderEncoder.setPipeline}
+     *       / {@code setBuffer} — no raw program or buffer binding.</li>
      *   <li>No {@code setupAndBindOpaque} — the render pass already targets
      *       the bridge; there's no separate FBO bind step.</li>
      *   <li>Lightmap (binding 1 sampler) is bound via
@@ -1201,9 +1053,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * M12 Metal-side temporal render — reuses the opaque terrain pipeline but
      * draws from the temporal slice of {@code drawCallBuffer}
      * ({@code TEMPORAL_OFFSET}+ slots, populated by commandGen.comp for sections
-     * that were visible-this-frame-but-not-last). On GL the equivalent path
-     * is {@link #renderTemporal}, which forwards to {@link #renderTerrain}
-     * with the temporal offsets.
+     * that were visible-this-frame-but-not-last).
      */
     public void renderTemporalMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
@@ -2141,8 +1991,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                         : indirectOffset == (long) TEMPORAL_OFFSET * 5L * 4L ? "temporal" : "translucent",
                 viewport, indirectOffset, maxDrawCount);
         encoder.setPipeline(pipeline);
-        // SSBO bindings 0..5 — mirror bindRenderingBuffers; SceneUniform is an
-        // SSBO post-chunk-3 SceneUniform flip.
+        // SSBO bindings 0..5; SceneUniform is an SSBO, not a UBO.
         encoder.setBuffer(0, this.uniformFor(viewport), 0);
         encoder.setBuffer(1, this.geometryManager.getGeometryBuffer(), 0);
         encoder.setBuffer(2, this.geometryManager.getMetadataBuffer(), 0);
@@ -2159,9 +2008,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // into a Shared-storage Metal texture each frame (M13 chunk 2).
         LightMapHelper.bindMetal(encoder, 1);
         // Texture/sampler binding 2 and buffer binding 9 used to carry the chunk-bound depth mask here.
-        // Both are gone, and they were carried for nothing on this path:
-        //   - the mask's raster is ChunkBoundRenderer.renderMetal, which has NO callers -- so nothing
-        //     ever writes viewport.depthBoundingBuffer on Metal;
+        // Both are gone, along with the mask's rasterizer and the Viewport depth buffer it wrote, and
+        // they were carried for nothing on this path:
+        //   - nothing ever wrote that depth buffer on Metal, so the mask was never rasterized;
         //   - quads.frag's depth-bound test is compiled out anyway, because VOXY_NO_DEPTH_BOUND is
         //     injected unless the env var is exactly "0" (see the terrain defines above);
         //   - and the binding-9 comment already conceded "the shader no longer samples it" -- a
@@ -2197,40 +2046,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     @Override
     public void renderTranslucent(MDICViewport viewport) {
-        if (this.geometryManager.getSectionCount() == 0) return;
-
-        glEnable(GL_BLEND);
-        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-        glDisable(GL_CULL_FACE);
-        glEnable(GL_DEPTH_TEST);
-        if (this.translucentTerrainShader != null) {
-            this.translucentTerrainShader.bind();
-        } else if (this.translucentTerrainProgram != 0) {
-            org.lwjgl.opengl.GL20C.glUseProgram(this.translucentTerrainProgram);
-        }
-        glBindVertexArray(RenderBackendFactory.get().getStaticVAO());//Needs to be before binding
-        this.pipeline.setupAndBindTranslucent(viewport);
-        this.bindRenderingBuffers(viewport);
-
-        glMemoryBarrier(GL_COMMAND_BARRIER_BIT|GL_SHADER_STORAGE_BARRIER_BIT);//Barrier everything is needed
-        glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
-        int translucentMax = Math.min(this.geometryManager.getSectionCount(), 100_000);
-        if (Capabilities.INSTANCE.indirectCount) {
-            glMultiDrawElementsIndirectCountARB(GL_TRIANGLES, GL_UNSIGNED_SHORT, TRANSLUCENT_OFFSET*5*4, 4*4, translucentMax, 0);
-        } else {
-            int drawCount = Math.min(readDrawCount(viewport.drawCountCallBuffer.id(), 4*4L), translucentMax);
-            glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_SHORT, TRANSLUCENT_OFFSET*5*4, drawCount, 0);
-        }
-
-        glEnable(GL_CULL_FACE);
-        glBindVertexArray(0);
-        glBindSampler(0, 0);
-        bindTextureUnit(0, GL_TEXTURE_2D, 0);
-        glBindSampler(1, 0);
-        bindTextureUnit(1, GL_TEXTURE_2D, 0);
-
-        glDisable(GL_BLEND);
+        // GL draw path deleted — see renderOpaque above; renderTranslucentMetal is the live one.
     }
 
     private static boolean COMPUTE_SERIALIZE_LOGGED = false;
@@ -2250,8 +2066,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // gets from glMemoryBarrier. If the LOD flicker stops with this on, the
         // prepasses were racing across encoder boundaries and the real fix is
         // inter-encoder fences/barriers. Metal-only; GL unaffected.
-        boolean computeSerialize = "1".equals(System.getenv("VOXY_COMPUTE_SERIALIZE"))
-                && this.backend.getType() != BackendType.OPENGL;
+        boolean computeSerialize = "1".equals(System.getenv("VOXY_COMPUTE_SERIALIZE"));
         if (computeSerialize && !COMPUTE_SERIALIZE_LOGGED) {
             COMPUTE_SERIALIZE_LOGGED = true;
             Logger.info("[Metal-SERIALIZE] VOXY_COMPUTE_SERIALIZE active: submit()+wait after each compute prepass");
@@ -2266,7 +2081,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // never drawn — the previous per-frame ~12 MB zero of the whole
         // cmdBuffer is unnecessary (it's zeroed once at allocation in
         // MDICViewport). VOXY_LOD_ZERO_DRAWBUF=1 restores it as a fallback.
-        if (this.backend.getType() != BackendType.OPENGL && METAL_ZERO_DRAWBUF) {
+        if (METAL_ZERO_DRAWBUF) {
             viewport.drawCallWrite(viewport.frameId).zero();
         }
 
@@ -2293,55 +2108,23 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (computeSerialize) this.backend.submit(); // serialize: prep complete
 
         {//Test occlusion
-            if (this.backend.getType() == BackendType.OPENGL) {
-                // GL path — depth-test-based occlusion cull. Rasterizes each
-                // section's AABB against MC's depth buffer with color/depth
-                // masks off; raster.frag writes visibilityData for sections
-                // whose AABBs survive depth test (with optional
-                // NV_representative_fragment_test for perf).
-                if (this.cullProgram != 0) org.lwjgl.opengl.GL20C.glUseProgram(this.cullProgram);
-                if (Capabilities.INSTANCE.repFragTest) {
-                    glEnable(GL_REPRESENTATIVE_FRAGMENT_TEST_NV);
-                }
-                glBindVertexArray(RenderBackendFactory.get().getStaticVAO());
-                // SceneUniform is an SSBO now (see bindings.glsl).
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, this.uniformFor(viewport).id());
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, this.geometryManager.getMetadataBuffer().id());
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, viewport.visibilityBuffer.id());
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, viewport.indirectLookupBuffer.id());
-                glBindBuffer(GL_DRAW_INDIRECT_BUFFER, viewport.drawCountCallBuffer.id());
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, SharedIndexBuffer.INSTANCE.id());
-                glEnable(GL_DEPTH_TEST);
-                glColorMask(false, false, false, false);
-                glDepthMask(false);
-                glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_COMMAND_BARRIER_BIT);
-                glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_BYTE, 6*4);
-                glDepthMask(true);
-                glColorMask(true, true, true, true);
-                glDisable(GL_DEPTH_TEST);
-                if (Capabilities.INSTANCE.repFragTest) {
-                    glDisable(GL_REPRESENTATIVE_FRAGMENT_TEST_NV);
-                }
-            } else {
-                // Non-GL path (Metal today) — compute stub that skips
-                // occlusion and marks every frustum-visible section as
-                // visible-this-frame + visible-last-frame. Slower than real
-                // depth occlusion but functionally correct; the real cull
-                // depends on cross-context MC-depth access which is part of
-                // chunk 6's IGpuRenderTarget work.
-                try (var encoder = this.backend.beginComputePass()) {
-                    encoder.setPipeline(this.forceAllVisiblePipeline);
-                    encoder.setBuffer(0, this.uniformFor(viewport), 0);
-                    encoder.setBuffer(2, viewport.visibilityBuffer, 0);
-                    encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
-                    encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
-                                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-                    // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
-                    // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
-                    // matching this shader's local_size_x=128.
-                    encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
-                    encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
-                }
+            // Compute stub that skips occlusion and marks every frustum-visible section as
+            // visible-this-frame + visible-last-frame. Slower than real depth occlusion but
+            // functionally correct. (The GL arm that rasterized each section's AABB against MC's
+            // depth buffer, with optional NV_representative_fragment_test, is deleted along with
+            // lod/gl46/cull/raster.vert|frag and the cullPipeline they compiled.)
+            try (var encoder = this.backend.beginComputePass()) {
+                encoder.setPipeline(this.forceAllVisiblePipeline);
+                encoder.setBuffer(0, this.uniformFor(viewport), 0);
+                encoder.setBuffer(2, viewport.visibilityBuffer, 0);
+                encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
+                encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
+                                ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
+                // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
+                // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
+                // matching this shader's local_size_x=128.
+                encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
+                encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
             }
         }
         if (computeSerialize) this.backend.submit(); // serialize: cull/visibility complete before commandGen
@@ -2407,11 +2190,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (computeSerialize) this.backend.submit(); // serialize: commandGen (draw commands) complete
 
         {//Do translucency sorting
-            // M12 chunk 1: prefixSum migrated to ComputeEncoder. Runs on every
-            // backend (GL lowers to glUseProgram + glBindBufferBase +
-            // glDispatchCompute; Metal opens an MTLComputeCommandEncoder). The
-            // previous raw-GL pattern no-opped on Metal because
-            // mdicProgramId(prefixSumPipeline) returns 0.
+            // M12 chunk 1: prefixSum dispatched through ComputeEncoder (Metal
+            // opens an MTLComputeCommandEncoder).
             try (var encoder = this.backend.beginComputePass()) {
                 encoder.setPipeline(this.prefixSumPipeline);
                 encoder.setBuffer(0, this.distanceCountBuffer, 0);
@@ -2446,19 +2226,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     @Override
     public void renderTemporal(MDICViewport viewport) {
-        if (this.geometryManager.getSectionCount() == 0) return;
-        //Render temporal
-        this.renderTerrain(viewport, TEMPORAL_OFFSET*5*4, 4*5, Math.min(this.geometryManager.getSectionCount(), 100_000));
-    }
-
-    private int readDrawCount(int bufferId, long offsetBytes) {
-        var tmp = MemoryUtil.memAllocInt(1);
-        glBindBuffer(GL_COPY_READ_BUFFER, bufferId);
-        glGetBufferSubData(GL_COPY_READ_BUFFER, offsetBytes, tmp);
-        glBindBuffer(GL_COPY_READ_BUFFER, 0);
-        int count = tmp.get(0);
-        MemoryUtil.memFree(tmp);
-        return Math.max(count, 0);
+        // GL draw path deleted — see renderOpaque above; renderTemporalMetal is the live one.
     }
 
     @Override
@@ -2478,12 +2246,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             u.free();
         }
         this.distanceCountBuffer.free();
-        if (this.translucentTerrainShader != null) this.translucentTerrainShader.free();
-        if (this.terrainShader != null) this.terrainShader.free();
         if (this.translucentTerrainPipeline != null) this.translucentTerrainPipeline.close();
         if (this.terrainPipeline != null) this.terrainPipeline.close();
         this.commandGenPipeline.close();
-        this.cullPipeline.close();
         this.forceAllVisiblePipeline.close();
         this.prepPipeline.close();
         this.translucentGenPipeline.close();

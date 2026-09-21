@@ -3,20 +3,22 @@ package me.cortex.voxy.client.core.gpu;
 import me.cortex.voxy.common.Logger;
 
 /**
- * Factory for creating the appropriate RenderBackend based on the current platform.
+ * Factory for the render backend.
  *
- * On macOS with Apple Silicon (M-series), the Metal backend will be preferred.
- * On all other platforms, the OpenGL backend is used.
+ * <p>There is exactly one: Metal, on Apple Silicon. This project has no OpenGL path and is not going to
+ * grow one, so the factory no longer selects between backends — it resolves the only one and fails
+ * loudly if it cannot.
+ *
+ * <p>The fallback to a GL backend that used to live here was worse than useless once GL stopped being a
+ * target: it turned a missing native library into a silently different renderer, which is how you spend
+ * an afternoon measuring a frame that Metal never drew.
  */
 public final class RenderBackendFactory {
     private static RenderBackend INSTANCE;
 
     private RenderBackendFactory() {}
 
-    /**
-     * Gets or creates the singleton RenderBackend instance.
-     * The backend type is automatically selected based on platform capabilities.
-     */
+    /** Gets or creates the singleton RenderBackend instance. */
     public static RenderBackend get() {
         if (INSTANCE == null) {
             INSTANCE = createBackend();
@@ -25,35 +27,29 @@ public final class RenderBackendFactory {
     }
 
     /**
-     * Force-sets the backend (useful for testing or explicit user override).
+     * Force-sets the backend. Kept for tests that need a stand-in; there is no production caller.
      */
     public static void set(RenderBackend backend) {
         INSTANCE = backend;
     }
 
     private static RenderBackend createBackend() {
-        if (shouldUseMetal()) {
-            try {
-                // Only attempt Metal if the native library is available.
-                // This avoids hard-failing on macOS hosts without the libvoxy_metal.dylib.
-                if (me.cortex.voxy.client.core.metal.MetalNative.load()) {
-                    Logger.info("Using Metal render backend (Apple Silicon)");
-                    return new me.cortex.voxy.client.core.metal.MetalRenderBackend();
-                }
-                Logger.info("Metal native library not available, falling back to OpenGL");
-            } catch (Throwable t) {
-                Logger.error("Failed to initialize Metal backend, falling back to OpenGL: " + t.getMessage());
-            }
+        final String os = System.getProperty("os.name", "").toLowerCase();
+        final String arch = System.getProperty("os.arch", "").toLowerCase();
+        if (!(os.contains("mac") && arch.contains("aarch64"))) {
+            throw new IllegalStateException(
+                    "Voxy renders through Metal and this machine is " + os + "/" + arch + ". "
+                            + "An Apple Silicon Mac (macOS + aarch64) is required; there is no other backend.");
         }
-        Logger.info("Using OpenGL render backend");
-        // Lazy import to avoid class loading issues on platforms without OpenGL
-        return new me.cortex.voxy.client.core.gl.GlRenderBackend();
-    }
-
-    private static boolean shouldUseMetal() {
-        String os = System.getProperty("os.name", "").toLowerCase();
-        String arch = System.getProperty("os.arch", "").toLowerCase();
-        // Apple Silicon Macs: macOS + aarch64
-        return os.contains("mac") && arch.contains("aarch64");
+        if (!me.cortex.voxy.client.core.metal.MetalNative.load()) {
+            throw new IllegalStateException(
+                    "Could not load the Voxy Metal native library (libvoxy_metal.dylib). It ships in "
+                            + "src/main/resources/natives/macos-arm64/ and is built by native/metal/CMakeLists.txt; "
+                            + "there is no fallback backend.");
+        }
+        Logger.info("Using Metal render backend (Apple Silicon)");
+        // Deliberately NOT wrapped in a catch: a Metal init failure is fatal here, and swallowing it was
+        // only ever justified by having somewhere else to go.
+        return new me.cortex.voxy.client.core.metal.MetalRenderBackend();
     }
 }

@@ -1,4 +1,4 @@
-package me.cortex.voxy.client.core.gl.shader;
+package me.cortex.voxy.client.core.gpu.shader;
 
 
 import net.minecraft.resources.Identifier;

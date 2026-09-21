@@ -1,16 +1,11 @@
 package me.cortex.voxy.client.core;
 
-import me.cortex.voxy.client.core.gpu.GlCompat;
-
-import com.mojang.blaze3d.opengl.GlConst;
-import com.mojang.blaze3d.opengl.GlStateManager;
 import me.cortex.voxy.client.TimingStatistics;
 import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.config.VoxyConfig;
-import me.cortex.voxy.client.core.gl.Capabilities;
+import me.cortex.voxy.client.core.gpu.Capabilities;
 import me.cortex.voxy.client.core.model.ModelBakerySubsystem;
 import me.cortex.voxy.client.core.model.ModelStore;
-import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.client.core.rendering.RenderDistanceTracker;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.ViewportSelector;
@@ -26,7 +21,6 @@ import me.cortex.voxy.client.core.rendering.section.geometry.IGeometryData;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
 import me.cortex.voxy.client.core.rendering.util.PrintfDebugUtil;
 import me.cortex.voxy.client.core.rendering.util.UploadStream;
-import me.cortex.voxy.client.core.util.GPUTiming;
 import me.cortex.voxy.client.core.util.IrisUtil;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.thread.ServiceManager;
@@ -37,30 +31,11 @@ import net.caffeinemc.mods.sodium.client.util.FogParameters;
 import net.minecraft.client.Minecraft;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
-import org.lwjgl.opengl.GL11;
 
 import java.util.Arrays;
 import java.util.List;
 
-import static org.lwjgl.opengl.GL11.GL_VIEWPORT;
-import static org.lwjgl.opengl.GL11.glGetIntegerv;
-import static org.lwjgl.opengl.GL11C.*;
-import static org.lwjgl.opengl.GL30C.*;
-import static org.lwjgl.opengl.GL33.glBindSampler;
-import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
-import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_BINDING;
-
 public class VoxyRenderSystem {
-    /**
-     * Saving and restoring MC's GL SSBO bindings is meaningless -- and, worse, fatal -- without a GL
-     * backend: under whole-frame Metal there is no context and glGetIntegeri aborts the JVM
-     * ("FATAL ERROR in native method: No context is current"). Nothing Voxy does on Metal touches GL
-     * state, so there is nothing to preserve.
-     */
-    private static final boolean SAVE_GL_STATE =
-            me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                    == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
-
     private final WorldEngine worldIn;
 
 
@@ -73,7 +48,6 @@ public class VoxyRenderSystem {
 
 
     private final RenderDistanceTracker renderDistanceTracker;
-    public final ChunkBoundRenderer chunkBoundRenderer;
 
     private final ViewportSelector<?> viewportSelector;
 
@@ -185,31 +159,15 @@ public class VoxyRenderSystem {
         // only ~2000 blocks = the "gigantic shapeless distant blocks"
         // report. Values above 128 can only come from that disabled loop
         // (the config UI stays well below it), so reset them to the
-        // default 64. Metal-only guard keeps GL behaviour untouched.
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL
-                && VoxyConfig.CONFIG.subDivisionSize > 128f) {
+        // default 64.
+        if (VoxyConfig.CONFIG.subDivisionSize > 128f) {
             Logger.warn("[Metal] sub_division_size drifted to " + VoxyConfig.CONFIG.subDivisionSize
                     + " (residue of the disabled FPS auto-balancer) — resetting to 64 for full LOD detail");
             VoxyConfig.CONFIG.subDivisionSize = 64f;
             VoxyConfig.CONFIG.save();
         }
 
-        //Fking HATE EVERYTHING AAAAAAAAAAAAAAAA
-        int[] oldBufferBindings = new int[10];
-        if (SAVE_GL_STATE) {
-            for (int i = 0; i < oldBufferBindings.length; i++) {
-                oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
-            }
-        }
-
         try {
-            //wait for opengl to be finished, this should hopefully ensure all memory allocations are free
-            if (SAVE_GL_STATE) {
-                GlCompat.finish();
-                GlCompat.finish();
-            }
-
             this.worldIn = world;
 
             long geometryCapacity = getGeometryBufferSize();
@@ -258,26 +216,10 @@ public class VoxyRenderSystem {
                 this.setRenderDistance(VoxyConfig.CONFIG.sectionRenderDistance);
             }
 
-            this.chunkBoundRenderer = new ChunkBoundRenderer(this.pipeline);
-
             Logger.info("Voxy render system created with " + geometryCapacity + " geometry capacity, using pipeline '" + this.pipeline.getClass().getSimpleName() + "' with renderer '" + sectionRenderer.getClass().getSimpleName() + "'");
         } catch (RuntimeException e) {
             world.releaseRef();//If something goes wrong, we must release the world first
             throw e;
-        }
-
-        if (SAVE_GL_STATE) {
-            for (int i = 0; i < oldBufferBindings.length; i++) {
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
-            }
-        }
-
-        if (SAVE_GL_STATE) {
-            for (int i = 0; i < 12; i++) {
-                GlStateManager._activeTexture(GlConst.GL_TEXTURE0+i);
-                GlStateManager._bindTexture(0);
-                glBindSampler(i, 0);
-            }
         }
     }
 
@@ -435,30 +377,17 @@ public class VoxyRenderSystem {
         //var projection = ShadowMatrices.createOrthoMatrix(160, -16*300, 16*300);
         //var projection = new Matrix4f(matrices.projection());
 
-        // GL_VIEWPORT is only readable with a GL context; on Metal the non-GL branch below
-        // derives the size from MC's main render target instead (and does so deliberately --
-        // see its note on why GL_VIEWPORT is untrustworthy there anyway).
+        // The frame size comes from MC's main render target. (The former GL_VIEWPORT query is
+        // gone: it is not trustworthy here anyway -- MC re-renders the 16x16 lightmap every game
+        // tick and blaze3d's createRenderPass sets the GL viewport eagerly without restoring;
+        // above water the fullscreen sky pass resets it before Sodium's terrain hook, but
+        // UNDERWATER Sodium skips the sky pass — so GL_VIEWPORT read 16x16 on every tick frame
+        // (~20 Hz). That inflated minSSS 6400x (the octree walk stopped at the top level:
+        // renderList collapsed to ~16) and reallocated the IOSurface bridge to 16x16 (broken
+        // blit) — the underwater strobe.)
         int width = 0;
         int height = 0;
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            int[] dims = new int[4];
-            glGetIntegerv(GL_VIEWPORT, dims);
-            width = dims[2];
-            height = dims[3];
-        }
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            // GL_VIEWPORT is NOT trustworthy here: MC re-renders the 16x16
-            // lightmap every game tick and blaze3d's createRenderPass sets the
-            // GL viewport eagerly without restoring; above water the fullscreen
-            // sky pass resets it before Sodium's terrain hook, but UNDERWATER
-            // Sodium skips the sky pass — so GL_VIEWPORT reads 16x16 on every
-            // tick frame (~20 Hz). That inflated minSSS 6400x (the octree walk
-            // stopped at the top level: renderList collapsed to ~16) and
-            // reallocated the IOSurface bridge to 16x16 (broken blit) — the
-            // underwater strobe. MC's main RT is the authoritative frame size
-            // (same source the compositor uses).
+        {
             var rt = Minecraft.getInstance().gameRenderer.mainRenderTarget();
             if (rt != null && rt.width > 0 && rt.height > 0) {
                 if ((width != rt.width || height != rt.height) && !loggedViewportLeak) {
@@ -498,8 +427,7 @@ public class VoxyRenderSystem {
         if (viewport == null) {
             return;
         }
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+        {
             // Iris pack toggled since construction? The pipeline's env-fog
             // define (and the inject mode it pairs with) is baked at
             // construction, so recreate the renderer through the same
@@ -522,8 +450,8 @@ public class VoxyRenderSystem {
                     }
                 });
             }
-            // Metal path — skip all the GL state save/restore and drive the pipeline's Metal render.
-            // The compositing mixin runs separately at renderLevel RETURN.
+            // Drive the pipeline's Metal render. The compositing mixin runs separately at
+            // renderLevel RETURN.
             this.pipeline.preSetup(viewport);
             // No chunk-bound mask pass here any more. Voxy draws into MC's own depth attachment, so
             // the depth test occludes LOD against real terrain per pixel with no help; the mask that
@@ -569,135 +497,7 @@ public class VoxyRenderSystem {
             this.metalRingDiagFrame++;
             if (this.metalRingDiagFrame % 600 == 1) {
             }
-            return;
         }
-
-        TimingStatistics.resetSamplers();
-
-        long startTime = System.nanoTime();
-        TimingStatistics.all.start();
-        GPUTiming.INSTANCE.marker();//Start marker
-        TimingStatistics.main.start();
-
-        //TODO: optimize
-        int[] oldBufferBindings = new int[10];
-        if (SAVE_GL_STATE) {
-            for (int i = 0; i < oldBufferBindings.length; i++) {
-                oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
-            }
-        }
-
-
-        int oldFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
-        int boundFB = oldFB;
-
-        int[] dims = new int[4];
-        glGetIntegerv(GL_VIEWPORT, dims);
-
-        glViewport(0,0, viewport.width, viewport.height);
-
-        //var target = DefaultTerrainRenderPasses.CUTOUT.getTarget();
-        //boundFB = ((net.minecraft.client.texture.GlTexture) target.getColorAttachment()).getOrCreateFramebuffer(((GlBackend) RenderSystem.getDevice()).getFramebufferManager(), target.getDepthAttachment());
-        if (boundFB == 0) {
-            throw new IllegalStateException("Cannot use the default framebuffer as cannot source from it");
-        }
-
-        //this.autoBalanceSubDivSize();
-
-        this.pipeline.preSetup(viewport);
-
-        TimingStatistics.E.start();
-        if ((!VoxyClient.disableSodiumChunkRender())&&!IrisUtil.irisShadowActive()) {
-            this.chunkBoundRenderer.render(viewport);
-        } else {
-            viewport.depthBoundingBuffer.clear(0);
-        }
-        TimingStatistics.E.stop();
-
-
-        //The entire rendering pipeline (excluding the chunkbound thing)
-        this.pipeline.runPipeline(viewport, boundFB, dims[2], dims[3]);
-
-
-        TimingStatistics.main.stop();
-        TimingStatistics.postDynamic.start();
-
-        PrintfDebugUtil.tick();
-
-        //As much dynamic runtime stuff here
-        {
-            //Tick upload stream (this is ok to do here as upload ticking is just memory management)
-            UploadStream.INSTANCE.tick();
-
-            while (this.renderDistanceTracker.setCenterAndProcess(viewport.cameraX, viewport.cameraZ) && VoxyClient.isFrexActive());//While FF is active, run until everything is processed
-            TimingStatistics.H.start();
-            //Done here as is allows less gl state resetup
-            do { this.modelService.tick(900_000); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
-            TimingStatistics.H.stop();
-        }
-        GPUTiming.INSTANCE.marker();
-        TimingStatistics.postDynamic.stop();
-
-        GPUTiming.INSTANCE.tick();
-
-        glBindFramebuffer(GlConst.GL_FRAMEBUFFER, oldFB);
-        glViewport(dims[0], dims[1], dims[2], dims[3]);
-
-        {//Reset state manager stuffs
-            glUseProgram(0);
-            glEnable(GL_DEPTH_TEST);
-
-            GlStateManager._glBindVertexArray(0);//Clear binding
-
-            GlStateManager._activeTexture(GlConst.GL_TEXTURE1);
-            for (int i = 0; i < 12; i++) {
-                GlStateManager._activeTexture(GlConst.GL_TEXTURE0+i);
-                GlStateManager._bindTexture(0);
-                glBindSampler(i, 0);
-            }
-
-            IrisUtil.clearIrisSamplers();//Thanks iris (sigh)
-
-            //TODO: should/needto actually restore all of these, not just clear them
-            //Clear all the bindings
-            if (SAVE_GL_STATE) {
-                for (int i = 0; i < oldBufferBindings.length; i++) {
-                    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
-                }
-            }
-
-            //((SodiumShader) Iris.getPipelineManager().getPipelineNullable().getSodiumPrograms().getProgram(DefaultTerrainRenderPasses.CUTOUT).getInterface()).setupState(DefaultTerrainRenderPasses.CUTOUT, fogParameters);
-        }
-
-        TimingStatistics.all.stop();
-
-        //TimingStatistics.I.start();
-        //glFlush();
-        //TimingStatistics.I.stop();
-
-        /*
-        TimingStatistics.F.start();
-        this.postProcessing.setup(viewport.width, viewport.height, boundFB);
-        TimingStatistics.F.stop();
-
-        this.renderer.renderFarAwayOpaque(viewport, this.chunkBoundRenderer.getDepthBoundTexture());
-
-
-        TimingStatistics.F.start();
-        //Compute the SSAO of the rendered terrain, TODO: fix it breaking depth or breaking _something_ am not sure what
-        this.postProcessing.computeSSAO(viewport.MVP);
-        TimingStatistics.F.stop();
-
-        TimingStatistics.G.start();
-        //We can render the translucent directly after as it is the furthest translucent objects
-        this.renderer.renderFarAwayTranslucent(viewport, this.chunkBoundRenderer.getDepthBoundTexture());
-        TimingStatistics.G.stop();
-
-
-        TimingStatistics.F.start();
-        this.postProcessing.renderPost(viewport, matrices.projection(), boundFB);
-        TimingStatistics.F.stop();
-         */
     }
 
 
@@ -744,15 +544,7 @@ public class VoxyRenderSystem {
         // (This is also why upstream's depth path needs transformBlitDepth: it reprojects MC's depth
         // through inverse(viewport.MVP) and a target transform precisely because the two projections
         // differ. Sharing one projection removes the need for the transform entirely.)
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            return new Matrix4f(base);
-        }
-
-        float nearVoxy = me.cortex.voxy.client.core.rendering.util.LodProjection.nearVoxy(
-                Minecraft.getInstance().options.renderDistance().get(),
-                VoxyClient.disableSodiumChunkRender());
-        return me.cortex.voxy.client.core.rendering.util.LodProjection.compute(base, nearVoxy, 16 * 3000);
+        return new Matrix4f(base);
     }
 
     private boolean frexStillHasWork() {
@@ -761,9 +553,7 @@ public class VoxyRenderSystem {
         }
         //If frex is running we must tick everything to ensure correctness
         UploadStream.INSTANCE.tick();
-        //Done here as is allows less gl state resetup
         this.modelService.tick(100_000_000);
-        GlCompat.finish();
         return this.nodeManager.hasWork() || this.renderGen.getTaskCount()!=0 || !this.modelService.areQueuesEmpty();
     }
 
@@ -818,7 +608,6 @@ public class VoxyRenderSystem {
             this.nodeCleaner.free();
 
             this.geometryData.free();
-            this.chunkBoundRenderer.free();
 
             this.viewportSelector.free();
         } catch (Exception e) {Logger.error("Error shutting down renderer components", e);}

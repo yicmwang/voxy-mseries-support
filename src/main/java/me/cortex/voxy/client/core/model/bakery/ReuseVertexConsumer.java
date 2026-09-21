@@ -7,11 +7,18 @@ import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.client.renderer.texture.MipmapStrategy;
 import org.lwjgl.system.MemoryUtil;
 
-import static me.cortex.voxy.client.core.model.bakery.BudgetBufferRenderer.VERTEX_FORMAT_SIZE;
 
 import com.mojang.blaze3d.vertex.VertexConsumer;
 
 public final class ReuseVertexConsumer implements VertexConsumer {
+    /**
+     * Bytes per vertex in the shared quad format: vec4 position + vec2 uv.
+     *
+     * <p>Moved here from {@code BudgetBufferRenderer}, which was the GL bake path and is deleted.
+     * This class and {@code MetalBudgetBufferRenderer} are the live consumers and must agree.
+     */
+    public static final int VERTEX_FORMAT_SIZE = 24;
+
     private MemoryBuffer buffer = new MemoryBuffer(8192);
     private long ptr;
     private int count;

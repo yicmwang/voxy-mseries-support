@@ -6,8 +6,7 @@ import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import me.cortex.voxy.client.TimingStatistics;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
-import me.cortex.voxy.client.core.gl.shader.Shader;
-import me.cortex.voxy.client.core.gl.shader.ShaderType;
+import me.cortex.voxy.client.core.gpu.shader.ShaderType;
 import me.cortex.voxy.client.core.rendering.GeometryCache;
 import me.cortex.voxy.client.core.rendering.SectionUpdateRouter;
 import me.cortex.voxy.client.core.rendering.building.BuiltSection;
@@ -31,8 +30,6 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.StampedLock;
-
-import static org.lwjgl.opengl.GL43C.*;
 
 //TODO: create an "async upload stream", that is, the upload stream is a raw mapped buffer pointer that can be written to
 // which is then synced to the gpu on "render thread sync",
@@ -174,7 +171,7 @@ public class AsyncNodeManager {
 
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline scatterWrite = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
-                    me.cortex.voxy.client.core.gl.shader.ShaderLoader.parse("voxy:util/scatter.comp"),
+                    me.cortex.voxy.client.core.gpu.shader.ShaderLoader.parse("voxy:util/scatter.comp"),
                     java.util.Map.of(
                             "INPUT_BUFFER_BINDING", "0",
                             "OUTPUT_BUFFER1_BINDING", "1",
@@ -186,7 +183,7 @@ public class AsyncNodeManager {
 
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline multiMemcpy = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
-                    me.cortex.voxy.client.core.gl.shader.ShaderLoader.parse("voxy:util/memcpy.comp"),
+                    me.cortex.voxy.client.core.gpu.shader.ShaderLoader.parse("voxy:util/memcpy.comp"),
                     java.util.Map.of(
                             "INPUT_HEADER_BUFFER_BINDING", "0",
                             "INPUT_DATA_BUFFER_BINDING", "1",

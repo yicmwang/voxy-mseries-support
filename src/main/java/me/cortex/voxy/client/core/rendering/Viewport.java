@@ -1,9 +1,7 @@
 package me.cortex.voxy.client.core.rendering;
 
-import me.cortex.voxy.client.core.gpu.BackendType;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
-import me.cortex.voxy.client.core.rendering.util.DepthFramebuffer;
 import me.cortex.voxy.client.core.rendering.util.HiZBuffer;
 import net.caffeinemc.mods.sodium.client.util.FogParameters;
 import net.minecraft.util.Mth;
@@ -16,19 +14,11 @@ public abstract class Viewport <A extends Viewport<A>> {
     // depth-format texture sampled through the `sampler2D` the traversal declares becomes MSL
     // `texture2d<float>`, from which Metal silently reads zeros. See HiZBuffer's class doc.
     public final HiZBuffer hiZBuffer = new HiZBuffer();
-    public final DepthFramebuffer depthBoundingBuffer = new DepthFramebuffer();
-    /**
-     * Metal only (round 20): {@link #depthBoundingBuffer}'s depth blitted to
-     * raw floats so quads.frag's bound test reads a BUFFER instead of
-     * sampling a depth texture (which silently reads zeros through the
-     * texture2d&lt;float&gt; declaration SPIRV-Cross emits — the mask was
-     * inert since M13 chunk 3). Layout: uint width + 12 pad bytes, then
-     * width*height floats. Owned/resized by ChunkBoundRenderer; null on GL.
-     */
-    // metalBoundReadBuffer used to live here: the CPU-visible SSBO holding the depth-bound mask as raw
-    // floats. Removed with the mask's Metal renderer, which had no callers -- so the buffer was never
-    // allocated, and MDICSectionRenderer's per-frame bind of it fed a shader path that VOXY_NO_DEPTH_BOUND
-    // compiles out by default. depthBoundingBuffer above is still live for the GL path.
+    // `DepthFramebuffer depthBoundingBuffer` stood here, and a `metalBoundReadBuffer` comment before it.
+    // Both belonged to the chunk-bound depth mask, which is DELETED: its test is gone from quads.frag,
+    // its renderer (ChunkBoundRenderer) was already dead, the SSBO it read had no producer, and the
+    // texture that fed it is no longer bound by anything on the Metal path. Nothing resized it, cleared
+    // it or sampled it.
 
     private static final Field planesField;
     static {
@@ -73,7 +63,6 @@ public abstract class Viewport <A extends Viewport<A>> {
 
     protected void delete0() {
         this.hiZBuffer.free();
-        this.depthBoundingBuffer.free();
     }
 
     public A setVanillaProjection(Matrix4fc projection) {
@@ -140,11 +129,9 @@ public abstract class Viewport <A extends Viewport<A>> {
         //MVP
         this.projection.mul(this.modelView, this.MVP);
 
-        //Update the frustum. On Metal widen the FOV slightly for an angular
-        //cull margin (kills far-edge LOD flicker from per-frame view jitter);
-        //GL uses the exact MVP.
-        if (CULL_FOV_WIDEN != 1.0f
-                && RenderBackendFactory.get().getType() != BackendType.OPENGL) {
+        // Widen the FOV slightly for an angular cull margin (kills far-edge LOD flicker from
+        // per-frame view jitter). The `!= OPENGL` clause that used to qualify this was always true.
+        if (CULL_FOV_WIDEN != 1.0f) {
             if (!FOV_WIDEN_LOGGED) {
                 FOV_WIDEN_LOGGED = true;
                 me.cortex.voxy.common.Logger.info(
@@ -169,10 +156,6 @@ public abstract class Viewport <A extends Viewport<A>> {
                 (float) (this.cameraX-(sx<<5)),
                 (float) (this.cameraY-(sy<<5)),
                 (float) (this.cameraZ-(sz<<5)));
-
-        if (this.depthBoundingBuffer.resize(this.width, this.height)) {
-            this.depthBoundingBuffer.clear(0.0f);
-        }
 
         return (A) this;
     }

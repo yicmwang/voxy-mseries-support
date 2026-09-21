@@ -1,4 +1,4 @@
-package me.cortex.voxy.client.core.gl.shader;
+package me.cortex.voxy.client.core.gpu.shader;
 
 
 import static org.lwjgl.opengl.GL20.GL_FRAGMENT_SHADER;

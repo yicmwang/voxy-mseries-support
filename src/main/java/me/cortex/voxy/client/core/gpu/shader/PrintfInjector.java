@@ -1,6 +1,7 @@
-package me.cortex.voxy.client.core.gl.shader;
+package me.cortex.voxy.client.core.gpu.shader;
 
-import me.cortex.voxy.client.core.gl.GlBuffer;
+import me.cortex.voxy.client.core.gpu.IGpuBuffer;
+import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
 import org.lwjgl.system.MemoryUtil;
 
@@ -9,16 +10,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.function.Consumer;
 
-import static org.lwjgl.opengl.ARBDirectStateAccess.nglClearNamedBufferData;
-import static org.lwjgl.opengl.GL11.GL_UNSIGNED_INT;
-import static org.lwjgl.opengl.GL30.GL_R32UI;
-import static org.lwjgl.opengl.GL30.glBindBufferBase;
-import static org.lwjgl.opengl.GL30C.GL_RED_INTEGER;
-import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
-import static org.lwjgl.opengl.GL45.nglClearNamedBufferSubData;
-
 public class PrintfInjector implements IShaderProcessor {
-    private final GlBuffer textBuffer;
+    private final IGpuBuffer textBuffer;
     private final HashMap<String, Integer> printfStringMap = new HashMap<>();
     private final HashMap<Integer, String> idToPrintfStringMap = new HashMap<>();
     private final int bindingIndex;
@@ -29,8 +22,8 @@ public class PrintfInjector implements IShaderProcessor {
     }
 
     public PrintfInjector(int bufferSize, int bufferBindingIndex, Consumer<String> callback, Runnable pre) {
-        this.textBuffer = new GlBuffer(bufferSize*4L+4);
-        nglClearNamedBufferData(this.textBuffer.id, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, 0);
+        // Zeroed at creation, so no separate clear pass is needed.
+        this.textBuffer = RenderBackendFactory.get().createBuffer(bufferSize*4L+4, 0, true);
         this.bindingIndex = bufferBindingIndex;
         this.callback = callback;
         this.preRun = pre;
@@ -183,10 +176,6 @@ public class PrintfInjector implements IShaderProcessor {
         return result.toString();
     }
 
-    public void bind() {
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, this.bindingIndex, this.textBuffer.id);
-    }
-
     private void processResult(long ptr, long size) {
         int total = MemoryUtil.memGetInt(ptr); ptr += 4;
         if (total == 0) {
@@ -227,7 +216,7 @@ public class PrintfInjector implements IShaderProcessor {
 
     public void download() {
         DownloadStream.INSTANCE.download(this.textBuffer, this::processResult);
-        nglClearNamedBufferSubData(this.textBuffer.id, GL_R32UI, 0, 4, GL_RED_INTEGER, GL_UNSIGNED_INT, 0);
+        this.textBuffer.zeroRange(0, 4);//Reset the write index
     }
 
     public void free() {

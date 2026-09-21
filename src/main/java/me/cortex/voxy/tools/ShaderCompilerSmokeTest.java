@@ -186,10 +186,8 @@ public final class ShaderCompilerSmokeTest {
                                 "TRANSLUCENT_DISTANCE_BUFFER_BINDING", "5",
                                 "TRANSLUCENT_OFFSET", "500000"),
                         "lod/gl46/buildtranslucents.comp"),
-                new ShaderCase("lod/gl46/cull/raster.vert", RuntimeShaderCompiler.Stage.VERTEX, empty,
-                        "lod/gl46/cull/raster.vert"),
-                new ShaderCase("lod/gl46/cull/raster.frag", RuntimeShaderCompiler.Stage.FRAGMENT, empty,
-                        "lod/gl46/cull/raster.frag"),
+                // lod/gl46/cull/raster.vert|frag are deleted: their only dispatcher was
+                // MDICSectionRenderer's GL occlusion-cull arm, which is gone.
                 // M12 chunk 5 Metal cull stub — force-all-visible compute.
                 new ShaderCase("lod/gl46/force_all_visible.comp", RuntimeShaderCompiler.Stage.COMPUTE, empty,
                         "lod/gl46/force_all_visible.comp (M12 Metal cull stub)"),

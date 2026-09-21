@@ -1,7 +1,5 @@
 package me.cortex.voxy.client.core.model;
 
-import me.cortex.voxy.client.core.gpu.BackendType;
-import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.MemoryBuffer;
 import com.mojang.blaze3d.platform.NativeImage;
@@ -56,7 +54,7 @@ import static org.lwjgl.opengl.GL11.GL_UNSIGNED_BYTE;
  * ONCE into a long-lived native buffer (incl. the 8/4/2 mip chain computed
  * with the same {@link TextureUtils#mipColours} MipGen uses; cell-local
  * mipping is byte-identical because cell origins stay 2^lvl-aligned).
- * Absolutely no GL readbacks (the glGetTexImage class SIGBUSes Apple GL).
+ * Absolutely no GPU readbacks — the frame bytes come from the CPU-side image.
  *
  * <p>Threading: bake completion runs on the model-factory thread, but the
  * animation target only becomes valid once the bake's atlas upload lands —
@@ -69,7 +67,7 @@ import static org.lwjgl.opengl.GL11.GL_UNSIGNED_BYTE;
  * <p>This pass animates the still-water faces only (source water UP+DOWN,
  * which sample {@code water_still}); the side faces sample
  * {@code water_flow} and flowing-water states rotate it per flow direction
- * — listed as a follow-up. Metal-only; kill switch
+ * — listed as a follow-up. Kill switch
  * {@code VOXY_WATER_ANIMATE=0}.
  */
 public final class WaterAnimator {
@@ -99,14 +97,11 @@ public final class WaterAnimator {
     }
 
     /**
-     * Metal/non-GL only; {@code VOXY_WATER_ANIMATE=0} disables (default ON).
+     * {@code VOXY_WATER_ANIMATE=0} disables (default ON).
      * Also off under {@code VOXY_BAKERY_OFF} — that mode pairs with
      * VOXY_NO_ATLAS hash colours, so the atlas content is never sampled.
      */
     static WaterAnimator createIfEnabled(ModelStore storage) {
-        if (RenderBackendFactory.get().getType() == BackendType.OPENGL) {
-            return null;
-        }
         if ("0".equals(System.getenv("VOXY_WATER_ANIMATE"))) {
             return null;
         }

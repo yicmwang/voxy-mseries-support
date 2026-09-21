@@ -1,16 +1,9 @@
 package me.cortex.voxy.client.core.rendering.section.geometry;
 
-import me.cortex.voxy.client.core.gpu.GlCompat;
-
-import me.cortex.voxy.client.core.gl.Capabilities;
+import me.cortex.voxy.client.core.gpu.Capabilities;
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
 import me.cortex.voxy.common.Logger;
-
-import static org.lwjgl.opengl.ARBSparseBuffer.*;
-import static org.lwjgl.opengl.GL11C.*;
-import static org.lwjgl.opengl.GL15C.GL_ARRAY_BUFFER;
-import static org.lwjgl.opengl.GL15C.glBindBuffer;
 
 public class BasicSectionGeometryData implements IGeometryData {
     public static final int SECTION_METADATA_SIZE = 32;
@@ -34,15 +27,6 @@ public class BasicSectionGeometryData implements IGeometryData {
         }
         Logger.info(msg);
         Logger.info("if your game crashes/exits here without any other log message, try manually decreasing the geometry capacity");
-        // The allocation is backend-agnostic; only the error reporting around it is GL-specific.
-        // Calling glGetError with no GL context aborts the JVM, and sparse-buffer commitment is a
-        // GL extension Metal has no equivalent for (its buffers are always fully committed).
-        boolean glBackend = RenderBackendFactory.get().getType()
-                == me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
-
-        if (glBackend) {
-            glGetError();//Clear any errors
-        }
         IGpuBuffer buffer = null;
         if (!(Capabilities.INSTANCE.isNvidia)) {// && ThreadUtils.isWindows
             buffer = RenderBackendFactory.get().createBuffer(geometryCapacity, 0, false);//Only do this if we are not on nvidia
@@ -51,51 +35,16 @@ public class BasicSectionGeometryData implements IGeometryData {
         } else {
             Logger.info("Running on nvidia, using workaround sparse buffer allocation");
         }
-        if (!glBackend) {
-            if (buffer == null) {
-                throw new IllegalStateException("Unable to allocate geometry buffer");
-            }
-            this.geometryBuffer = buffer;
-            Logger.info("Successfully allocated the geometry buffer in "
-                    + (System.currentTimeMillis() - start) + "ms");
-            return;
-        }
-        int error = glGetError();
-        if (error != GL_NO_ERROR || buffer == null) {
-            if ((buffer == null || error == GL_OUT_OF_MEMORY) && RenderBackendFactory.get().hasSparseBuffer()) {
-                if (buffer != null) {
-                    Logger.error("Failed to allocate geometry buffer, attempting workaround with sparse buffers");
-                    buffer.free();
-                }
-                buffer = RenderBackendFactory.get().createBuffer(geometryCapacity, GL_SPARSE_STORAGE_BIT_ARB);
-                //buffer.zero();
-                error = glGetError();
-                if (error != GL_NO_ERROR) {
-                    buffer.free();
-                    throw new IllegalStateException("Unable to allocate geometry buffer using workaround, got gl error " + error);
-                }
-            } else {
-                throw new IllegalStateException("Unable to allocate geometry buffer, got gl error " + error);
-            }
+        if (buffer == null) {
+            throw new IllegalStateException("Unable to allocate geometry buffer");
         }
         this.geometryBuffer = buffer;
-        long delta = System.currentTimeMillis() - start;
-        Logger.info("Successfully allocated the geometry buffer in " + delta + "ms");
+        Logger.info("Successfully allocated the geometry buffer in "
+                + (System.currentTimeMillis() - start) + "ms");
     }
 
-    private long sparseCommitment = 0;//Tracks the current range of the allocated sparse buffer
+    /** No-op on Metal: buffers are always fully committed, there is no sparse range to page in. */
     public void ensureAccessable(int maxElementAccess) {
-        long size = (Integer.toUnsignedLong(maxElementAccess)*8L+65535L)&~65535L;
-        //If we are a sparse buffer, ensure the memory upto the requested size is allocated
-        if (this.geometryBuffer.isSparse()) {
-            if (this.sparseCommitment < size) {//if we try to access memory outside the allocation range, allocate it
-                glBindBuffer(GL_ARRAY_BUFFER, this.geometryBuffer.id());
-                size += 65536L*1024;//increase size by 64mb to prevent driver allocation thrashing
-                glBufferPageCommitmentARB(GL_ARRAY_BUFFER, this.sparseCommitment, size-this.sparseCommitment, true);
-                glBindBuffer(GL_ARRAY_BUFFER, 0);
-                this.sparseCommitment = size;
-            }
-        }
     }
 
     public IGpuBuffer getGeometryBuffer() {
@@ -125,40 +74,10 @@ public class BasicSectionGeometryData implements IGeometryData {
     @Override
     public void free() {
         this.sectionMetadataBuffer.free();
-
-        long gpuMemory = 0;
-        if (Capabilities.INSTANCE.canQueryGpuMemory) {
-            GlCompat.finish();
-            gpuMemory = Capabilities.INSTANCE.getFreeDedicatedGpuMemory();
-        }
-        if (this.geometryBuffer.isSparse()) {
-            glBindBuffer(GL_ARRAY_BUFFER, this.geometryBuffer.id());
-            glBufferPageCommitmentARB(GL_ARRAY_BUFFER, 0, this.sparseCommitment, false);
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
-        }
-
-        GlCompat.finish();
+        // The wait-for-release poll that used to sit here (glFinish + getFreeDedicatedGpuMemory, up
+        // to 2.5s) is deleted: glFinish does not exist on Metal, and the loop never ran a single
+        // iteration anyway -- its condition `elapsed > TIMEOUT` is false on entry because elapsed
+        // starts at 0.
         this.geometryBuffer.free();
-        GlCompat.finish();
-        if (Capabilities.INSTANCE.canQueryGpuMemory) {
-            long releaseSize = (long) (this.geometryBuffer.size()*0.75);//if gpu memory usage drops by 75% of the expected value assume we freed it
-            if (this.geometryBuffer.isSparse()) {//If we are using sparse buffers, use the commited size instead
-                releaseSize = (long)(this.sparseCommitment*0.75);
-            }
-            if (Capabilities.INSTANCE.getFreeDedicatedGpuMemory()-gpuMemory<=releaseSize) {
-                Logger.info("Attempting to wait for gpu memory to release");
-                long start = System.currentTimeMillis();
-
-                long TIMEOUT = 2500;
-
-                while (System.currentTimeMillis() - start > TIMEOUT) {//Wait up to 2.5 seconds for memory to release
-                    GlCompat.finish();
-                    if (Capabilities.INSTANCE.getFreeDedicatedGpuMemory() - gpuMemory > releaseSize) break;
-                }
-                if (Capabilities.INSTANCE.getFreeDedicatedGpuMemory() - gpuMemory <= releaseSize) {
-                    Logger.warn("Failed to wait for gpu memory to be freed, this could indicate an issue with the driver");
-                }
-            }
-        }
     }
 }
