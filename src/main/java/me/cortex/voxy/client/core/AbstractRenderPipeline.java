@@ -506,8 +506,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (this.metalDepthTex == null || this.metalDepthWidth != fbw || this.metalDepthHeight != fbh) {
             if (this.metalDepthTex != null) this.metalDepthTex.free();
             this.metalDepthTex = backend.createTexture()
-                    .store(org.lwjgl.opengl.GL30C.GL_DEPTH_COMPONENT32F, 1, fbw, fbh)
-                    .name("VoxyMetalDepth");
+                    .store(org.lwjgl.opengl.GL30C.GL_R32F, 1, fbw, fbh)
+                    .name("VoxyLodDepthColour");
             this.metalDepthWidth = fbw;
             this.metalDepthHeight = fbh;
             this.hizBuildLogged = false;   // a resize invalidates whatever the pyramid held
@@ -772,31 +772,33 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                                     : me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
                             debugClear ? 1f : 0f, 0f, debugClear ? 1f : 0f, 1f)
-                    // Depth: Voxy's OWN texture, not MC's attachment.
+                    // Depth: MC's OWN attachment, restored.
                     //
-                    // MC's attachment cannot be read back -- a blit of it returns all zeros, measured at
-                    // both timings (frame start and after the pass closed), while the identical readback
-                    // of a COLOUR attachment returns data, so the mechanism works and the depth really
-                    // does come back empty. Whatever the cause, the Hi-Z pyramid needs a depth image it
-                    // can sample, and MC's is not one. This texture is: MetalTexture.store() creates it
-                    // with ShaderRead, which is precisely the flag MC's attachment lacks, and it is
-                    // therefore readable by the pyramid with no copy at all.
+                    // An earlier version of this used a Voxy-owned depth texture, because MC's depth
+                    // cannot be SAMPLED -- a depth-format texture read through `sampler2D` becomes MSL
+                    // `texture2d<float>`, from which Metal silently reads zeros (it needs `depth2d`; this
+                    // file records the measurement above). But that constrains the PYRAMID'S SOURCE, not
+                    // the depth attachment, and conflating the two cost the LOD its depth test against
+                    // vanilla terrain for no reason. The pyramid takes its source from a colour
+                    // attachment now (see below), so the depth attachment goes back to what it should be.
                     //
-                    // CLEAR to 0.0, which is FAR in this frame's reverse-Z convention (near is 1, far is
-                    // 0) -- so "nothing drawn here yet" reads as far, which is the conservative value for
-                    // an occlusion test.
-                    //
-                    // What this gives up: the LOD no longer depth-tests against vanilla terrain in this
-                    // pass. That is covered by the built-section mask instead, which culls LOD across
-                    // exactly the sections vanilla draws -- that is the whole purpose it was built for,
-                    // and it is the verified mechanism (`refused == 0`). What it buys is LOD
-                    // self-occlusion, which nothing had before.
-                    .depthAttachment(this.metalDepthTex != null ? this.metalDepthTex : this.metallumDepth, 0,
-                            this.metalDepthTex != null
-                                    ? me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.CLEAR
-                                    : me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
+                    // LOAD, not CLEAR, and that is the whole point: it is what makes LOD fragments behind
+                    // vanilla terrain fail the test.
+                    .depthAttachment(this.metallumDepth, 0,
+                            me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.LOAD,
                             me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
                             0f);
+            if (this.metalDepthTex != null && this.metallumDepth != null) {
+                // Colour attachment 1: this fragment's depth as COLOUR, written by quads.frag under
+                // VOXY_LOD_DEPTH_COLOUR. It is the Hi-Z pyramid's source, and colour is the point: an
+                // R32F texture is an ordinary `texture2d<float>` read on Metal, where a depth-format
+                // texture silently reads zeros. No blit, no buffer transfer, no encoder transition --
+                // the pyramid is fed by the same pass that draws the geometry.
+                passBuilder.addColorAttachment(this.metalDepthTex, 0,
+                        me.cortex.voxy.client.core.gpu.RenderPassDesc.LoadAction.CLEAR,
+                        me.cortex.voxy.client.core.gpu.RenderPassDesc.StoreAction.STORE,
+                        0f, 0f, 0f, 0f);
+            }
         }
         var pass = passBuilder.build();
         // Submersion far-field skip: with the eye in water/lava the env fog

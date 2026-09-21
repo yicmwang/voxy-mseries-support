@@ -122,6 +122,16 @@ layout(location = 7) in flat uint quadDebug;
 
 #ifndef PATCHED_SHADER
 layout(location = 0) out vec4 outColour;
+
+#ifdef VOXY_LOD_DEPTH_COLOUR
+// Second colour attachment: this fragment's depth, as a COLOUR value. This is the Hi-Z pyramid's
+// source, and it exists because a depth-format texture sampled through `sampler2D` becomes MSL
+// `texture2d<float>`, from which Metal silently reads ZEROS -- it needs `depth2d`. This file already
+// records that measurement at the top, from the depth-bound mask's M13 work. Emitting depth as colour
+// sidesteps it entirely: the pyramid samples an R32F texture, which is an ordinary texture2d<float>
+// read, and no blit, buffer transfer or encoder transition is involved.
+layout(location = 1) out float voxyDepthOut;
+#endif
 #else
 
 //Bind the model buffer and import the model system as we need it
@@ -305,6 +315,14 @@ void main() {
     // shaded, and would answer neither question.
     outColour = vec4(1.0, 0.0, 1.0, 1.0);
     return;
+#endif
+#ifdef VOXY_LOD_DEPTH_COLOUR
+    // Written here rather than at the top of main(): a culled fragment must not contribute depth to the
+    // pyramid, or the cull would occlude terrain behind the region it just culled. Anything that
+    // discards LATER (the alpha cutout) still writes, which is a known approximation -- a tile covered
+    // entirely by leaves can read as occluded. If that shows up as holes, move this below the cutout
+    // test and give each early-out its own write.
+    voxyDepthOut = gl_FragCoord.z;
 #endif
 #ifdef VOXY_LOD_FORCE_MAGENTA
     // VOXY_LOD_FORCE_MAGENTA=1 -- bisection, not a feature. Emits solid magenta as the FIRST

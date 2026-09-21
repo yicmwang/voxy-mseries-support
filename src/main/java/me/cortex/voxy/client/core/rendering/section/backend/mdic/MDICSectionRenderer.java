@@ -448,6 +448,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     opaqueDefines.put("VOXY_NO_DEPTH_BOUND", "");
                     translucentDefines.put("VOXY_NO_DEPTH_BOUND", "");
                 }
+
+                // quads.frag's second colour output: this fragment's depth as colour, which is the Hi-Z
+                // pyramid's source. Metal ONLY, and that is not tidiness -- a shader declaring an output
+                // the pipeline has no attachment for is a Metal validation failure, and the GL pass has
+                // one colour attachment where the Metal pass now has two.
+                if (this.backend.getType() != BackendType.OPENGL) {
+                    opaqueDefines.put("VOXY_LOD_DEPTH_COLOUR", "");
+                    translucentDefines.put("VOXY_LOD_DEPTH_COLOUR", "");
+                }
                 // With the mask gone, vanilla and the LOD are compared purely by depth -- and since
                 // the LOD approximates the surface vanilla draws, their depths agree to float
                 // precision where they overlap and they z-fight. Bias the LOD behind so vanilla
@@ -719,7 +728,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                         (bakeryOff
                                 ? " + VOXY_NO_ATLAS (bakery disabled hash-colour fallback)"
                                 : (debugMissing ? " + VOXY_DEBUG_MAGENTA_MISSING" : " + atlas bakery")) +
-                        (pipeline.useEnvFog() ? " + USE_ENV_FOG" : ""));
+                        (pipeline.useEnvFog() ? " + USE_ENV_FOG" : "") +
+                        // The list above is HAND-MAINTAINED, so it reports what someone remembered to
+                        // write down, not what the shader got. Appending the real map makes the line
+                        // evidence: a define missing here was never injected, whatever the prose says.
+                        " | actual keys: " + opaqueDefines.keySet());
 
                 // Default Metal now uses the real atlas path. VOXY_BAKERY_OFF
                 // is retained as a runtime kill switch: ModelTextureBakery
