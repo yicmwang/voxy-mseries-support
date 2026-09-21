@@ -84,9 +84,19 @@ public final class BuiltSectionMask {
         snapSecX = secX;
         snapSecY = secY;
         snapSecZ = secZ;
+        snapshots++;
         DRAWN.clear();
         return true;
     }
+
+    /**
+     * How many times the snapshot has been restarted, i.e. how many section boundaries the camera has
+     * crossed. Reported against {@code uploads} so the quantisation is measurable rather than
+     * believed: with it working, uploads advance by about one per crossing (a second when the
+     * crossing is in Y, which re-biases every bit in the mask). Before it, the same measurement read
+     * 17 uploads for 2 crossings.
+     */
+    private static long snapshots;
 
     /** Offer one section vanilla is drawing this frame. */
     public static synchronized void addDrawn(final long sectionPos) {
@@ -321,10 +331,10 @@ public final class BuiltSectionMask {
         }
         me.cortex.voxy.common.Logger.info(String.format(
                 "[Metal-VMASK f=%d] drawn=%d maxDrawn=%d columns=%d/%d sections=%d bits %d..%d"
-                        + "  anchor=%d,%d cam=%d,%d camSecY=%d uploads=%d%s",
+                        + "  anchor=%d,%d cam=%d,%d camSecY=%d uploads=%d snapshots=%d%s",
                 VMASK_FRAME, drawn, maxDrawn, columns, side * side, sections,
                 minBit < 64 ? minBit : -1, maxBit,
-                anchorSecX, anchorSecZ, camSecX, camSecZ, camSecY, uploads, grid));
+                anchorSecX, anchorSecZ, camSecX, camSecZ, camSecY, uploads, snapshots, grid));
     }
 
     public void free() {
