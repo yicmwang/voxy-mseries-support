@@ -315,12 +315,11 @@ public class AsyncNodeManager {
                 // a few lines above is its sibling: a garbage count there, a garbage-but-in-range
                 // position here.
                 //
-                // The check is a round trip. getWorldSectionId packs level, x, y and z into a long
-                // with masked fields, so a value that did not come from that packing cannot survive
-                // being unpacked and repacked -- any stray bit lands in a masked-off position and the
-                // result differs. That catches corruption without needing to know what it looks like.
-                if (!validSectionPos(pos)) {
-                }
+                // A `validSectionPos(pos)` guard stood here, kept as a discarded computation once its
+                // counter went. It was a round-trip check -- getWorldSectionId packs level/x/y/z into
+                // masked fields, so a value that did not come from that packing cannot survive being
+                // unpacked and repacked -- and its only consumer was the counter. Removed rather than
+                // left computing a boolean nobody reads.
                 this.manager.processRequest(pos);
             }
             job.free();
@@ -549,8 +548,8 @@ public class AsyncNodeManager {
         if (results == null) {//There are no new results to process, return
             return;
         }
-        if (results.geometryUpload != null && !results.geometryUpload.dataUploadPoints.isEmpty()) {
-        }
+        // An `if` on results.geometryUpload being non-empty stood here, with an empty body once its
+        // counter went. Removed.
 
         //top level node add/remove
         if (!results.tlnDelta.isEmpty()) {

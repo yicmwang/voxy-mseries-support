@@ -184,7 +184,6 @@ public final class WaterAnimator {
         var tex = Minecraft.getInstance().getTextureManager()
                 .getTexture(Identifier.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png"));
         if (!(tex instanceof TextureAtlas atlas)) {
-            Logger.warn("[Metal-WATERANIM] block atlas not ready — water animation disabled");
             return;
         }
         var contents = atlas.getSprite(Identifier.fromNamespaceAndPath("minecraft", "block/water_still")).contents();
@@ -192,24 +191,26 @@ public final class WaterAnimator {
         if (anim == null) {
             // Also the missing-sprite case — getSprite falls back to
             // minecraft:missingno, which is never animated.
-            Logger.info("[Metal-WATERANIM] sprite " + contents.name()
-                    + " is not animated — water animation disabled");
             return;
         }
         NativeImage image = contents.originalImage;
         if (image.format() != NativeImage.Format.RGBA) {
+            // WARN, not silence: this disables a user-visible feature, and an HD or unusual resource
+            // pack is the usual cause. Fires once per session. (These five warnings were removed with
+            // the [Metal-WATERANIM] trace during the instrumentation cleanup; this one and the size one
+            // below are restored because they report a failure rather than a diagnostic.)
             Logger.warn("[Metal-WATERANIM] water_still image format " + image.format()
-                    + " != RGBA — water animation disabled");
+                    + " != RGBA -- water animation disabled");
             return;
         }
         int frameW = contents.width();
         int frameH = contents.height();
         if (frameW != MODEL_TEXTURE_SIZE || frameH != MODEL_TEXTURE_SIZE) {
-            // The bake cells are fixed 16x16; resampling HD packs is out of
-            // scope for this pass.
-            Logger.warn("[Metal-WATERANIM] water_still is " + frameW + "x" + frameH
-                    + " (expected " + MODEL_TEXTURE_SIZE + "x" + MODEL_TEXTURE_SIZE
-                    + ") — water animation disabled");
+            // The bake cells are fixed 16x16; resampling HD packs is out of scope for this pass, and
+            // this is silent no longer -- a 32x32 water_still left the animator permanently inert with
+            // nothing anywhere saying why.
+            Logger.warn("[Metal-WATERANIM] water_still is " + frameW + "x" + frameH + " (expected "
+                    + MODEL_TEXTURE_SIZE + "x" + MODEL_TEXTURE_SIZE + ") -- water animation disabled");
             return;
         }
 
@@ -223,8 +224,6 @@ public final class WaterAnimator {
             totalTicks += time;
         }
         if (totalTicks <= 0 || totalTicks > MAX_ANIMATION_TICKS) {
-            Logger.warn("[Metal-WATERANIM] degenerate animation (" + frames.size()
-                    + " frames, " + totalTicks + " ticks) — water animation disabled");
             return;
         }
 
@@ -262,10 +261,6 @@ public final class WaterAnimator {
                     this.frameData.address + (long) k * FRAME_CHAIN_PIXELS * 4L);
         }
 
-        Logger.info("[Metal-WATERANIM] registered sprite minecraft:block/water_still: frames="
-                + this.frameCount + " frametime=" + (uniform ? Integer.toString(uniformTime) : "variable")
-                + (anim.interpolateFrames ? " (interpolation not supported — snapping)" : "")
-                + " faces=DOWN,UP");
     }
 
     /**

@@ -477,13 +477,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if ("1".equals(System.getenv("VOXY_LOD_FORCE_MAGENTA"))) {
                     opaqueDefines.put("VOXY_LOD_FORCE_MAGENTA", "");
                     translucentDefines.put("VOXY_LOD_FORCE_MAGENTA", "");
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_MAGENTA active: LOD emits solid magenta before any discard");
                 }
                 // Vertex-stage bisection (see quads3.vert). Defines reach both stages.
                 if ("1".equals(System.getenv("VOXY_LOD_FORCE_VERTEX"))) {
                     opaqueDefines.put("VOXY_LOD_FORCE_VERTEX", "");
                     translucentDefines.put("VOXY_LOD_FORCE_VERTEX", "");
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_FORCE_VERTEX active: LOD emits a fixed clip-space triangle");
                 }
                 // VOXY_LOD_SHOW_LIGHT=1 -- reads the LOD's own light data back out as colour:
                 // red = SKY light, green = BLOCK light, both /15, blue pinned at 0.5 for every
@@ -503,7 +501,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     // where lighting is the byte the ingest wrote -- sky in the LOW nibble. So red
                     // is sky. The old text said the opposite, which is a wrong label on the one
                     // instrument whose whole job is to be read literally.
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_SHOW_LIGHT active: LOD emits raw light as colour (R=sky, G=block, B=128 iff a fragment was drawn)");
                 }
 
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
@@ -527,7 +524,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     translucentDefines.put("VOXY_LOD_NO_DISCARD", "");
                 }
                 if (lodFixedMip || lodNoDiscard) {
-                    Logger.info("[Metal-LODTEST] fixedMip=" + lodFixedMip + " noDiscard=" + lodNoDiscard);
                 }
                 // VOXY_LOD_DIST_MIP — analytic distance-based atlas mip
                 //   (2026-07-03), DEFAULT ON, takes precedence over the
@@ -580,8 +576,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     translucentDefines.put("VOXY_LOD_DIST_MIP", "");
                     translucentDefines.put("VOXY_ATLAS_MAX_LOD", maxLod);
                     translucentDefines.put("VOXY_LOD_DIST_MIP_BIAS", biasStr);
-                    Logger.info("[Metal-LODTEST] distance-based atlas mip ON (maxLod=" + maxLod
-                            + ", bias=" + biasStr + "); VOXY_LOD_DIST_MIP=0 reverts to fixed mip 0");
                 }
                 // VOXY_WATER_FAR_ALPHA — far-water opacity ramp (2026-07-03),
                 //   DEFAULT ON, translucent only. Constant vanilla alpha 0.706
@@ -596,8 +590,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 //   the ramp distances in blocks.
                 if (WATER_FAR_ALPHA > 0.0f) {
                     translucentDefines.put("VOXY_WATER_FAR_ALPHA", "");
-                    Logger.info("[Metal-LODTEST] far-water alpha ramp ON (target=" + WATER_FAR_ALPHA
-                            + "); VOXY_WATER_FAR_ALPHA=0 disables");
                 }
                 // VOXY_LOD_ABS_INDENT — lodScale-invariant face indentation
                 //   (2026-07-03), DEFAULT ON. quad_util scales the model-space
@@ -612,8 +604,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if (absIndent) {
                     opaqueDefines.put("VOXY_LOD_ABS_INDENT", "");
                     translucentDefines.put("VOXY_LOD_ABS_INDENT", "");
-                    Logger.info("[Metal-LODTEST] absolute face indent ON (water plane height "
-                            + "lodScale-invariant); VOXY_LOD_ABS_INDENT=0 reverts");
                 }
                 // Seam-ring brightness parity: GL runs SSAO between opaque and
                 // translucent; that pass is parked on Metal, so LOD terrain sits
@@ -637,7 +627,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     }
                     if (brightness != 1.0f) {
                         opaqueDefines.put("VOXY_LOD_BRIGHTNESS", String.format(java.util.Locale.ROOT, "%.4f", brightness));
-                        Logger.info("[Metal-LODTEST] LOD brightness compensation = " + brightness + " (SSAO parity interim)");
                     }
                 }
                 // Water parity knobs — NEUTRAL by default since the chunk-bound
@@ -674,14 +663,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                         translucentDefines.put("VOXY_WATER_MIN_ALPHA", String.format(java.util.Locale.ROOT, "%.4f", waterMinAlpha));
                     }
                     if (waterShade != 1.0f || waterMinAlpha > 0.0f) {
-                        Logger.info("[Metal-LODTEST] water parity: shade=" + waterShade + " minAlpha=" + waterMinAlpha);
                     }
                 }
                 // Water diagnostic: paint translucent LOD water solid magenta so
                 // a screenshot reveals exactly where water geometry rasterizes.
                 if ("1".equals(System.getenv("VOXY_LOD_WATER_DEBUG"))) {
                     translucentDefines.put("VOXY_LOD_WATER_DEBUG", "");
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_WATER_DEBUG: translucent LOD water = solid magenta + depth test OFF");
                 }
                 // Depth bias for translucent LOD water (toward the camera).
                 // DEFAULT 0 (off): testing on 2026-05-26 proved the water "holes"
@@ -701,7 +688,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     }
                     translucentDefines.put("VOXY_WATER_DEPTH_BIAS", waterBias.trim());
                     if (!"0".equals(waterBias.trim())) {
-                        Logger.info("[Metal-LODTEST] translucent water depth bias = " + waterBias.trim());
                     }
                 }
                 // Real translucent water is now the default (quads.frag falls
@@ -712,7 +698,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // because TRANSLUCENT is injected for every backend above (~:240).
                 if ("1".equals(System.getenv("VOXY_LOD_FLAT_WATER"))) {
                     translucentDefines.put("VOXY_FLAT_WATER", "");
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_FLAT_WATER: translucent LOD water = flat ocean blue (interim path)");
                 }
 
                 // M13 diagnostic — log the Metal shader define set ONCE at
@@ -801,13 +786,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // is confirmed (the image may look unordered with depth off).
                 boolean lodNoDepth = "1".equals(System.getenv("VOXY_LOD_NO_DEPTH"));
                 if (lodNoDepth) {
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_NO_DEPTH active: opaque LOD depth test/write DISABLED");
                 }
                 boolean reverseZ = MetalMvpUtil.REVERSE_Z_REMAP;
                 var opaqueDepth = lodDepthState(reverseZ, lodNoDepth, /*writeEnabled*/ true);
                 if (reverseZ && !reverseZLogged) {
                     reverseZLogged = true;
-                    Logger.info("[Metal-LODTEST] VOXY_LOD_REVERSE_Z active: LOD depth compare = GreaterEqual");
                 }
                 opaqueState = new me.cortex.voxy.client.core.gpu.PipelineState(
                         opaqueDepth,
@@ -987,14 +970,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             var unremapped = new Matrix4f(viewport.MVP);
             unremapped.translate(-viewport.innerTranslation.x, -viewport.innerTranslation.y,
                     -viewport.innerTranslation.z);
-            Logger.info(String.format(java.util.Locale.ROOT,
-                    "[Metal-VP] remap=%s | m00=%.6f m11=%.6f m22=%.6f m23=%.6f m32=%.6f m33=%.6f "
-                            + "| t=(%.2f,%.2f,%.2f) | det=%.6e | withoutRemap m00=%.6f m11=%.6f m22=%.6f",
-                    MetalMvpUtil.REVERSE_Z_REMAP,
-                    mat.m00(), mat.m11(), mat.m22(), mat.m23(), mat.m32(), mat.m33(),
-                    mat.m30(), mat.m31(), mat.m32(),
-                    mat.determinant(),
-                    unremapped.m00(), unremapped.m11(), unremapped.m22()));
         }
         mat.getToAddress(ptr); ptr += 4*4*4;
 
@@ -1366,7 +1341,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     org.lwjgl.system.MemoryUtil.memGetInt(a + 12),
                     org.lwjgl.system.MemoryUtil.memGetInt(a + 16)));
         }
-        me.cortex.voxy.common.Logger.info("[Metal-CMD " + tag + "] maxDrawCount=" + maxDrawCount + sb);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1608,12 +1582,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     if (ownerHi != useHi || ownerLo != useLo) {
                         pfWrongSection++;
                         if (pfWrongExamples++ < 8) {
-                            Logger.warn("[Metal-WRONGSEC! " + tag + "] cmd#" + i
-                                    + " quads[" + qs + "," + qe + ") owned by sid=" + ownerSid
-                                    + " at " + pprintRawPos(ownerHi, ownerLo)
-                                    + " but drawn with baseInstance=" + baseInstance
-                                    + " at " + pprintRawPos(useHi, useLo)
-                                    + " quads=" + (indexCount / 6L));
                         }
                     } else {
                         pfWrongChecked++;
@@ -1710,10 +1678,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                   .append("(+").append(DRAWCHK_TOT[k] - DRAWCHK_LAST[k]).append(')');
                 DRAWCHK_LAST[k] = DRAWCHK_TOT[k];
             }
-            Logger.info("[Metal-DRAWCHK " + tag + "] mode=" + DRAWCHK + " stride=" + DRAWCHK_STRIDE
-                    + " draws=" + n + " allocs=" + tableSize
-                    + " listCount=" + listCount + " cmdGenDispatchX=" + cmdGenDispatchX
-                    + " maxSections=" + maxSections + " heapElems=" + heapElements + sb);
         }
     }
 
@@ -1998,9 +1962,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             boolean drew = me.cortex.voxy.client.core.metal.MetallumBridge.drawProbeStyleTriangle(
                     colorHandle, depthHandle, viewport.width, viewport.height, "voxy-lod-pass");
             if (probeTriLogged++ == 0) {
-                Logger.info("[Metal-LODTEST] VOXY_LOD_TRIANGLE=probe at the LOD pass: drew=" + drew
-                        + " color=0x" + Long.toHexString(colorHandle)
-                        + " depth=0x" + Long.toHexString(depthHandle));
             }
             if (!DEBUG_TRIANGLE) {
                 return;   // "both": fall through and also draw with Voxy's own pipeline
@@ -2011,7 +1972,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             encoder.setPipeline(this.terrainPipeline);
             encoder.draw(me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES, 0, 3, 1, 0);
             if (terrainTriLogged++ == 0) {
-                Logger.info("[Metal-LODTEST] VOXY_LOD_TRIANGLE=terrain: debug triangle drawn through the TERRAIN pipeline");
             }
             return;
         }
@@ -2030,7 +1990,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                             // this test needs so no depth convention can reject the triangle.
                             me.cortex.voxy.client.core.gpu.PipelineState.DEFAULT,
                             "VoxyDebugTriangle"));
-            Logger.info("[Metal-LODTEST] VOXY_LOD_TRIANGLE active: magenta triangle drawn through the LOD encoder, depth test off");
         }
         encoder.setPipeline(this.debugTrianglePipeline);
         encoder.draw(me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES, 0, 3, 1, 0);
@@ -2090,7 +2049,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     " [#%d idx=%d bi=%d sPos=[%d,%d] baseVtx=%d quadIdx=%d quad=[%d,%d] face=%d sizeX=%d modelId=%d]",
                     i, indexCount, baseInstance, u0, u1, baseVertex, quadIdx, q0, q1, face, sizeX, modelId));
         }
-        Logger.info("[Metal-GEOM] " + sb);
         traceCorners(viewport, indirectOffset, Math.min(Math.max(maxDrawCount, 0), 4));
     }
 
@@ -2169,7 +2127,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     i, modelId, face, faceData, inside, minW, minZ, maxZ,
                     minNdcX, maxNdcX, minNdcY, maxNdcY));
         }
-        Logger.info("[Metal-CORNERS] " + sb);
     }
 
     private void renderTerrainMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,

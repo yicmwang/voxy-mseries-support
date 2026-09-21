@@ -481,7 +481,6 @@ public class MetalRenderBackend implements RenderBackend {
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
             this.endForeignEncoderIfNeeded();
-            logEncoderOp("blit newBlitEncoder (active buffer)");
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -509,7 +508,6 @@ public class MetalRenderBackend implements RenderBackend {
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
             this.endForeignEncoderIfNeeded();
-            logEncoderOp("blit newBlitEncoder (texture copy)");
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -549,7 +547,6 @@ public class MetalRenderBackend implements RenderBackend {
         this.ensureActiveCommandBuffer();
         if (this.activeBlitEncoder == 0) {
             this.endForeignEncoderIfNeeded();
-            logEncoderOp("blit newBlitEncoder (active buffer)");
             this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
             if (this.activeBlitEncoder == 0) {
                 throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
@@ -582,7 +579,6 @@ public class MetalRenderBackend implements RenderBackend {
         if (!this.ownsActiveCommandBuffer) {
             this.endActiveBlitEncoder();
         } else {
-            logEncoderOp("closeBlitEncoderIfGuest SKIP (owner, keeping batch open)");
         }
     }
 
@@ -627,42 +623,13 @@ public class MetalRenderBackend implements RenderBackend {
         }
     }
 
-    /**
-     * Metal forbids two open encoders on one command buffer, and Metallum's render encoder is
-     * typically open when Voxy wants a blit. Close it first; Metallum reopens lazily on its next
-     * draw, with load actions that preserve whatever Voxy writes. No-op when Voxy owns the buffer.
-     */
-    /**
-     * Encoder tracing, off unless {@code -Dvoxy.encTrace=true} (or {@code VOXY_ENC_TRACE=1}).
-     *
-     * <p>This instrumentation is what located the three encoder-lifecycle bugs — Metal's "already
-     * encoding" assertions carry no Java stack, so the trail was the only way in. It earned its
-     * place, but it must not run by default: left on it emitted **428,118 lines / 82 MB in four
-     * minutes** (~1,800 lines/second of string building plus log I/O on the render thread), which
-     * silently inflates every performance number measured while it was on.
-     */
-    /** Per-pass attachment trace ({@code VOXY_ATTACH_TRACE=1}), independent of the verbose ENC_TRACE. */
-    private static long passTraceCount = 0;
-    /** Caps the [Metal-PASSSLOT] diagnostic; see beginRenderPass. */
-    private static int passSlotProbeCount = 0;
 
     /** Prefer a Metallum-untracked encoder for Voxy's passes; {@code VOXY_LOD_DETACHED_ENCODER=0} opts out. */
     /** Borrow Metallum's encoder instead of owning one; {@code VOXY_LOD_BORROW_ENCODER=1} for A/B. */
     static final boolean BORROW_ENCODER = "1".equals(System.getenv("VOXY_LOD_BORROW_ENCODER"));
 
-    // Hoisted out of beginRenderPass / createGraphicsPipeline, which run many times per frame.
-    static final boolean PASS_SLOT_PROBE = "1".equals(System.getenv("VOXY_PASS_SLOT_PROBE"));
-    static final boolean PIPELINE_SLOT_PROBE = "1".equals(System.getenv("VOXY_PIPELINE_SLOT_PROBE"));
-    static final boolean ATTACH_TRACE = "1".equals(System.getenv("VOXY_ATTACH_TRACE"));
 
-    static final boolean ENC_TRACE = Boolean.getBoolean("voxy.encTrace")
-            || "1".equals(System.getenv("VOXY_ENC_TRACE"));
 
-    void logEncoderOp(String what) {
-        if (!ENC_TRACE) {
-            return;
-        }
-    }
 
     private void endForeignEncoderIfNeeded() {
         // Deliberately NOT gated on ownsActiveCommandBuffer: that flag is decided once, when the
@@ -670,27 +637,16 @@ public class MetalRenderBackend implements RenderBackend {
         // Voxy would then believe it owns the buffer and skip this, while Metallum meanwhile opened
         // a render encoder on the same buffer. Asking Metallum to close is a no-op when it has
         // nothing open, so just always ask.
-        if (!ENC_TRACE) {
-            // Fast path: the reporting accessors are three reflective invocations, and this runs
-            // ~150k times per session -- too expensive to keep for a log line that is off.
-            MetallumBridge.endCurrentEncoder();
-            return;
-        }
-        long openBefore = MetallumBridge.openEncoderHandle();
-        long closed = MetallumBridge.endCurrentEncoderAndReport();
-        long openAfter = MetallumBridge.openEncoderHandle();
-        logEncoderOp("endForeignEncoder openBefore=0x" + Long.toHexString(openBefore)
-                + " closed=0x" + Long.toHexString(closed)
-                + " openAfter=0x" + Long.toHexString(openAfter)
-                + " (buffers " + Long.toHexString(this.activeCommandBuffer)
-                + "/" + Long.toHexString(MetallumBridge.commandBuffer()) + ")");
+        // The two-way branch that used to stand here existed only to pick between the cheap call and a
+        // reporting variant that fed the encoder trace. The trace is gone, so this is just the cheap
+        // path -- which is what ran in every real build anyway: the reporting accessors are three
+        // reflective invocations and this runs ~150k times per session, so the trace was never viable
+        // on for a normal run.
+        MetallumBridge.endCurrentEncoder();
     }
 
     private void endActiveBlitEncoder() {
         if (this.activeBlitEncoder != 0) {
-            if (ENC_TRACE) {
-                logEncoderOp("endActiveBlitEncoder 0x" + Long.toHexString(this.activeBlitEncoder));
-            }
             MetalNative.mtlEncoderEndEncoding(this.activeBlitEncoder);
             MetalNative.mtlRelease(this.activeBlitEncoder);
             this.activeBlitEncoder = 0;
@@ -822,29 +778,6 @@ public class MetalRenderBackend implements RenderBackend {
             // is not STORE, every symptom of the missing [[color(1)]] write follows with no error
             // anywhere. Capped at three lines so it is cheap; the LOD pass is the one with BOTH a
             // second colour attachment and a depth attachment.
-            if (PASS_SLOT_PROBE
-                    && nColors >= 2 && passSlotProbeCount < 3) {
-                passSlotProbeCount++;
-                RenderPassDesc.ColorAttachment c1 = desc.colorAttachments().get(1);
-                long want = MetalHandleMap.getHandle(c1.texture().id());
-                long got = MetalNative.mtlRenderPassGetColorAttachmentTexture(passDescHandle, 1);
-                int store = MetalNative.mtlRenderPassGetColorAttachmentStoreAction(passDescHandle, 1);
-            }
-            if (ATTACH_TRACE
-                    && nColors > 0 && desc.depthAttachment() != null
-                    && (passTraceCount++ % 60) == 1) {
-                var c0 = desc.colorAttachments().get(0);
-                // Report the attachment's REAL pixel formats (Metal-native values off the textures)
-                // and what the pipeline declares. createGraphicsPipeline hardcodes the depth format
-                // to Depth32Float; if the frame's depth attachment is anything else, the pipeline
-                // state is incompatible with the pass and Metal drops the draws while every counter
-                // still reports them. The P0 probe read both formats off the textures instead of
-                // assuming, which is why it worked.
-                // Read the formats straight off the live MTLTexture handles -- works for any
-                // texture, and needs no access to the pipeline's attachment objects.
-                int realColorFmt = colorHandle == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(colorHandle);
-                int realDepthFmt = depthHandle == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(depthHandle);
-            }
 
             // Pending stream copies must land before the pass's encoder opens
             // (one encoder at a time per buffer; copies feed the pass anyway).
@@ -855,19 +788,12 @@ public class MetalRenderBackend implements RenderBackend {
             // a perfectly-formed pass (correct attachments, correct clear) lands in a command
             // buffer that is never the one presented -- which is indistinguishable from "the pass
             // does nothing" everywhere else in the logs.
-            if (ATTACH_TRACE && nColors > 0
-                    && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
-                long metallumBuf = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
-            }
 
             // Prefer BORROWING Metallum's encoder for these attachments. Asking Metal for a second
             // encoder on the same command buffer is illegal ("A command encoder is already encoding
             // to this command buffer"), and closing Metallum's to open our own costs a pass split for
             // no reason. Borrowing also means Voxy's draws land in Metallum's pass directly, sharing
             // its depth. Falls back to owning an encoder when Metallum is absent.
-            if (ENC_TRACE) {
-                logEncoderOp("beginRenderPass borrowRequest color=0x" + Long.toHexString(colorHandle));
-            }
             // Use Voxy's OWN encoder, created from the pass descriptor -- Metal's supported
             // pattern for sequential encoders on one command buffer. Do NOT borrow Metallum's.
             //
@@ -887,17 +813,11 @@ public class MetalRenderBackend implements RenderBackend {
             // VOXY_LOD_BORROW_ENCODER=1 restores the borrow path for a controlled A/B.
             long shared = BORROW_ENCODER ? MetallumBridge.acquireRenderEncoder(
                     colorHandle, depthHandle, desc.viewportWidth(), desc.viewportHeight()) : 0L;
-            if (ENC_TRACE) {
-                logEncoderOp("beginRenderPass borrowResult=0x" + Long.toHexString(shared));
-            }
             if (shared != 0L) {
                 encoder = shared;
                 borrowed = true;
             } else {
                 this.endForeignEncoderIfNeeded();
-                if (ENC_TRACE) {
-                    logEncoderOp("beginRenderPass OWN newRenderEncoder");
-                }
                 encoder = MetalNative.mtlCommandBufferNewRenderEncoder(this.activeCommandBuffer, passDescHandle);
                 if (encoder == 0) {
                     throw new RuntimeException("mtlCommandBufferNewRenderEncoder returned NULL");
@@ -908,9 +828,6 @@ public class MetalRenderBackend implements RenderBackend {
             // depth export) legitimately has colorHandle==0, and acquireRenderEncoder returns 0 for
             // it by design -- reading such a line as "the LOD pass failed to borrow" is wrong twice
             // over, and I made that mistake. Only a colour+depth pass is the LOD pass.
-            if (ATTACH_TRACE && nColors > 0
-                    && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
-            }
         } finally {
             // The render encoder retains a reference to the descriptor; we can drop ours.
             MetalNative.mtlRelease(passDescHandle);
@@ -1057,13 +974,6 @@ public class MetalRenderBackend implements RenderBackend {
             // this is the other half, and it is the last link in the MRT chain that had only ever been
             // established by reading code rather than by reading state. A 0 here means "no attachment
             // at this index" as far as Metal is concerned.
-            if (PIPELINE_SLOT_PROBE
-                    && desc.colorAttachmentFormats.length >= 2) {
-                final int f0 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 0);
-                final int f1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 1);
-                final int w0 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(pipelineDesc, 0);
-                final int w1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(pipelineDesc, 1);
-            }
 
             // Build + attach vertex descriptor if the pipeline declares vertex inputs.
             // Empty layout → no descriptor (gl_VertexIndex-driven shaders).
@@ -1424,7 +1334,6 @@ public class MetalRenderBackend implements RenderBackend {
         // Metallum may still have a render encoder open on this buffer, so close it first; Metallum
         // reopens lazily on its next draw with load actions that preserve what Voxy wrote.
         this.endForeignEncoderIfNeeded();
-        logEncoderOp("beginComputePass newComputeEncoder");
         long encoder = MetalNative.mtlCommandBufferNewComputeEncoder(this.activeCommandBuffer);
         if (encoder == 0) {
             throw new RuntimeException("mtlCommandBufferNewComputeEncoder returned NULL");

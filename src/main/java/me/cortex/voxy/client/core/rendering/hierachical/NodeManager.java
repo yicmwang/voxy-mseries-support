@@ -284,9 +284,9 @@ public class NodeManager {
 
     private int uploadReplaceSection(int meshId, BuiltSection section) {
         if (section.isEmpty()) {
-            if (section.childExistence != 0) {
-            } else {
-            }
+            // An if/else on section.childExistence stood here, with EMPTY bodies once its two counters
+            // went. Removed rather than left: an empty branch is a standing invitation to wonder what
+            // used to be in it.
             if (meshId != NULL_GEOMETRY_ID && meshId != EMPTY_GEOMETRY_ID) {
                 this.geometryManager.removeSection(meshId);
             }

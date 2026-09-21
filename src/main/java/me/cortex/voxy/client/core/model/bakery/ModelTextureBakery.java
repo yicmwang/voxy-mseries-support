@@ -718,10 +718,6 @@ public class ModelTextureBakery {
         boolean wanted = false;
         for (String s : only.split("\\s*,\\s*")) if (s.equals(name)) wanted = true;
         if (!wanted || !EXTENT_SEEN.add(name)) return;
-        me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-BAKE-GEO] %s layer=%s quads=%d  x=[%.3f,%.3f] y=[%.3f,%.3f] z=[%.3f,%.3f]",
-                name, layer, this.vc.quadCount(),
-                this.vc.minX, this.vc.maxX, this.vc.minY, this.vc.maxY, this.vc.minZ, this.vc.maxZ));
     }
 
     private static final java.util.Set<String> EXTENT_SEEN =

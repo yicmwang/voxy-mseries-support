@@ -128,15 +128,11 @@ public final class MetalViewCapture {
         }
         this.backend.submit();
 
-        // PROBE (VOXY_BAKE_CLEARCHK): confirm the clear actually landed, by settling the GPU and
-        // reading the target back. A settled read of a bake that was never cleared still shows the
-        // previous bake's pixels, which is indistinguishable from a bake that genuinely covered the
-        // cell -- and since dilation makes every bake's output full coverage, one missing clear
-        // makes every later bake look like a full occluding cube.
-        if ("1".equals(System.getenv("VOXY_BAKE_CLEARCHK"))) {
-            this.backend.waitForGpuIdle();
-            this.bakeTarget.getBytes(0, 0, 0, this.totalW, this.totalH, this.readbackBuffer);
-        }
+        // The VOXY_BAKE_CLEARCHK probe that stood here is GONE. It settled the GPU and read the whole
+        // bake target back to confirm a clear had landed -- a full pipeline drain plus a full-texture
+        // readback, to feed a log line that no longer exists, so its result was being discarded. It
+        // answered a real question once (a bake that was never cleared is indistinguishable from one
+        // that genuinely covered its cell) and is recoverable from git if that question returns.
     }
 
     /**
@@ -263,11 +259,8 @@ public final class MetalViewCapture {
         for (int p : rgba) {
             if ((p & 0xFF000000) != 0) nonzeroAlphaPixels++;
         }
-        if (nonzeroAlphaPixels > 0) {
-            if (nonzeroAlphaPixels * 2L > pixelCount) {
-            }
-        } else {
-        }
+        // An if/else classifying the alpha distribution stood here, with empty bodies once the
+        // counters behind the [Metal-BAKE] line went. Removed.
 
         // M13 chunk 1 polish (2026-05-16): bake-fill via per-cell average. The bakery's per-face model
         // rendering only fills the cell where the model has geometry — for non-cube blocks (leaves,

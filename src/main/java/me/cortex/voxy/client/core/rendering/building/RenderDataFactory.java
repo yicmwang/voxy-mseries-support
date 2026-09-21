@@ -1667,8 +1667,6 @@ public class RenderDataFactory {
     }
 
     //section is already acquired and gets released by the parent
-    /** M13 chunk 1 diagnostic counters — read by AbstractRenderPipeline's Metal-DIAG dump. */
-
     public BuiltSection generateMesh(WorldSection section) {
         //TODO: FIXME: because of the exceptions that are thrown when aquiring modelId
         // this can result in the state of all block meshes and well _everything_ from being incorrect

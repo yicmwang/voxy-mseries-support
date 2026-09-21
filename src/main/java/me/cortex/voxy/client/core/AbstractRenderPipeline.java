@@ -215,11 +215,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      */
     private static final boolean TRANS_SUBMERSION_CLEAR = !"0".equals(System.getenv("VOXY_TRANS_SUBMERSION_CLEAR"));
 
-    // section set (renderList count) varies frame-to-frame. With a perfectly
-    // static camera, a varying count proves NON-DETERMINISTIC section selection
-    // (a GPU race in the HOT traversal) — vs a stable count meaning the flicker
-    // is view-jitter at the frustum boundary. Logged every 600 frames.
-
     public void runPipeline(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
                 != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
@@ -609,46 +604,9 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         this.perfPrep += perfT1 - perfT0;   // traversal + draw-call prepasses
         this.perfSplit += perfT2 - perfT1;  // split submit, commit only -- the ordered wait moved to the draw
 
-        // M13 2026-05-15 Layer B diagnostic — read back the renderList and
-        // drawCountCallBuffer values so we can see exactly how many sections
-        // HOT enqueued for rendering, and what dispatch parameters prep.comp
-        // wrote for cmdgen. If sectionCount is small, the upstream traversal
-        // is the bottleneck. If sectionCount is big but cmdGenDispatchX is
-        // small, prep.comp's read of sectionCount is racing or stale.
-        // (2026-05-26: logged every 600 frames ≈ 10s, offset from the other
-        // 600-frame diag block below, so the translucent draw count — which
-        // tells us how much water LOD is actually being drawn — is visible
-        // regularly while diagnosing the "no colour" water.)
-        if (this.metalFrame % 600 == 300
-                && viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mv) {
-            int renderListSectionCount = -1;
-            int cmdGenDispatchX = -1;
-            int cmdGenDispatchY = -1;
-            int cmdGenDispatchZ = -1;
-            int opaqueDrawCount = -1;
-            int translucentDrawCount = -1;
-            int temporalOpaqueDrawCount = -1;
-            if (mv.getRenderList() instanceof me.cortex.voxy.client.core.metal.MetalBuffer rl) {
-                renderListSectionCount = org.lwjgl.system.MemoryUtil.memGetInt(rl.getContentsPtr());
-            }
-            if (mv.drawCountCallBuffer instanceof me.cortex.voxy.client.core.metal.MetalBuffer dc) {
-                long p = dc.getContentsPtr();
-                cmdGenDispatchX        = org.lwjgl.system.MemoryUtil.memGetInt(p +  0);
-                cmdGenDispatchY        = org.lwjgl.system.MemoryUtil.memGetInt(p +  4);
-                cmdGenDispatchZ        = org.lwjgl.system.MemoryUtil.memGetInt(p +  8);
-                opaqueDrawCount        = org.lwjgl.system.MemoryUtil.memGetInt(p + 12);
-                translucentDrawCount   = org.lwjgl.system.MemoryUtil.memGetInt(p + 16);
-                temporalOpaqueDrawCount = org.lwjgl.system.MemoryUtil.memGetInt(p + 20);
-            }
-            int topNodeCount = this.traversal.getTopNodeCount();
-            int firstDispatchSize = (topNodeCount + 127) >> 7;
-            Logger.info(String.format(
-                    "[Metal-LayerB f=%d] topNodeCount=%d firstDispatchSize=%d renderList.sectionCount=%d cmdGenDispatch=(%d,%d,%d) draws opaque=%d translucent=%d temporal=%d",
-                    this.metalFrame, topNodeCount, firstDispatchSize,
-                    renderListSectionCount,
-                    cmdGenDispatchX, cmdGenDispatchY, cmdGenDispatchZ,
-                    opaqueDrawCount, translucentDrawCount, temporalOpaqueDrawCount));
-        }
+        // The Layer-B diagnostic that read the renderList and drawCountCallBuffer back on a 600-frame
+        // cadence is GONE with its [Metal-LayerB] line. It was eight memGetInt reads of GPU-written
+        // memory every ten seconds to compute seven locals that nothing consumed once the log went.
 
         // 5) Render pass against bridge color + Voxy-owned depth. Clears both
         //    each frame (no MC-depth import on Metal yet, so we render every
@@ -732,14 +690,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                 && this.metallumColor.id() != -1 && this.metallumDepth.id() != -1;
         if (this.diagCount < 5) {
             this.diagCount++;
-            me.cortex.voxy.common.Logger.info(
-                    "[Metal-DIAG] metallumTarget=" + metallumTarget
-                    + " colorHandle=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.colorAttachment())
-                    + " depthHandle=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.depthAttachment())
-                    + " encoder=0x" + Long.toHexString(me.cortex.voxy.client.core.metal.MetallumBridge.renderEncoder())
-                    + " colorId=" + (this.metallumColor == null ? "null" : this.metallumColor.id())
-                    + " depthId=" + (this.metallumDepth == null ? "null" : this.metallumDepth.id())
-                    + " useMetallumTarget=" + this.useMetallumTarget);
             me.cortex.voxy.client.core.metal.MetallumBridge.logRenderPassCounters();
         }
         // VOXY_ATTACH_TRACE=1: compare the colour attachment Voxy renders the LOD into against
@@ -935,19 +885,10 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         this.metalFrame++;
 
 
-        // [Metal-VXPLANES] one-shot CPU read-back of the material g-buffer planes
-        // (VOXY_VX_DUMP_PLANES=1). submit() waited, so the IOSurface holds the exact
-        // rendered bytes — definitive (no tonemap / overdraw confound). Center-row px.
-
-        // [Metal-DEPTHDIAG] chain-bisect instrumentation: the blit buffer is
-        // Shared storage and submit() waited, so its contents are the exact
-        // floats the export pass read. Histogram of the center rows tells
-        // which chain segment is broken: all-zero = blit/LOD-depth broken
-        // (Metal side), real spread = Metal side fine, break is in the
-        // export pass or the IOSurface→GL hop. Periodic so world-load
-        // progression is visible.
-
-        // submit) and track its variance over the window.
+        // Two orphaned comment blocks stood here, describing [Metal-VXPLANES] and [Metal-DEPTHDIAG]
+        // read-backs whose code had already been removed before this cleanup began -- a reminder that
+        // a comment outlives the code it explains unless someone deletes it.
+        //
         // The [Metal-FLICKER] renderList-variance probe that read GPU-written memory HERE, on every
         // frame, is GONE -- and it is worth recording why it could not simply be sampled less often,
         // because that constraint is not obvious: its entire meaning is variance ACROSS frames

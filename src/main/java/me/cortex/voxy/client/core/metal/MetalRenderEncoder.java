@@ -205,13 +205,6 @@ public final class MetalRenderEncoder implements RenderEncoder {
         // collapses to one quad -- thousands of valid indices rasterizing nothing. Log whether
         // the push actually happens and what it pushes.
         if (BI_TRACE && (biTraceCount++ % 600) == 1) {
-            me.cortex.voxy.common.Logger.info("[Metal-BI] drawCount=" + drawCount
-                    + " indirectContents=0x" + Long.toHexString(indirectContents)
-                    + (indirectContents == 0
-                        ? "  <-- NOT CPU-VISIBLE: no setVertexBytes is issued for any draw"
-                        : "  first4=" + MemoryUtil.memGetInt(indirectContents + offset + 16)
-                          + "," + (drawCount > 1 ? MemoryUtil.memGetInt(indirectContents + offset + stride + 16) : -1)
-                          + "," + (drawCount > 2 ? MemoryUtil.memGetInt(indirectContents + offset + 2L * stride + 16) : -1)));
         }
         for (int i = 0; i < drawCount; i++) {
             long cmdAddr = offset + (long) i * stride;

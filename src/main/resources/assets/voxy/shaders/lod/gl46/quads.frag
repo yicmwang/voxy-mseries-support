@@ -13,8 +13,11 @@
 #endif
 
 layout(binding = 0) uniform sampler2D blockModelAtlas;
-// `layout(binding = 2) uniform sampler2D depthTex;` used to sit here, feeding the chunk-bound
-// depth mask whose test is deleted below. Nothing binds texture 2 any more.
+// `layout(binding = 2) uniform sampler2D depthTex;` used to sit here, feeding the chunk-bound depth
+// mask whose test is deleted below. Nothing on the METAL path binds texture 2 any more; the GL path's
+// bindRenderingBuffers still binds viewport.depthBoundingBuffer there, but nothing samples it and that
+// whole path is on the deletion list -- so the comment is precise about which path, because an earlier
+// version of this note said "nothing binds texture 2", which the GL path quietly contradicted.
 
 
 #ifdef VOXY_LOD_CHUNK_CULL

@@ -425,37 +425,11 @@ public class VoxyRenderSystem {
             float glF = base.m23() / (base.m22() - 1.0f);
             float rzN = base.m23() / base.m22();
             float rzF = base.m23() / (base.m22() - 1.0f);
-            Logger.info(String.format(java.util.Locale.ROOT,
-                    "[Metal-BASEPROJ] m00=%.6f m11=%.6f m22=%.6f m23=%.6f m32=%.6f m33=%.6f "
-                            + "| ifGL near=%.5f far=%.3f | ifReverseZ near=%.5f far=%.3f",
-                    base.m00(), base.m11(), base.m22(), base.m23(), base.m32(), base.m33(),
-                    glN, glF, rzN, rzF));
 
             float[] b = new float[16];
             new Matrix4f(base).get(b);
             float[] v = new float[16];
             computeProjectionMat(matrices.projection()).get(v);
-            Logger.info(String.format(java.util.Locale.ROOT,
-                    "[Metal-BASEPROJ16] base=[%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | "
-                            + "%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]",
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11],
-                    b[12], b[13], b[14], b[15]));
-            Logger.info(String.format(java.util.Locale.ROOT,
-                    "[Metal-BASEPROJ16] voxyProj=[%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | "
-                            + "%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]",
-                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11],
-                    v[12], v[13], v[14], v[15]));
-            Logger.info(String.format(java.util.Locale.ROOT,
-                    "[Metal-BASEPROJ16] modelView=[%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | "
-                            + "%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]",
-                    matrices.modelView().m00(), matrices.modelView().m10(),
-                    matrices.modelView().m20(), matrices.modelView().m30(),
-                    matrices.modelView().m01(), matrices.modelView().m11(),
-                    matrices.modelView().m21(), matrices.modelView().m31(),
-                    matrices.modelView().m02(), matrices.modelView().m12(),
-                    matrices.modelView().m22(), matrices.modelView().m32(),
-                    matrices.modelView().m03(), matrices.modelView().m13(),
-                    matrices.modelView().m23(), matrices.modelView().m33()));
         }
         var projection = computeProjectionMat(matrices.projection());//RenderSystem.getProjectionMatrix();
         //var projection = ShadowMatrices.createOrthoMatrix(160, -16*300, 16*300);
@@ -594,11 +568,6 @@ public class VoxyRenderSystem {
             // moves >128 blocks.
             this.metalRingDiagFrame++;
             if (this.metalRingDiagFrame % 600 == 1) {
-                me.cortex.voxy.common.Logger.info(String.format(
-                        "[Metal-RING f=%d] processedThisFrame=%s  cam=(%.0f, %.0f)  cfgRD=%d",
-                        this.metalRingDiagFrame, processedThisFrame,
-                        viewport.cameraX, viewport.cameraZ,
-                        me.cortex.voxy.client.config.VoxyConfig.CONFIG.sectionRenderDistance));
             }
             return;
         }
