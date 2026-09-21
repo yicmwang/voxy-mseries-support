@@ -363,42 +363,18 @@ void main() {
     #endif
 #endif
 
-#if defined(TRANSLUCENT) && defined(VOXY_TRANS_NEAR_CULL)
-    // vx contract (2026-07-03): BSL composites the injected LOD water
-    // (colortex16, via deferred1's nearer-than-scene gate) and ALSO draws
-    // MC's own water inside the render distance. LOD water surviving the
-    // chunk-bound depth mask there (the mask compare flips with camera
-    // pitch at grazing angles) double-blends with Sodium/BSL water into a
-    // pale higher-opacity veil — the section-aligned "white squares" on
-    // near/mid water. Hard-cull translucent LOD fragments inside the MC
-    // ring; voxyLodParams2.x = renderDistanceBlocks - margin (0 disables).
-    // Injected only when the vx contract is active; VOXY_TRANS_NEAR_CULL=0
-    // is the kill switch.
-    //
-    // 2026-07-03 round 3: compare in the metric MC actually renders in.
-    // voxyFogDist is a 3D slant distance, so from a high camera (or toward
-    // the render square's diagonals, up to RD*sqrt(2)) LOD water INSIDE the
-    // MC square passed the `< threshold` test's complement and survived,
-    // double-compositing with BSL/Sodium water wherever the chunk-bound
-    // mask misfired (its compare flips per frame -> the flickering pale
-    // 16-block squares). Horizontal Chebyshev distance max(|dx|,|dz|)
-    // mirrors the loaded-chunk square at every altitude and diagonal.
-    // VOXY_TRANS_NEAR_CULL_XZ=0 restores the slant metric.
-    //
-    // 2026-07-03 round 5: Sodium 0.8.1 section culling is a Euclidean XZ
-    // CYLINDER (fx*fx+fz*fz <= r*r, OcclusionCuller), NOT a square — the
-    // Chebyshev cull left a no-water ring toward the render square's
-    // diagonals (Euclid RD .. RD*sqrt(2)): MC water already absent there,
-    // LOD water still discarded -> the naked kelp/seafloor band above a
-    // sawtooth waterline. Cull in the metric Sodium actually renders in.
-    // VOXY_TRANS_NEAR_CULL_RADIAL=0 falls back to the Chebyshev square.
-#if defined(VOXY_TRANS_NEAR_CULL_XZ) && defined(VOXY_TRANS_NEAR_CULL_RADIAL)
-    float voxyNearCullDist = length(voxyCamRelXZ);
-#elif defined(VOXY_TRANS_NEAR_CULL_XZ)
-    float voxyNearCullDist = max(abs(voxyCamRelXZ.x), abs(voxyCamRelXZ.y));
-#else
-    float voxyNearCullDist = voxyFogDist;
-#endif
+// The translucent near-cull used to live here: a camera-distance test (3D slant, then horizontal
+// Chebyshev, then Euclidean) for "is this fragment inside the MC render distance", discarded with a
+// tuned margin. Three successive metrics, each fixing the last one's failure -- white veil squares,
+// then a no-water ring out to RD*sqrt(2) over the seafloor -- because a distance is a proxy for what
+// MC actually draws, and MC draws the sections it has BUILT.
+//
+// The per-section cull above answers that exactly, and it is injected into the COMMON defines, so the
+// translucent pass already has it: LOD water inside a built section is culled by the same membership
+// test as the terrain, with no threshold to tune and no metric to get wrong. The near-cull was also
+// gated on IrisUtil.vxContractActive(), which this port does not have, so it was doubly inert -- and
+// it was a footgun: had the vx contract returned, it would have fought the section cull with a
+// distance. Deleted rather than left disabled.
     if (voxyLodParams2.x > 0.0 && voxyNearCullDist < voxyLodParams2.x) {
         discard;
         return;

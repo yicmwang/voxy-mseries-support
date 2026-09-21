@@ -631,33 +631,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     Logger.info("[Metal-LODTEST] absolute face indent ON (water plane height "
                             + "lodScale-invariant); VOXY_LOD_ABS_INDENT=0 reverts");
                 }
-                // VOXY_TRANS_NEAR_CULL — vx contract only (2026-07-03),
-                //   DEFAULT ON. BSL composites the injected LOD water AND
-                //   draws MC's own water inside render distance; LOD water
-                //   that survives the chunk-bound mask there (the depth
-                //   compare flips with camera pitch at grazing angles)
-                //   double-blends into pale veil squares on near/mid water.
-                //   Hard-cull translucent LOD fragments inside the MC ring;
-                //   the cull distance rides in voxyLodParams2.x per frame.
-                //   VOXY_TRANS_NEAR_CULL=0 disables.
-                String nearCullEnv = System.getenv("VOXY_TRANS_NEAR_CULL");
-                boolean transNearCull = (nearCullEnv == null || !"0".equals(nearCullEnv.trim()))
-                        && me.cortex.voxy.client.core.util.IrisUtil.vxContractActive();
-                if (transNearCull) {
-                    translucentDefines.put("VOXY_TRANS_NEAR_CULL", "");
-                    if (TRANS_NEAR_CULL_XZ) {
-                        translucentDefines.put("VOXY_TRANS_NEAR_CULL_XZ", "");
-                        if (TRANS_NEAR_CULL_RADIAL) {
-                            translucentDefines.put("VOXY_TRANS_NEAR_CULL_RADIAL", "");
-                        }
-                    }
-                    Logger.info("[Metal-LODTEST] translucent near-cull ON (vx contract: no LOD water "
-                            + "inside MC render distance; metric="
-                            + (TRANS_NEAR_CULL_RADIAL ? "xz-radial" : TRANS_NEAR_CULL_XZ ? "xz-chebyshev" : "3d-slant")
-                            + ", margin=" + TRANS_NEAR_CULL_MARGIN + "); VOXY_TRANS_NEAR_CULL=0 disables, "
-                            + "VOXY_TRANS_NEAR_CULL_RADIAL=0 restores the Chebyshev square, "
-                            + "VOXY_TRANS_NEAR_CULL_XZ=0 restores the slant metric");
-                }
                 // Seam-ring brightness parity: GL runs SSAO between opaque and
                 // translucent; that pass is parked on Metal, so LOD terrain sits
                 // ~10% brighter than AO-darkened Sodium terrain — the visible
@@ -1086,11 +1059,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             MemoryUtil.memPutFloat(lodBase + 12, WATER_FAR_ALPHA);
             // voxyLodParams2.x: translucent near-cull distance (vx contract —
             // see VOXY_TRANS_NEAR_CULL). GL and no-pack sessions read 0.
-            float nearCull = 0.0f;
-            if (me.cortex.voxy.client.core.util.IrisUtil.vxContractActive()) {
-                nearCull = Math.max(rdBlocks - TRANS_NEAR_CULL_MARGIN, 64f);
-            }
-            MemoryUtil.memPutFloat(lodBase + 16, nearCull);
+            // voxyLodParams2.x: was the translucent near-cull distance, a camera-distance proxy for
+            // "inside the MC render distance". The per-section cull covers translucent now (it rides in
+            // the common defines), so this is 0 and the shader reads it as disabled.
+            MemoryUtil.memPutFloat(lodBase + 16, 0f);
             MemoryUtil.memPutFloat(lodBase + 20, 0f);
             MemoryUtil.memPutFloat(lodBase + 24, 0f);
             MemoryUtil.memPutFloat(lodBase + 28, 0f);
