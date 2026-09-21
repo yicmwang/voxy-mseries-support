@@ -501,10 +501,20 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             viewport.hiZBuffer.ensureAllocated(viewport.width, viewport.height);
             if (!this.hizBuildLogged) {
                 this.hizBuildLogged = true;
-                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] NO depth attachment"
-                        + " (target=" + metallumTarget + ", depth=" + this.metallumDepth
-                        + (this.metallumDepth == null ? "" : " id=" + this.metallumDepth.id())
-                        + ") -- pyramid stays zero-filled and the cull is a no-op");
+                // Distinguish the two reasons for not building, because they mean opposite things: the
+                // switch being off is the intended default, while a missing attachment is a real fault.
+                // Conflating them in one message is how a diagnostic ends up lying about the state it
+                // was written to report.
+                final String why = !HIZ_BUILD
+                        ? "VOXY_HIZ_BUILD is not set -- this is the default, and the pyramid stays"
+                          + " zero-filled so the cull is a no-op"
+                        : "VOXY_HIZ_BUILD is set but no depth attachment is available";
+                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] not building: " + why
+                        + " (target=" + metallumTarget
+                        + ", depthHandle=" + (this.metallumDepth == null ? "null"
+                                : Long.toString(this.metallumDepth.metalHandle()))
+                        + ", depthId=" + (this.metallumDepth == null ? "n/a"
+                                : Integer.toString(this.metallumDepth.id())) + ")");
             }
         }
 
