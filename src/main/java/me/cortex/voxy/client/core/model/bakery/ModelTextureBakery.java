@@ -279,7 +279,6 @@ public class ModelTextureBakery {
         boolean bakeOff = "1".equals(System.getenv("VOXY_BAKERY_OFF"));
         boolean forceOn = "1".equals(System.getenv("VOXY_BAKERY_FORCE"));
         if (bakeOff) {
-            GlViewCapture.DIAG_BAKE_INVOCATIONS.incrementAndGet();
             return 0;
         }
         if (isMetal && !forceOn) throw new IllegalStateException(
@@ -527,13 +526,11 @@ public class ModelTextureBakery {
      */
     public int renderDefaultBakeToHeap(BlockState state, long destAddr) {
         if ("1".equals(System.getenv("VOXY_BAKERY_OFF"))) {
-            GlViewCapture.DIAG_BAKE_INVOCATIONS.incrementAndGet();
             if (state.getRenderShape() == RenderShape.INVISIBLE && !(state.getBlock() instanceof LiquidBlock)) {
                 zeroDestAddr(destAddr);
                 return 0;
             }
             writeDefaultBakePattern(destAddr);
-            GlViewCapture.DIAG_BAKE_NONZERO_PIXEL_INVOCATIONS.incrementAndGet();
             return 0;
         }
         return renderToStreamMetal(state, destAddr);
@@ -586,7 +583,6 @@ public class ModelTextureBakery {
     }
 
     private int renderToStreamMetal(BlockState state, long destAddr) {
-        GlViewCapture.DIAG_BAKE_INVOCATIONS.incrementAndGet();
         if (state.getRenderShape() == RenderShape.INVISIBLE && !(state.getBlock() instanceof LiquidBlock)) {
             // Mirror the GL path's empty-bake behaviour — write zeros to
             // destAddr so the model store sees a blank slot.

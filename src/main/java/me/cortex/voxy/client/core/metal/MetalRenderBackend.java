@@ -662,10 +662,6 @@ public class MetalRenderBackend implements RenderBackend {
         if (!ENC_TRACE) {
             return;
         }
-        Logger.info("[Metal-ENC] " + what
-                + " ownsActive=" + this.ownsActiveCommandBuffer
-                + " blitEnc=0x" + Long.toHexString(this.activeBlitEncoder)
-                + " buf=0x" + Long.toHexString(this.activeCommandBuffer));
     }
 
     private void endForeignEncoderIfNeeded() {
@@ -833,14 +829,6 @@ public class MetalRenderBackend implements RenderBackend {
                 long want = MetalHandleMap.getHandle(c1.texture().id());
                 long got = MetalNative.mtlRenderPassGetColorAttachmentTexture(passDescHandle, 1);
                 int store = MetalNative.mtlRenderPassGetColorAttachmentStoreAction(passDescHandle, 1);
-                me.cortex.voxy.common.Logger.info("[Metal-PASSSLOT] colours=" + nColors
-                        + " depth=" + (desc.depthAttachment() != null)
-                        + " slot1 want=0x" + Long.toHexString(want)
-                        + " (fmt=" + MetalNative.mtlTextureGetPixelFormat(want) + ")"
-                        + " descriptor=0x" + Long.toHexString(got)
-                        + " (fmt=" + (got == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(got)) + ")"
-                        + " storeAction=" + store + " (1=Store)"
-                        + " MATCH=" + (want == got));
             }
             if (ATTACH_TRACE
                     && nColors > 0 && desc.depthAttachment() != null
@@ -856,19 +844,6 @@ public class MetalRenderBackend implements RenderBackend {
                 // texture, and needs no access to the pipeline's attachment objects.
                 int realColorFmt = colorHandle == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(colorHandle);
                 int realDepthFmt = depthHandle == 0 ? -1 : MetalNative.mtlTextureGetPixelFormat(depthHandle);
-                me.cortex.voxy.common.Logger.info("[Metal-PASS] colors=" + nColors
-                        + " colorHandle=0x" + Long.toHexString(colorHandle)
-                        + " depthHandle=0x" + Long.toHexString(depthHandle)
-                        + " load0=" + c0.loadAction()
-                        + " size=" + desc.viewportWidth() + "x" + desc.viewportHeight()
-                        + " | realColorFmt=" + realColorFmt + " realDepthFmt=" + realDepthFmt
-                        // Does Metallum still have a clear queued for the texture we are about to
-                        // draw into? Our borrow path bypasses createRenderPass, which is where
-                        // those are consumed -- so if one is queued, MC's next pass applies it and
-                        // erases this frame's LOD. Measured, not assumed.
-                        + " | pendingColorClear=" + MetallumBridge.hasPendingColorClear(colorHandle)
-                        + " pendingDepthClear=" + MetallumBridge.hasPendingDepthClear(depthHandle)
-                        + " pendingTotal=" + MetallumBridge.pendingColorClearCount());
             }
 
             // Pending stream copies must land before the pass's encoder opens
@@ -883,12 +858,6 @@ public class MetalRenderBackend implements RenderBackend {
             if (ATTACH_TRACE && nColors > 0
                     && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
                 long metallumBuf = MetallumBridge.available() ? MetallumBridge.commandBuffer() : 0L;
-                me.cortex.voxy.common.Logger.info("[Metal-PASSBUF] active=0x"
-                        + Long.toHexString(this.activeCommandBuffer)
-                        + " metallum=0x" + Long.toHexString(metallumBuf)
-                        + " owns=" + this.ownsActiveCommandBuffer
-                        + (metallumBuf != 0 && this.activeCommandBuffer != metallumBuf
-                            ? "   <-- NOT the presented buffer" : ""));
             }
 
             // Prefer BORROWING Metallum's encoder for these attachments. Asking Metal for a second
@@ -941,11 +910,6 @@ public class MetalRenderBackend implements RenderBackend {
             // over, and I made that mistake. Only a colour+depth pass is the LOD pass.
             if (ATTACH_TRACE && nColors > 0
                     && desc.depthAttachment() != null && (passTraceCount % 60) == 1) {
-                me.cortex.voxy.common.Logger.info("[Metal-BORROW] colors=" + nColors
-                        + " borrowed=" + borrowed
-                        + (borrowed
-                            ? "  (Metallum's encoder reused -- its pending clear is already materialised)"
-                            : "  <-- Voxy opened its OWN; Metallum's pending clear can wipe it"));
             }
         } finally {
             // The render encoder retains a reference to the descriptor; we can drop ours.
@@ -1099,11 +1063,6 @@ public class MetalRenderBackend implements RenderBackend {
                 final int f1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentFormat(pipelineDesc, 1);
                 final int w0 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(pipelineDesc, 0);
                 final int w1 = MetalNative.mtlRenderPipelineDescriptorGetColorAttachmentWriteMask(pipelineDesc, 1);
-                me.cortex.voxy.common.Logger.info("[Metal-PIPESLOT] label=" + desc.label
-                        + " declared=2"
-                        + " desc[0].fmt=" + f0 + " mask=" + Integer.toHexString(w0)
-                        + " desc[1].fmt=" + f1 + " mask=" + Integer.toHexString(w1)
-                        + " (70=RGBA8Unorm, 55=R32Float; 0 means NO ATTACHMENT)");
             }
 
             // Build + attach vertex descriptor if the pipeline declares vertex inputs.

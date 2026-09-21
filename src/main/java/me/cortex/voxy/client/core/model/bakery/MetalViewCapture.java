@@ -136,8 +136,6 @@ public final class MetalViewCapture {
         if ("1".equals(System.getenv("VOXY_BAKE_CLEARCHK"))) {
             this.backend.waitForGpuIdle();
             this.bakeTarget.getBytes(0, 0, 0, this.totalW, this.totalH, this.readbackBuffer);
-            me.cortex.voxy.common.Logger.info("[Metal-BAKE-CLEARCHK] residual after clear = "
-                    + java.util.Arrays.toString(perCellWrittenAlpha(this.readbackBuffer)));
         }
     }
 
@@ -266,12 +264,9 @@ public final class MetalViewCapture {
             if ((p & 0xFF000000) != 0) nonzeroAlphaPixels++;
         }
         if (nonzeroAlphaPixels > 0) {
-            GlViewCapture.DIAG_BAKE_NONZERO_PIXEL_INVOCATIONS.incrementAndGet();
             if (nonzeroAlphaPixels * 2L > pixelCount) {
-                GlViewCapture.DIAG_BAKE_FULL_ALPHA_INVOCATIONS.incrementAndGet();
             }
         } else {
-            GlViewCapture.DIAG_BAKE_ZERO_ALPHA_INVOCATIONS.incrementAndGet();
         }
 
         // M13 chunk 1 polish (2026-05-16): bake-fill via per-cell average. The bakery's per-face model
@@ -283,9 +278,7 @@ public final class MetalViewCapture {
         // This feeds the ATLAS only. The markers packed below deliberately do not see it.
         // VOXY_BAKE_NO_DILATE=1 skips it, which leaves the atlas holey and is a diagnostic only.
         if (nonzeroAlphaPixels > 0 && !NO_DILATE) {
-            GlViewCapture.DIAG_BAKE_DILATE_RUNS.incrementAndGet();
             int filled = BakeCoverage.dilateOpaqueIntoGaps(rgba, this.totalW, this.width, this.height);
-            GlViewCapture.DIAG_BAKE_DILATE_PIXELS_FILLED.addAndGet(filled);
         }
 
         BakeCoverage.pack(destAddr, rgba, drawn, this.totalW, this.width, this.height);

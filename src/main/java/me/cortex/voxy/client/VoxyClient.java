@@ -536,9 +536,6 @@ public class VoxyClient implements ClientModInitializer {
                             && client.gameRenderer.mainRenderTarget() != null) {
                         burstLeft[0]--;
                         final int pi = (idx[0] + points.length - 1) % points.length;
-                        Logger.info("[Metal-TP-SHOT] point=" + pi
-                                + " burst=" + (shotBurst - 1 - burstLeft[0])
-                                + " args=" + points[pi]);
                         net.minecraft.client.Screenshot.grab(client.gameDirectory,
                                 client.gameRenderer.mainRenderTarget(), component -> {});
                     }
@@ -547,7 +544,6 @@ public class VoxyClient implements ClientModInitializer {
                     final String pos = points[idx[0] % points.length];
                     idx[0]++;
                     commands.performPrefixedCommand(source, "tp @s " + pos);
-                    Logger.info("[Metal-TP] -> point " + ((idx[0] - 1) % points.length) + " args=" + pos);
                     shotIn[0] = shotDelay;
                     burstLeft[0] = 0;   // an unfinished burst must not bleed into the next arrival
                 } catch (Throwable t) {

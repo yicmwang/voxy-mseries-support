@@ -80,136 +80,8 @@ public class AsyncNodeManager {
     private boolean needsWaitForSync = false;
 
     // ---------------------------------------------------------------------------------------------
-    // End-to-end verification of the metadata path (VOXY_METACHK).
-    // ---------------------------------------------------------------------------------------------
-
-    /**
-     * A section's 32-byte metadata record is what turns a draw command into a quad range: cmdgen
-     * reads {@code quadStart} and the eight packed group counts out of it, and the vertex shader
-     * reads the position from it. It is produced CPU-side by {@code writeMetadataSplit} into a
-     * staging buffer, copied into the upload ring, and finally scattered into the metadata buffer
-     * <b>by the GPU</b> -- four steps, three of them asynchronous, and every one of them has to agree
-     * before a draw points at the right quads. Any of them failing produces the same visible thing:
-     * geometry that is not the section's own, reshuffled as it re-streams, black wherever the donor
-     * happens to be interior or unlit.
-     *
-     * <p>Rather than guess which step, remember the 32 bytes that were <i>intended</i> for each
-     * section and read the metadata buffer back once the scatter has certainly run. All of this is on
-     * the async thread, which owns the staging buffer, so there is no CPU-side race; the only other
-     * writer is the GPU's scatter riding the render thread's command buffer, which the wall-clock lag
-     * covers. A mismatch means the metadata the GPU will read is not what the geometry manager wrote
-     * -- the one condition that produces the artefact, measured rather than argued.
-     */
-    private static final boolean METACHK = !"0".equals(System.getenv("VOXY_METACHK"));
-    private static final int METACHK_SLOTS = 1 << 14;
-    /**
-     * How many render ticks must have passed since a record was staged before it is read back. The
-     * scatter that carries it runs on a tick AFTER the one that publishes the results, and the
-     * command buffer is submitted around there, so one tick is not enough. A wall-clock lag was the
-     * first attempt and it produced false positives at startup -- the async thread staged and then
-     * verified before the render thread had ticked even once, so the buffer was legitimately still
-     * empty -- which is exactly the kind of reading that has misled this investigation before.
-     */
-    private static final int METACHK_LAG_TICKS = 3;
-    private static final long METACHK_LAG_MS = 150;
-    private final me.cortex.voxy.common.util.MemoryBuffer metachkExpected =
-            new me.cortex.voxy.common.util.MemoryBuffer((long) METACHK_SLOTS * 32L);
-    private final int[] metachkId = new int[METACHK_SLOTS];
-    private final long[] metachkStamp = new long[METACHK_SLOTS];
-    private final long[] metachkStampTick = new long[METACHK_SLOTS];
-    private final it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap metachkSlot =
-            new it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap(METACHK_SLOTS);
-    private int metachkHead = 0;
     /** Advanced by {@link #tick} on the render thread; read by the async thread as a gate. */
     private volatile long renderTick = 0;
-    private long metachkChecked = 0, metachkMismatch = 0, metachkEvicted = 0, metachkTooEarly = 0;
-    private long metachkLastLog = 0;
-    private int metachkExamples = 0;
-
-    {
-        java.util.Arrays.fill(this.metachkId, -1);
-        this.metachkSlot.defaultReturnValue(-1);
-    }
-
-    /** Remember the 32 bytes just staged for {@code id}, to be read back once the scatter has run. */
-    private void metachkStage(final int id, final long ptrA, final long ptrB) {
-        if (!METACHK) return;
-        int slot = this.metachkSlot.get(id);
-        if (slot == -1) {
-            slot = this.metachkHead;
-            this.metachkHead = (this.metachkHead + 1) & (METACHK_SLOTS - 1);
-            final int evicted = this.metachkId[slot];
-            if (evicted != -1) {
-                this.metachkSlot.remove(evicted);
-                this.metachkEvicted++;
-            }
-            this.metachkSlot.put(id, slot);
-            this.metachkId[slot] = id;
-        }
-        final long dst = this.metachkExpected.address + (long) slot * 32L;
-        MemoryUtil.memCopy(ptrA, dst, 16L);
-        MemoryUtil.memCopy(ptrB, dst + 16L, 16L);
-        this.metachkStamp[slot] = System.nanoTime();
-        this.metachkStampTick[slot] = this.renderTick;
-    }
-
-    /** Read the metadata buffer back for every staged record older than the lag, and compare. */
-    private void metachkVerify() {
-        if (!METACHK) return;
-        if (!(((BasicSectionGeometryData) this.geometryData).getMetadataBuffer()
-                instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) return;
-        final long mp = mb.getContentsPtr();
-        if (mp == 0) return;
-
-        final long now = System.nanoTime();
-        final long lagNanos = METACHK_LAG_MS * 1_000_000L;
-        final long tick = this.renderTick;
-        for (int slot = 0; slot < METACHK_SLOTS; slot++) {
-            final int id = this.metachkId[slot];
-            if (id == -1) continue;
-            if (tick - this.metachkStampTick[slot] < METACHK_LAG_TICKS) continue;
-            if (now - this.metachkStamp[slot] < lagNanos) continue;
-            final long exp = this.metachkExpected.address + (long) slot * 32L;
-            final long got = mp + (long) id * 32L;
-            int diff = 0;
-            for (int k = 0; k < 32; k += 4) {
-                diff |= MemoryUtil.memGetInt(exp + k) ^ MemoryUtil.memGetInt(got + k);
-            }
-            if (diff != 0) {
-                this.metachkMismatch++;
-                if (this.metachkExamples++ < 8) {
-                    Logger.warn("[Metal-METACHK!] section " + id + " metadata mismatch"
-                            + " expected=[quadStart=" + Integer.toUnsignedString(MemoryUtil.memGetInt(exp + 12))
-                            + " counts=" + Integer.toUnsignedString(MemoryUtil.memGetInt(exp + 16)) + ","
-                            + Integer.toUnsignedString(MemoryUtil.memGetInt(exp + 20)) + ","
-                            + Integer.toUnsignedString(MemoryUtil.memGetInt(exp + 24)) + ","
-                            + Integer.toUnsignedString(MemoryUtil.memGetInt(exp + 28)) + "]"
-                            + " buffer=[quadStart=" + Integer.toUnsignedString(MemoryUtil.memGetInt(got + 12))
-                            + " counts=" + Integer.toUnsignedString(MemoryUtil.memGetInt(got + 16)) + ","
-                            + Integer.toUnsignedString(MemoryUtil.memGetInt(got + 20)) + ","
-                            + Integer.toUnsignedString(MemoryUtil.memGetInt(got + 24)) + ","
-                            + Integer.toUnsignedString(MemoryUtil.memGetInt(got + 28)) + "]");
-                }
-            } else {
-                this.metachkChecked++;
-            }
-            this.metachkId[slot] = -1;
-            this.metachkSlot.remove(id);
-        }
-
-        final long total = this.metachkChecked + this.metachkMismatch;
-        // Time-based so the verification RATE is visible. A count-based condition (every 2000) made
-        // "verified 1500 records and then nothing was staged again" look identical to "stopped
-        // working", which is the same trap as the earlier count-only log.
-        if (total > 0 && now - this.metachkLastLog > 5_000_000_000L) {
-            this.metachkLastLog = now;
-            Logger.info("[Metal-METACHK] checked=" + this.metachkChecked
-                    + " mismatch=" + this.metachkMismatch
-                    + " evicted=" + this.metachkEvicted
-                    + " pending=" + this.metachkSlot.size()
-                    + " renderTicks=" + this.renderTick);
-        }
-    }
 
     public AsyncNodeManager(int maxNodeCount, IGeometryData geometryData, RenderGenerationService renderService) {
         //Note the current implmentation of ISectionWatcher is threadsafe
@@ -343,7 +215,6 @@ public class AsyncNodeManager {
         }
 
         // Read back any metadata record old enough that its scatter has certainly executed.
-        this.metachkVerify();
 
 
         int workDone = 0;
@@ -428,7 +299,6 @@ public class AsyncNodeManager {
                 // longer a session runs. The count also settles how often the traversal's readback is
                 // garbage -- a nonzero count is proof that it happens at all, which INVALID=0 on a
                 // clean run cannot tell us.
-                DIAG_REQ_BATCH_OVERFLOW.incrementAndGet();
                 job.free();
                 continue;
             }
@@ -450,9 +320,7 @@ public class AsyncNodeManager {
                 // being unpacked and repacked -- any stray bit lands in a masked-off position and the
                 // result differs. That catches corruption without needing to know what it looks like.
                 if (!validSectionPos(pos)) {
-                    DIAG_REQ_INVALID.incrementAndGet();
                 }
-                DIAG_REQ_VALIDATED.incrementAndGet();
                 this.manager.processRequest(pos);
             }
             job.free();
@@ -640,7 +508,6 @@ public class AsyncNodeManager {
 
                     //Remember what was intended for this section so the GPU's scatter can be checked
                     //against it once it has run (VOXY_METACHK).
-                    this.metachkStage(val, ptrA, ptrB);
                 }
                 ids.clear();
             }
@@ -682,10 +549,7 @@ public class AsyncNodeManager {
         if (results == null) {//There are no new results to process, return
             return;
         }
-        DIAG_TICK_WITH_RESULTS_COUNT.incrementAndGet();
-        DIAG_LAST_TICK_SECTION_COUNT.set(results.geometrySectionCount);
         if (results.geometryUpload != null && !results.geometryUpload.dataUploadPoints.isEmpty()) {
-            DIAG_TICK_WITH_UPLOADS_COUNT.incrementAndGet();
         }
 
         //top level node add/remove
@@ -862,28 +726,7 @@ public class AsyncNodeManager {
         this.addWork();
     }
 
-    /** M13 diagnostic counters — read by AbstractRenderPipeline's Metal-DIAG dump. */
-        /**
-     * Node requests read back from the GPU and checked for plausibility before being acted on.
-     *
-     * <p>A request that survives the round trip in {@link #validSectionPos} decoded from the same
-     * packing that produced it, so a nonzero {@code DIAG_REQ_INVALID} means the CPU read bytes the
-     * traversal did not write -- corruption in flight rather than a wrong value generated. That is
-     * the difference between "the node manager asked for garbage" and "the GPU told it garbage",
-     * and it is the distinction the splotch investigation needs.
-     */
-    /**
-     * Batches whose GPU-written count did not fit the slot the traversal allocated for it.
-     *
-     * <p>A count the traversal did not write is the readback returning garbage, which makes this the
-     * one direct measurement of that happening. It also used to be fatal to the async node manager
-     * thread (the throw escaped the run loop); it is now counted and skipped, so a session survives
-     * one and the rate is visible.
-     */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_BATCH_OVERFLOW = new java.util.concurrent.atomic.AtomicLong();
 
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_INVALID = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQ_VALIDATED = new java.util.concurrent.atomic.AtomicLong();
 
     private static boolean validSectionPos(final long pos) {
         final int lvl = me.cortex.voxy.common.world.WorldEngine.getLevel(pos);
@@ -894,18 +737,8 @@ public class AsyncNodeManager {
         return me.cortex.voxy.common.world.WorldEngine.getWorldSectionId(lvl, x, y, z) == pos;
     }
 
-public static final java.util.concurrent.atomic.AtomicLong DIAG_WORLD_EVENT_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_GEOMETRY_RESULT_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_TOP_LEVEL_ADD_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    /** Times AsyncNodeManager.tick() ran and consumed a non-null SyncResults. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_TICK_WITH_RESULTS_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    /** Highest geometrySectionCount observed by AsyncNodeManager.tick(). */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_LAST_TICK_SECTION_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    /** Times AsyncNodeManager.tick() saw non-empty geometry uploads in the sync results. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_TICK_WITH_UPLOADS_COUNT = new java.util.concurrent.atomic.AtomicLong();
 
     private void submitGeometryResult(BuiltSection geometry) {
-        DIAG_GEOMETRY_RESULT_COUNT.incrementAndGet();
         if (!this.running) {
             geometry.free();
             return;
@@ -920,7 +753,6 @@ public static final java.util.concurrent.atomic.AtomicLong DIAG_WORLD_EVENT_COUN
     }
 
     public void addTopLevel(long section) {//Only called from render thread
-        DIAG_TOP_LEVEL_ADD_COUNT.incrementAndGet();
         if (!this.running) throw new IllegalStateException("Not running");
         long stamp = this.tlnLock.writeLock();
         int state = 0;
@@ -1032,7 +864,6 @@ public static final java.util.concurrent.atomic.AtomicLong DIAG_WORLD_EVENT_COUN
     }
 
     public void worldEvent(WorldSection section, int flags, int neighborMask) {
-        DIAG_WORLD_EVENT_COUNT.incrementAndGet();
         //If there is any change, we need to clear the geometry cache before emitting update
         this.geometryCache.clear(section.key);
 

@@ -136,10 +136,6 @@ public class VoxyRenderSystem {
             // (the interesting ones at world join) then sample.
             this.bakeWarmupTransitions++;
             if (this.bakeWarmupTransitions <= 4 || (this.bakeWarmupTransitions % 200) == 0) {
-                me.cortex.voxy.common.Logger.info("[Metal-BAKE] warmup burst "
-                        + (active ? ("ENGAGED (backlog=" + backlog + ", budget=" + (budget / 1_000_000L) + "ms)")
-                                  : ("released (backlog=" + backlog + ", back to 0.9ms)"))
-                        + " [transition " + this.bakeWarmupTransitions + "]");
             }
         }
         return budget;
@@ -493,9 +489,6 @@ public class VoxyRenderSystem {
             if (rt != null && rt.width > 0 && rt.height > 0) {
                 if ((width != rt.width || height != rt.height) && !loggedViewportLeak) {
                     loggedViewportLeak = true;
-                    Logger.warn("[Metal-VIEWPORT] GL_VIEWPORT " + width + "x" + height
-                            + " != mainRT " + rt.width + "x" + rt.height
-                            + " (leaked pass viewport; using mainRT size)");
                 }
                 width = rt.width;
                 height = rt.height;

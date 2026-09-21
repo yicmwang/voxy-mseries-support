@@ -46,17 +46,6 @@ public class GlViewCapture {
     private final long metaScratch;
     private final long scratchSize;
 
-    /** M13 chunk 1 diagnostic counters — read by AbstractRenderPipeline's Metal-DIAG dump. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_BAKE_INVOCATIONS = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_BAKE_NONZERO_PIXEL_INVOCATIONS = new java.util.concurrent.atomic.AtomicLong();
-    /** Bake produced &gt;50% non-transparent alpha — the "good" outcome for solid blocks. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_BAKE_FULL_ALPHA_INVOCATIONS = new java.util.concurrent.atomic.AtomicLong();
-    /** Bake produced 100% transparent alpha (all 0) — slot stays empty in the atlas. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_BAKE_ZERO_ALPHA_INVOCATIONS = new java.util.concurrent.atomic.AtomicLong();
-    /** Bake-fill dilation actually ran (Metal-only, MetalViewCapture.emitToStream). */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_BAKE_DILATE_RUNS = new java.util.concurrent.atomic.AtomicLong();
-    /** Total pixels that the dilation filled (alpha=0 → alpha=FF + neighbour RGB). */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_BAKE_DILATE_PIXELS_FILLED = new java.util.concurrent.atomic.AtomicLong();
 
     public GlViewCapture(int width, int height) {
         this.width = width;
@@ -182,14 +171,12 @@ public class GlViewCapture {
 
         // Sample non-zero pixel detection — count this bake invocation as
         // producing real output if ANY pixel has non-zero colour or depth.
-        DIAG_BAKE_INVOCATIONS.incrementAndGet();
         boolean sawNonZero = false;
         for (int i = 0; i < totalPixels && !sawNonZero; i++) {
             int rgba = MemoryUtil.memGetInt(this.colourScratch + i * 4L);
             int ds   = MemoryUtil.memGetInt(this.depthScratch  + i * 4L);
             if (rgba != 0 || ds != 0) sawNonZero = true;
         }
-        if (sawNonZero) DIAG_BAKE_NONZERO_PIXEL_INVOCATIONS.incrementAndGet();
 
         // Pack into the legacy uvec2-per-pixel format the consumer expects:
         //   outPoint.x = RGBA packed

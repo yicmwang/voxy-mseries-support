@@ -686,7 +686,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (bridgeSolidTest) {
             clearR = 0.0f; clearG = 1.0f; clearB = 0.0f;
             if ((this.metalFrame % 600) == 1) {
-                Logger.info("[Metal-SOLID-TEST] VOXY_BRIDGE_SOLID_TEST active: bridge=green, LOD draws skipped");
             }
         }
         // Clear alpha 0.0: the alpha-discard composite drops undrawn bridge
@@ -721,11 +720,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             if (!this.depthFormatLogged && this.metallumDepth.mtlPixelFormat() != 0) {
                 this.depthFormatLogged = true;
                 final int fmt = this.metallumDepth.mtlPixelFormat();
-                me.cortex.voxy.common.Logger.info("[Metal-DEPTHFMT] MC depth attachment pixelFormat=" + fmt
-                        + (fmt == 252 ? " Depth32Float -- sampleable, the Hi-Z can read it directly"
-                        : fmt == 260 ? " Depth32Float_Stencil8 -- NOT reliably sampleable as texture2d<float>,"
-                                     + " so the Hi-Z needs a pure-D32F copy (metalDepthTex is exactly that)"
-                        : " unrecognised -- check MTLPixelFormat"));
             }
         }
         // Both attachments are only ASSIGNED inside the `if` above, so on a frame where the target is
@@ -768,9 +762,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             } catch (Throwable ignored) {
                 // diagnostic only
             }
-            me.cortex.voxy.common.Logger.info("[Metal-ATTACH] voxyColor=0x" + Long.toHexString(voxyColor)
-                    + "  mcMainTarget=0x" + Long.toHexString(mcColor)
-                    + (mcColor != 0 && voxyColor != mcColor ? "   <-- MISMATCH: LOD draws into a texture that is never composited" : ""));
         }
 
         if (this.useMetallumTarget) {
@@ -826,11 +817,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // whether the builder kept the second one at all, which nothing reported.
         if (!this.passShapeLogged) {
             this.passShapeLogged = true;
-            me.cortex.voxy.common.Logger.info("[Metal-PASSSHAPE] LOD pass colourAttachments="
-                    + pass.colorAttachments().size() + " metalDepthTex="
-                    + (this.metalDepthTex == null ? "null" : "id=" + this.metalDepthTex.id())
-                    + " metallumDepth=" + (this.metallumDepth == null ? "null"
-                            : "id=" + this.metallumDepth.id()));
         }
         // Submersion far-field skip: with the eye in water/lava the env fog
         // saturates at 24-96 blocks while every LOD fragment sits far beyond

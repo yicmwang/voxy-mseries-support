@@ -110,11 +110,6 @@ public class HierarchicalOcclusionTraverser {
 
     private final IGpuPipeline traversal;
 
-    /** Metal/readback diagnostics for the traversal descend request queue. */
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQUEST_DIRECT_READ_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_REQUEST_DOWNLOAD_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_LAST_REQUEST_COUNT = new java.util.concurrent.atomic.AtomicLong();
-    public static final java.util.concurrent.atomic.AtomicLong DIAG_TOTAL_REQUEST_COUNT = new java.util.concurrent.atomic.AtomicLong();
 
 
     public HierarchicalOcclusionTraverser(AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, RenderGenerationService meshGen) {
@@ -554,13 +549,11 @@ public class HierarchicalOcclusionTraverser {
             // readable after submit(), so read the queue directly and then
             // clear it for the next frame.
             this.backend.submit();
-            DIAG_REQUEST_DIRECT_READ_COUNT.incrementAndGet();
             this.forwardDownloadResult(metalBuffer.getContentsPtr(), this.requestBuffer.size());
             this.requestBuffer.zeroRange(0, 4);
             return;
         }
 
-        DIAG_REQUEST_DOWNLOAD_COUNT.incrementAndGet();
         DownloadStream.INSTANCE.download(this.requestBuffer, this::forwardDownloadResult);
         // M12 chunk 6 prep: cross-backend zero (was raw glBindBuffer +
         // nglBufferSubData(null) which is UB-on-strict-drivers and outright
@@ -570,8 +563,6 @@ public class HierarchicalOcclusionTraverser {
 
     private void forwardDownloadResult(long ptr, long size) {
         int count = MemoryUtil.memGetInt(ptr); ptr += 8;
-        DIAG_LAST_REQUEST_COUNT.set(count);
-        DIAG_TOTAL_REQUEST_COUNT.addAndGet(Math.max(count, 0));
         if (count < 0 || count > 50000) {
             Logger.error(new IllegalStateException("Count unexpected extreme value: " + count + " things may get weird"));
             return;
