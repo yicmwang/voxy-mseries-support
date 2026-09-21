@@ -160,17 +160,95 @@ class BuiltSectionMaskTest {
 
     @Test
     void theAnchorStepKeepsTheCameraInsideWithMargin() {
-        // The anchor must be a deterministic function of the camera and leave at least the render
-        // distance of margin on every side, or the square would not cover the region the cull is
-        // asked about and the far edge would read as "not covered" everywhere.
-        int rd = 8;
-        int side = rd * 2 + 1 + rd * 2;          // slack == rd, as ANCHOR_SLACK resolves to
-        int step = side - rd * 2;
-        for (int cam = -100; cam <= 100; cam++) {
-            int anchor = BuiltSectionMask.floorToStep(cam - rd, step);
-            assertTrue(anchor <= cam - rd, "anchor must be at or before cam-rd");
-            assertTrue(cam + rd < anchor + side, "and the far margin must fit inside the square");
+        // The anchor must be a deterministic function of the camera and leave enough margin that the
+        // rule's whole reach fits inside the square. Calls the production geometry rather than
+        // recomputing it: an earlier version of this test restated the formula, so it would have kept
+        // pinning the old square through any change to the real one.
+        for (int rd = 2; rd <= 32; rd++) {
+            final int side = BuiltSectionMask.squareSide(rd);
+            for (int cam = -100; cam <= 100; cam++) {
+                final int anchor = BuiltSectionMask.squareAnchor(cam, rd);
+                assertTrue(anchor <= cam, "anchor must be at or before the camera's column");
+                assertTrue(cam < anchor + side, "and the camera must be inside the square");
+            }
         }
+    }
+
+    /**
+     * The square is only a container for the bits -- {@code sodiumDrawsSection} is the filter -- so it
+     * must never reject a section the rule accepts. If it does, the cull under-claims and the LOD
+     * draws over vanilla, which is the exact bug this class exists to prevent. The property is
+     * one-directional: a square that is too BIG is still correct, one that is too SMALL is not. That
+     * asymmetry is what makes it legitimate to size the square to the rule's reach.
+     *
+     * <p>The reach is scanned, not assumed. For each camera sample every accepted section is found by
+     * sweeping one axis with the other at a delta whose inflated box straddles the camera, so its
+     * distance is 0 -- the most permissive case. Acceptance needs {@code dx^2 + dz^2 < L^2}, so if
+     * {@code (dx,dz)} is accepted then {@code (dx,0)} is too; the per-axis extremes found this way
+     * therefore bound every accepted section on both axes.
+     *
+     * <p>The camera's fractional position is swept because the rule measures from the camera's exact
+     * POSITION, not its section: the far edge of the reach is only accepted when the camera sits in
+     * the last block of its section.
+     */
+    @Test
+    void theSquareCoversEverySectionTheRuleAccepts() {
+        final int[] rdValues = {2, 3, 4, 5, 8, 16, 30, 31, 32};
+        for (final int rd : rdValues) {
+            final int side = BuiltSectionMask.squareSide(rd);
+            // Every residue of (camSec - rd) mod (2rd+1) decides a different anchor offset, so sweeping
+            // camSec over one full step period covers them all.
+            for (int camSecX = 0; camSecX <= 2 * rd + 2; camSecX++) {
+                for (int camSecZ = 0; camSecZ <= 2 * rd + 2; camSecZ++) {
+                    final int dnX = BuiltSectionMask.squareAnchor(camSecX, rd) - camSecX;
+                    final int dnZ = BuiltSectionMask.squareAnchor(camSecZ, rd) - camSecZ;
+                    for (int quarter = 0; quarter < 64; quarter++) {
+                        final double off = quarter * 0.25;          // camOffset within the section
+                        final double camX = camSecX * 16.0 + off;
+                        final double camZ = camSecZ * 16.0 + off;
+                        // The camera's own column, at its own section Y: both distances come out 0.
+                        final int camSecY = 0;
+                        int maxPosX = 0, maxNegX = 0, maxPosZ = 0, maxNegZ = 0;
+                        for (int d = 1; d <= rd + 2; d++) {
+                            if (BuiltSectionMask.sodiumDrawsSection(camX, 0.0, camZ,
+                                    camSecX + d, camSecY, camSecZ, rd)) maxPosX = d;
+                            if (BuiltSectionMask.sodiumDrawsSection(camX, 0.0, camZ,
+                                    camSecX - d, camSecY, camSecZ, rd)) maxNegX = d;
+                            if (BuiltSectionMask.sodiumDrawsSection(camX, 0.0, camZ,
+                                    camSecX, camSecY, camSecZ + d, rd)) maxPosZ = d;
+                            if (BuiltSectionMask.sodiumDrawsSection(camX, 0.0, camZ,
+                                    camSecX, camSecY, camSecZ - d, rd)) maxNegZ = d;
+                        }
+                        assertTrue(maxPosX - dnX < side,
+                                "rd=" + rd + " camSecX=" + camSecX + " off=" + off
+                                        + ": the rule accepts +" + maxPosX + " but the square's last index is "
+                                        + (side - 1) + " -- the cull would under-claim there");
+                        assertTrue(maxNegX - dnX >= 0,
+                                "rd=" + rd + " camSecX=" + camSecX + " off=" + off
+                                        + ": the rule accepts -" + maxNegX + " but the square starts at index 0");
+                        assertTrue(maxPosZ - dnZ < side, "rd=" + rd + " camSecZ=" + camSecZ);
+                        assertTrue(maxNegZ - dnZ >= 0, "rd=" + rd + " camSecZ=" + camSecZ);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The square is no larger than the rule's reach requires: {@code 2*rd + 3} columns per side. This
+     * is the size the coverage test above makes safe to choose, and it is the change -- the square used
+     * to carry a whole extra render distance of slack ({@code 4*rd + 1}), 1089 columns at RD 8 against
+     * 361, and only 241 of them were ever claimed in a measured run.
+     */
+    @Test
+    void theSquareIsNoLargerThanTheReachRequires() {
+        for (int rd = 2; rd <= 32; rd++) {
+            assertEquals(2 * rd + 3, BuiltSectionMask.squareSide(rd),
+                    "the reach is +/-(rd+1) columns, so 2rd+3 is exactly enough at rd=" + rd);
+        }
+        // Step 1: the anchor is the camera's column shifted by the reach, so the square is centred on
+        // the camera's column and every bit moves the moment the camera crosses a section boundary.
+        assertEquals(1, BuiltSectionMask.squareAnchorStep(8));
     }
 
     @Test

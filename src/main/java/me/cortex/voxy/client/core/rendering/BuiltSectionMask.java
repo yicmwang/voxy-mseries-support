@@ -150,22 +150,61 @@ public final class BuiltSectionMask {
     private static final int Y_BIAS = 32;
 
     /**
-     * How much slack the square carries beyond the render distance, in chunks, so it can be
-     * anchored to a WORLD grid instead of being re-centred on the camera every time the camera
-     * crosses a chunk.
+     * The square used to carry {@code rd} chunks of slack beyond the render distance on every side, so
+     * that its origin could be anchored to a coarse WORLD grid rather than re-centred on the camera.
+     * That slack is gone, and the reason for it went with it.
      *
-     * <p>This is the user's observation, and it is the right way round: with the square centred on
-     * the camera, its edge moves at exactly camera speed, so the culled region's boundary slides
-     * with the player and the LOD edge appears to be dragged along behind the terrain edge — worst
-     * when moving fast, which is exactly when the LOD's own streaming is furthest behind. Anchoring
-     * to a world grid makes the boundary static in world space; it steps once per ANCHOR_STEP chunks
-     * of travel instead of continuously, and a step is a one-frame discontinuity rather than a drag.
-     *
-     * <p>Set equal to the render distance, so the square is (4*rd+1) columns on a side — 33 at RD 8,
-     * which is 8.7 KB of column bitmasks. Any camera position leaves at least rd columns of margin
-     * on every side, and the anchor only moves when the camera crosses a multiple of the step.
+     * <p>The original argument was the user's and was right at the time: with the square centred on the
+     * camera its EDGE moved at exactly camera speed, so the culled region's boundary slid along with
+     * the player and the LOD edge appeared dragged along behind the terrain edge. But the anchor was
+     * never what fixed that -- §8.12 did, by taking the camera out of the fragment lookup entirely and
+     * computing the claim from the camera's POSITION. The anchor only decides where a bit lives, and
+     * the claim is recomputed every frame either way, so pinning the origin to the camera changes
+     * nothing about which sections are claimed. See {@link #squareSide} for the other thing the coarse
+     * step was hiding.
      */
-    private static final int ANCHOR_SLACK = -1;   // -1 = "same as the render distance", resolved in update()
+
+    /**
+     * Columns per side of the mask square. Extracted from {@link #update}, along with the anchor
+     * below, so the geometry can be tested by calling it: the two tests that matter are "the square
+     * covers everything {@link #sodiumDrawsSection} accepts" (a square that is too small drops a
+     * claim, so the cull under-claims and LOD draws over vanilla) and "the square is no larger than
+     * that reach needs". A test that recomputes the formula instead of calling it pins nothing.
+     *
+     * <p><b>The size is the rule's reach, not a margin.</b> A section's INFLATED box is 18 blocks, one
+     * bigger on every side, so the near edge of the section at chunk delta {@code D} sits at
+     * {@code 16D - 1} blocks; against a limit of {@code 16*rd} that still passes for {@code D = rd + 1}
+     * whenever the camera sits in the last block of its own section. The reach is therefore
+     * {@code +/- (rd + 1)} columns per axis, and {@code 2*(rd+1) + 1} columns is exactly enough to hold
+     * it centred on the camera's column.
+     *
+     * <p>This replaces {@code 4*rd + 1} columns -- a whole extra render distance of slack, 1089
+     * columns at RD 8 against 361, of which a measured run claimed only 241. That slack was not
+     * merely wasteful: it was load-bearing for a world-anchored origin, and it did not even cover the
+     * reach. {@code (camSec - rd) mod (2rd+1) == 2rd} put the anchor two steps back, and the far
+     * column {@code +rd+1} then landed one index past the end of the square -- an under-claim, i.e.
+     * LOD drawn over vanilla, in one column. {@code theSquareCoversEverySectionTheRuleAccepts} fails on
+     * that at rd=2, camSecZ=1.
+     */
+    static int squareSide(final int rd) {
+        return 2 * rd + 3;
+    }
+
+    /**
+     * The anchor is a deterministic function of the camera and only moves one step of this at a time.
+     *
+     * <p>It is 1, not the {@code 2*rd + 1} it used to be: the square is now exactly the reach, so
+     * there is no room for a coarser step and the anchor is pinned to the camera's column. A coarser
+     * step was only possible while the square carried the extra slack described above.
+     */
+    static int squareAnchorStep(final int rd) {
+        return 1;
+    }
+
+    /** The world-grid origin of the square that contains section column {@code camSec}. */
+    static int squareAnchor(final int camSec, final int rd) {
+        return floorToStep(camSec - (rd + 1), squareAnchorStep(rd));
+    }
 
     /** Largest multiple of {@code step} that is <= {@code v}, for negative {@code v} too. */
     static int floorToStep(final int v, final int step) {
@@ -197,10 +236,11 @@ public final class BuiltSectionMask {
     static boolean worthKeeping(final int dx, final int dy, final int dz, final int rd) {
         if (Math.abs(dy) > Y_BIAS) return false;                  // outside the mask's own bit span
         if (withinRenderDistance(dx, dy, dz, rd)) {
-            // Claimable now -- but the union claims at any horizontal distance, so bound it by what the
-            // square can address, or the set grows without limit along a journey.
-            final int addressable = 4 * rd;
-            return Math.abs(dx) <= addressable && Math.abs(dz) <= addressable;
+            // Claimable now. This branch used to bound the entry by "4*rd, or the set grows without
+            // limit along a journey", but that comparison was dead: withinRenderDistance is Chebyshev,
+            // so |dx| <= rd already and 4*rd could never decide it. The reach the square has to
+            // address is +/- (rd + 1) -- see squareSide -- which is inside this branch either way.
+            return true;
         }
         final long reach = (long) rd + PRUNE_MARGIN;
         return (long) dx * dx + (long) dz * dz <= reach * reach;  // or it comes back as the player moves
@@ -578,12 +618,7 @@ public final class BuiltSectionMask {
      */
     public void update(final Viewport<?> viewport, final RenderBackend backend) {
         final int rd = Math.max(2, net.minecraft.client.Minecraft.getInstance().options.renderDistance().get());
-        final int slack = ANCHOR_SLACK < 0 ? rd : ANCHOR_SLACK;
-        final int newSide = rd * 2 + 1 + slack * 2;
-        // The anchor step is what keeps the camera inside the square with at least rd of margin:
-        // the valid anchor positions are exactly one step apart, so the anchor is a deterministic
-        // function of the camera and does not depend on where it has been.
-        final int anchorStep = newSide - rd * 2;
+        final int newSide = squareSide(rd);
         final int camBlockX = net.minecraft.util.Mth.floor(viewport.cameraX);
         final int camBlockY = net.minecraft.util.Mth.floor(viewport.cameraY);
         final int camBlockZ = net.minecraft.util.Mth.floor(viewport.cameraZ);
@@ -594,8 +629,8 @@ public final class BuiltSectionMask {
         final int newCamZ = camBlockZ >> 4;
         // A WORLD-anchored origin, not the camera's column. The camera keeps its own section Y,
         // because the vertical window is a window and not an edge.
-        final int anchorX = floorToStep(newCamX - rd, anchorStep);
-        final int anchorZ = floorToStep(newCamZ - rd, anchorStep);
+        final int anchorX = squareAnchor(newCamX, rd);
+        final int anchorZ = squareAnchor(newCamZ, rd);
 
         // One 64-bit mask per COLUMN, bit (secY - camSecY + Y_BIAS). The column is the horizontal
         // index and the mask is the vertical extent -- which is the whole difference from the
