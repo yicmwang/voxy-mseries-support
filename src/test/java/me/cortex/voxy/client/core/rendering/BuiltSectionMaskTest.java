@@ -212,9 +212,9 @@ class BuiltSectionMaskTest {
         // `a < c*c`, so a section exactly at the radius is not drawn. An inclusive test here claims a
         // one-section ring around the whole circle that vanilla leaves empty -- at RD 8, ~50 columns of
         // culled LOD with nothing behind it. Same class of error as the slab term, in miniature.
-        assertFalse(BuiltSectionMask.withinRenderCylinder(8, 0, rd), "exactly at the radius is not drawn");
+        assertTrue(BuiltSectionMask.withinRenderCylinder(8, 0, rd), "at the radius IS drawn: Sodium's operands are an 18-block box, so chunk delta RD is inside");
         assertTrue(BuiltSectionMask.withinRenderCylinder(7, 0, rd), "one inside it is");
-        assertFalse(BuiltSectionMask.withinRenderCylinder(0, -8, rd));
+        assertTrue(BuiltSectionMask.withinRenderCylinder(0, -8, rd), "inclusive on every axis");
         assertFalse(BuiltSectionMask.withinRenderCylinder(9, 0, rd), "one past the radius on the axis");
         // The corners of the Chebyshev square are the case that matters: distance sqrt(8^2+8^2) = 11.3.
         assertFalse(BuiltSectionMask.withinRenderCylinder(8, 8, rd), "the square corner is outside the circle");
@@ -251,8 +251,8 @@ class BuiltSectionMaskTest {
         int rd = 8;
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 0, 0, rd));
         assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, inside the cap");
-        assertFalse(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
-                "at the cap: strict, as Sodium's is");
+        assertTrue(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
+                "at the cap, inclusive: Sodium compares the nearest point of an 18-block box");
         assertFalse(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd), "well below the cap");
         assertFalse(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
         assertFalse(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd),
@@ -290,8 +290,8 @@ class BuiltSectionMaskTest {
         // everything between was culled LOD with nothing behind it -- the void edge at the LOD/vanilla
         // intersection, with its boundary at the MESHED set's edge, which is why it drifted as chunks
         // loaded and unloaded.
-        assertFalse(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd),
-                "outside the radius: the slab term that used to claim this was the bug");
+        assertTrue(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd),
+                "at the radius, inclusive -- the strict form was one ring short (cull.MD 8.10)");
         assertFalse(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "sqrt(72) = 8.49 > 8");
         assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd));
     }

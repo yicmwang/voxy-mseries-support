@@ -242,7 +242,7 @@ public final class BuiltSectionMask {
         // at the radius is NOT drawn. Inclusive here would claim a one-section ring around the whole
         // circle that vanilla leaves empty, which at RD 8 is a ~50-column band of culled LOD with
         // nothing behind it -- small next to the slab term this replaced, but the same kind of error.
-        return (long) chunkDx * chunkDx + (long) chunkDz * chunkDz < (long) rd * rd;
+        return (long) chunkDx * chunkDx + (long) chunkDz * chunkDz <= (long) rd * rd;
     }
 
     /**
@@ -282,8 +282,9 @@ public final class BuiltSectionMask {
      * this capped cylinder of radius 8, so nine tenths of the built set is meshed and never drawn.
      * Refusing it is the whole job.
      */
-    static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
-        return withinRenderCylinder(dx, dz, rd) && Math.abs(dy) < rd;
+    /** Public so the under-claim audit in the render hook can call the real rule instead of a copy. */
+    public static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
+        return withinRenderCylinder(dx, dz, rd) && Math.abs(dy) <= rd;
     }
 
     /**
