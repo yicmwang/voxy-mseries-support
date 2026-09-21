@@ -336,6 +336,8 @@ public final class BuiltSectionMask {
     /** Opt-in: the grid is 17 lines per report, which is noise in a log nobody is reading for it. */
     private static final boolean VMASK_LOG = "1".equals(System.getenv("VOXY_VMASK"));
     private static long VMASK_FRAME = 0;
+    /** Its own counter: {@link #logPopulation} increments VMASK_FRAME, so sharing would be off by one. */
+    private static long VMASK3_FRAME = 0;
     private static int maxBuilt = 0;
     private long uploads = 0;
 
@@ -409,6 +411,14 @@ public final class BuiltSectionMask {
      */
     public static void logBuiltExtent(final int camSecX, final int camSecY, final int camSecZ, final int rd) {
         if (!VMASK_LOG) return;
+        // GATED, and the gate is not a nicety. Without it this walked the whole built set, formatted a
+        // histogram and wrote a log line on EVERY FRAME -- `logPopulation` above has always had its
+        // own gate, this did not. At 60 fps with the set at a few hundred entries that is tens of
+        // megabytes per run, and it filled the disk today: the client died with no Java exception and
+        // no JVM crash log, which is what ENOSPC looks like from inside the game, and the tooling
+        // could not write its own output files either. A separate counter rather than VMASK_FRAME,
+        // because logPopulation already increments that one and sharing it would make both off-by-one.
+        if ((VMASK3_FRAME++ % 600) != 1) return;
         final long[] snapshot;
         synchronized (BuiltSectionMask.class) {
             snapshot = BUILT.toLongArray();
@@ -447,7 +457,7 @@ public final class BuiltSectionMask {
         }
         me.cortex.voxy.common.Logger.info(String.format(
                 "[Metal-VMASK3 f=%d] built=%d  outsideChebyshev=%d  outsideRenderDistance3D=%d (%.1f%%)  maxChebyshev=%d (rd=%d)  secY %d..%d%s",
-                VMASK_FRAME, snapshot.length, beyondRd, outsideCylinder,
+                VMASK3_FRAME, snapshot.length, beyondRd, outsideCylinder,
                 100.0 * outsideCylinder / Math.max(1, snapshot.length), maxD, rd, minY, maxY, b));
     }
 
