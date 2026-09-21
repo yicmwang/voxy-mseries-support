@@ -149,19 +149,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * See optimisation.MD 8.8.
      */
     private static final boolean HIZ_BUILD = !"0".equals(System.getenv("VOXY_HIZ_BUILD"));
-    /**
-     * {@code VOXY_HIZ_PROBE=1} turns on the one-shot Hi-Z readbacks. SEPARATE from {@link #HIZ_BUILD},
-     * and deliberately so: the build is now on by default, and a readback that fires on the shipping
-     * path is a cost and an instrument on every run. The probes exist to check the pyramid, so they
-     * stay behind their own switch and cost nothing unless asked for.
-     */
-    private static final boolean HIZ_PROBES = "1".equals(System.getenv("VOXY_HIZ_PROBE"));
-    /**
-     * {@code VOXY_FLICKER_DIAG=1} turns on the [Metal-FLICKER] renderList-variance probe, which
-     * requires a read of GPU-written memory on EVERY frame. Off by default; see where it is used for
-     * why it cannot simply be sampled once per 600 frames like the other diagnostics.
-     */
-    private static final boolean FLICKER_DIAG = "1".equals(System.getenv("VOXY_FLICKER_DIAG"));
 
     // Hoisted out of the per-frame body. These were `System.getenv` calls on the render path — three
     // per render pass for ATTACH_TRACE alone — and an env lookup is a native call, not a field read.
@@ -172,83 +159,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private static final boolean ATTACH_TRACE = "1".equals(System.getenv("VOXY_ATTACH_TRACE"));
     private static final boolean LOD_DEBUG_CLEAR = "1".equals(System.getenv("VOXY_LOD_DEBUG_CLEAR"));
     private static final boolean LOD_FORCE_MAGENTA = "1".equals(System.getenv("VOXY_LOD_FORCE_MAGENTA"));
-    /** How many times the attachment probe fires: an early frame and a late one. See {@link #hizProbeFires}. */
-    private static final int HIZ_PROBE_FIRES = 2;
-    /** Readback of the LOD pass's depth-as-colour attachment; see [Metal-HIZPROBE]. */
-    private me.cortex.voxy.client.core.gpu.IGpuBuffer hizProbeBuffer;
-    /**
-     * How many times the attachment probe has fired, out of {@link #HIZ_PROBE_FIRES}.
-     *
-     * <p>It fires MORE THAN ONCE on purpose. The earlier one-shot version latched on the first frame
-     * past the gate and an all-zero read could not be told apart from a frame with nothing to draw --
-     * an ambiguity that already cost this investigation one wrong conclusion, when probes that had
-     * measured frame 1 (which draws nothing) were read as "depth readback cannot read depth". Two
-     * readings, one early and one deep into the run, separate "empty" from "not yet populated".
-     */
-    private int hizProbeFires;
-    /** Readback of the pyramid's mip 0 -- the thing the cull actually samples; see [Metal-HIZPROBE]. */
-    private me.cortex.voxy.client.core.gpu.IGpuBuffer hizPyramidProbeBuffer;
-    private boolean hizPyramidProbeDone;
-    /** Readback of the albedo attachment under FORCE_MAGENTA; see [Metal-MAGENTAPROBE]. */
-    private me.cortex.voxy.client.core.gpu.IGpuBuffer magentaProbeBuffer;
-    private boolean magentaProbeDone;
-
-    /**
-     * Counts MAGENTA texels in a readback of the LOD pass's ALBEDO attachment.
-     *
-     * <p>This exists to answer a question that has been assumed rather than measured: does the LOD pass
-     * rasterize anything at all? With {@code VOXY_LOD_FORCE_MAGENTA=1} the terrain shader writes solid
-     * magenta as its first statement, so every fragment that reaches the framebuffer and survives the
-     * depth test paints magenta. A zero count means no LOD fragment is reaching the attachment, which
-     * would explain an empty second attachment with one cause instead of two -- and would make every
-     * MRT measurement in optimisation.MD 9.6 a measurement of nothing.
-     *
-     * <p>Non-uniformity of the albedo attachment does NOT answer this: that attachment is MC's own
-     * colour target, so it is full of vanilla terrain whatever the LOD does.
-     */
-    private static void logMagentaProbe(final String what,
-                                        final me.cortex.voxy.client.core.gpu.IGpuBuffer buf,
-                                        final int n) {
-        if (!(buf instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) {
-            me.cortex.voxy.common.Logger.info("[Metal-MAGENTAPROBE] " + what + ": not a CPU-visible buffer");
-            return;
-        }
-        final long ptr = mb.getContentsPtr() + 16;
-        int magenta = 0, nonZero = 0;
-        for (int i = 0; i < n; i++) {
-            // An RGBA8 texel read as a little-endian int is R | G<<8 | B<<16 | A<<24.
-            final int v = MemoryUtil.memGetInt(ptr + (long) i * 4L);
-            if (v != 0) nonZero++;
-            final int r = v & 0xFF, g = (v >>> 8) & 0xFF, b = (v >>> 16) & 0xFF;
-            if (r > 200 && g < 60 && b > 200) magenta++;
-        }
-        me.cortex.voxy.common.Logger.info("[Metal-MAGENTAPROBE] " + what + ": " + n + " texels, magenta="
-                + magenta + " nonZero=" + nonZero
-                + (magenta == 0 ? "  <-- NO LOD FRAGMENT REACHED THIS ATTACHMENT"
-                        : "  <-- the LOD rasterizes (" + (100.0 * magenta / n) + "% magenta)"));
-    }
-
-    /** Report the distribution of a full-screen depth readback. Shared by the two [Metal-HIZPROBE] calls. */
-    private static void logDepthProbe(final String what,
-                                      final me.cortex.voxy.client.core.gpu.IGpuBuffer buf, final int n) {
-        if (!(buf instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) {
-            me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] " + what + ": not a CPU-visible buffer");
-            return;
-        }
-        final long ptr = mb.getContentsPtr() + 16;
-        int nonZero = 0;
-        float min = Float.MAX_VALUE, max = -Float.MAX_VALUE, sum = 0;
-        for (int i = 0; i < n; i++) {
-            final float v = MemoryUtil.memGetFloat(ptr + (long) i * 4L);
-            if (v != 0.0f) nonZero++;
-            if (v < min) min = v;
-            if (v > max) max = v;
-            sum += v;
-        }
-        me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] " + what + ": " + n + " texels, nonZero="
-                + nonZero + " min=" + min + " max=" + max + " mean=" + (sum / n)
-                + (nonZero == 0 ? "  <-- EMPTY" : "  <-- has data"));
-    }
     /** True for the current frame when rendering into Metallum's attachments rather than the bridge. */
     private boolean useMetallumTarget;
     private boolean loggedNoMetallumTarget;
@@ -305,15 +215,10 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      */
     private static final boolean TRANS_SUBMERSION_CLEAR = !"0".equals(System.getenv("VOXY_TRANS_SUBMERSION_CLEAR"));
 
-    // [Metal-FLICKER] diagnostic (2026-05-26): track whether the rendered
     // section set (renderList count) varies frame-to-frame. With a perfectly
     // static camera, a varying count proves NON-DETERMINISTIC section selection
     // (a GPU race in the HOT traversal) — vs a stable count meaning the flicker
     // is view-jitter at the frustum boundary. Logged every 600 frames.
-    private int rlCountLast = -1;
-    private int rlCountMin = Integer.MAX_VALUE;
-    private int rlCountMax = 0;
-    private int rlChanges = 0;
 
     public void runPipeline(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
         if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
@@ -483,18 +388,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (this.metalDepthTex != null) {
             this.metalDepthTex.free();
             this.metalDepthTex = null;
-        }
-        if (this.hizProbeBuffer != null) {
-            this.hizProbeBuffer.free();
-            this.hizProbeBuffer = null;
-        }
-        if (this.hizPyramidProbeBuffer != null) {
-            this.hizPyramidProbeBuffer.free();
-            this.hizPyramidProbeBuffer = null;
-        }
-        if (this.magentaProbeBuffer != null) {
-            this.magentaProbeBuffer.free();
-            this.magentaProbeBuffer = null;
         }
         super.free0();
     }
@@ -1044,85 +937,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         final long perfT3 = System.nanoTime();
         this.perfEncode += perfT3 - perfT2;  // encoding the LOD pass (CPU side)
 
-        // Two probes, encoded here so they ride this command buffer, and read after the drain below.
-        //
-        // 1. `metalDepthTex` -- the LOD pass's SECOND COLOUR attachment, which carries this fragment's
-        //    depth as colour (VOXY_LOD_DEPTH_COLOUR). It is the pyramid's source, so if it reads empty
-        //    the cull has nothing to test and no amount of pyramid wiring helps.
-        // 2. The pyramid's own mip 0 -- what the traversal actually samples. This is the probe that was
-        //    missing: every previous reading measured the SOURCE and then inferred the pyramid, and the
-        //    pyramid's build was attaching it as a depth attachment while its pipeline declares an R32F
-        //    COLOUR format, so the blit's output was dropped and nothing wrote it. A non-zero source
-        //    with a zero pyramid is exactly that signature; both non-zero is a working cull.
-        //
-        // The frame gates are the whole point: an earlier version latched on the FIRST LOD frame, which
-        // draws nothing (sections=0), so its all-zero result was the correct answer for an empty frame
-        // and was read as a finding anyway. Hence two firings rather than one -- see hizProbeFires.
-        boolean probeAttachment = false;
-        if (HIZ_PROBES && this.metalDepthTex != null && this.hizProbeFires < HIZ_PROBE_FIRES
-                && this.metalFrame > (this.hizProbeFires == 0 ? 300L : 600L)) {
-            try {
-                if (this.hizProbeBuffer == null) {
-                    this.hizProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
-                }
-                voxyMb.copyTextureToBuffer(this.metalDepthTex, this.hizProbeBuffer, fbw, fbh, 16);
-                this.hizProbeFires++;
-                probeAttachment = true;
-            } catch (Throwable t) {
-                this.hizProbeFires = HIZ_PROBE_FIRES;
-                me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] attachment readback unavailable: " + t);
-            }
-        }
-        // Only meaningful under VOXY_LOD_FORCE_MAGENTA, so it costs nothing on a normal run: the LOD
-        // shader paints solid magenta as its first statement, and this counts how much of the albedo
-        // attachment is magenta. Zero means no LOD fragment reached the framebuffer at all.
-        boolean probeMagenta = false;
-        if (!this.magentaProbeDone && LOD_FORCE_MAGENTA
-                && this.metalFrame > 900 && this.metallumColor != null) {
-            try {
-                this.magentaProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
-                voxyMb.copyTextureToBuffer(this.metallumColor, this.magentaProbeBuffer, fbw, fbh, 16);
-                probeMagenta = true;
-            } catch (Throwable t) {
-                me.cortex.voxy.common.Logger.info("[Metal-MAGENTAPROBE] readback unavailable: " + t);
-            }
-            this.magentaProbeDone = true;
-        }
-        boolean probePyramid = false;
-        if (HIZ_PROBES && !this.hizPyramidProbeDone && this.metalFrame > 900) {
-            // Mip 0's dimensions are the highest one bits of the viewport -- HiZBuffer rounds down to a
-            // square power of two, so fbw x fbh is NOT the level-0 size.
-            final int pw = Integer.highestOneBit(fbw);
-            final int ph = Integer.highestOneBit(fbh);
-            try {
-                final me.cortex.voxy.client.core.gpu.IGpuTexture pyramid = viewport.hiZBuffer.getHizTexture();
-                if (pyramid != null) {
-                    this.hizPyramidProbeBuffer = backend.createBuffer(16L + (long) pw * ph * 4L);
-                    voxyMb.copyTextureToBuffer(pyramid, this.hizPyramidProbeBuffer, pw, ph, 16);
-                    probePyramid = true;
-                }
-            } catch (Throwable t) {
-                me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] pyramid readback unavailable: " + t);
-            }
-            this.hizPyramidProbeDone = true;
-        }
+        // The Hi-Z readback probes that used to be encoded here are GONE: three GPU->CPU blits with
+        // their stall (the depth-as-colour attachment twice, the pyramid's mip 0 once, and the albedo
+        // attachment under FORCE_MAGENTA), each followed by a full-screen memGet loop on the CPU, to
+        // answer a question that is now answered -- the pyramid holds real depth and the cull culls.
+        // Recoverable from git if the cull ever misbehaves again; the commit that removed them says
+        // what each one measured.
         backend.submit();
         this.perfSubmit += System.nanoTime() - perfT3;
         this.perfReport();
         this.metalFrame++;
 
-        // Report once the drain has returned, so the buffers are CPU-visible and complete.
-        if (probeAttachment) {
-            logDepthProbe("attachment 1 (depth-as-colour), firing " + this.hizProbeFires + "/" + HIZ_PROBE_FIRES,
-                    this.hizProbeBuffer, fbw * fbh);
-        }
-        if (probePyramid) {
-            logDepthProbe("pyramid mip0 (what the cull samples)",
-                    this.hizPyramidProbeBuffer, Integer.highestOneBit(fbw) * Integer.highestOneBit(fbh));
-        }
-        if (probeMagenta) {
-            logMagentaProbe("albedo (attachment 0) under FORCE_MAGENTA", this.magentaProbeBuffer, fbw * fbh);
-        }
 
         // [Metal-VXPLANES] one-shot CPU read-back of the material g-buffer planes
         // (VOXY_VX_DUMP_PLANES=1). submit() waited, so the IOSurface holds the exact
@@ -1136,137 +961,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // export pass or the IOSurface→GL hop. Periodic so world-load
         // progression is visible.
 
-        // [Metal-FLICKER] per-frame: read the renderList section count (shared storage, valid after
         // submit) and track its variance over the window.
-        //
-        // GATED, not moved inside the % 600 log block, and the difference matters: this diagnostic's
-        // entire meaning is variance ACROSS frames — `changes` counts frames where the count moved.
-        // Sampling it once per 600 frames would make `changes` structurally near-zero and `min`/`max`
-        // the extremes of 600 samples rather than of the window, i.e. it would silently start
-        // measuring something else while still printing under the same label. So the per-frame
-        // readback stays per-frame, and the switch that pays for it goes off by default.
-        if (FLICKER_DIAG
-                && viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mvf
-                && mvf.getRenderList() instanceof me.cortex.voxy.client.core.metal.MetalBuffer rlb) {
-            int c = MemoryUtil.memGetInt(rlb.getContentsPtr());
-            if (this.rlCountLast != -1 && c != this.rlCountLast) this.rlChanges++;
-            this.rlCountLast = c;
-            if (c < this.rlCountMin) this.rlCountMin = c;
-            if (c > this.rlCountMax) this.rlCountMax = c;
-        }
-
-        // M13 diagnostic logging: every ~10s (600 frames at 60fps) report what
-        // the Metal render path is actually doing — section count loaded into
-        // the GPU geometry buffer, MB used, whether AsyncNodeManager has
-        // pending work, and the camera position the LOD ring follows. This
-        // is the equivalent of the F3 voxy panel for users who can't easily
-        // capture it. Drops to silent once the data lines up cleanly.
-        if (this.metalFrame % 600 == 1) {
-            int sectionCount = -1;
-            var geomData = this.sectionRenderer.getGeometryManager();
-            if (geomData instanceof me.cortex.voxy.client.core.rendering.section.geometry.BasicSectionGeometryData bgd) {
-                sectionCount = bgd.getSectionCount();
-            }
-            long usedMb = this.nodeManager.getUsedGeometryCapacity() / (1L << 20);
-            long capMb  = this.nodeManager.getGeometryCapacity()    / (1L << 20);
-            boolean hasWork = this.nodeManager.hasWork();
-            if (FLICKER_DIAG) {
-                Logger.info(String.format(
-                        "[Metal-FLICKER f=%d] renderList count over last ~600 frames: min=%d max=%d changes=%d  (STATIC camera: changes>0 / min!=max => NON-DETERMINISTIC section selection = GPU traversal race; stable => flicker is frustum-edge view-jitter)",
-                        this.metalFrame,
-                        this.rlCountMin == Integer.MAX_VALUE ? -1 : this.rlCountMin,
-                        this.rlCountMax, this.rlChanges));
-                this.rlCountMin = Integer.MAX_VALUE; this.rlCountMax = 0; this.rlChanges = 0;
-            }
-            Logger.info(String.format(
-                    "[Metal-DIAG f=%d] sections=%d  geom=%d/%d MB  nodeMgr.hasWork=%s  cam=(%.0f, %.0f, %.0f)",
-                    this.metalFrame, sectionCount, usedMb, capMb, hasWork,
-                    viewport.cameraX, viewport.cameraY, viewport.cameraZ));
-            Logger.info(String.format(
-                    "[Metal-CHAIN f=%d] ingestCall=%d  ingestNoLight=%d  ingestQ=%d  ingestProc=%d  rawIngest=%d  worldEvt=%d  topLvlAdd=%d  geomResult=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_CALL_COUNT.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_NO_LIGHTING_COUNT.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_PROCESS_COUNT.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_RAW_INGEST_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_WORLD_EVENT_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_TOP_LEVEL_ADD_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_GEOMETRY_RESULT_COUNT.get()));
-            Logger.info(String.format(
-                    "[Metal-LIGHT f=%d] noSkyLayer=%d  bothNull_chunk=%d  blockOnly=%d  (ingestQ=%d)",
-                    this.metalFrame,
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NO_SKY.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_NONE_CHUNK.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_LIGHT_HALF.get(),
-                    me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_ENQUEUE_COUNT.get()));
-            if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get() > 0) {
-                Logger.info(String.format(
-                        "[Metal-CMP   f=%d] samples=%d  agree=%.2f%%  MCbrighter=%.2f%%  voxyBrighter=%.2f%%",
-                        this.metalFrame,
-                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get(),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_AGREE.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get()),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_MC_BRIGHTER.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get()),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_VOXY_BRIGHTER.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_CMP_SAMPLES.get())));
-            }
-            if (me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID.get() > 0) {
-                Logger.info(String.format(
-                        "[Metal-VOXEL f=%d] solid=%d dark=%.2f%%  |  exposedSurface=%d dark=%.2f%%",
-                        this.metalFrame,
-                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID.get(),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID_DARK.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_SOLID.get()),
-                        me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP.get(),
-                        100.0 * me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP_DARK.get()
-                                / Math.max(1, me.cortex.voxy.common.world.service.VoxelIngestService.DIAG_VOXEL_TOP.get())));
-            }
-            Logger.info(String.format(
-                    "[Metal-TICK  f=%d] tickWithResults=%d  tickWithUploads=%d  lastResultSectionCount=%d  basicSectionCount=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_TICK_WITH_RESULTS_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_TICK_WITH_UPLOADS_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.DIAG_LAST_TICK_SECTION_COUNT.get(),
-                    sectionCount));
-            Logger.info(String.format(
-                    "[Metal-PGR   f=%d] notInMap=%d  reqSingle=%d  reqChild=%d  innerLeaf=%d  notWatched=%d  uploadEmpty=%d  emptyKids=%d  emptyNoKids=%d  uploadReal=%d  topNoDataDeferred=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_PGR_NOT_IN_MAP.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_PGR_REQUEST_SINGLE.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_PGR_REQUEST_CHILD.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_PGR_INNER_LEAF.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_PGR_NOT_WATCHED.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_UPLOAD_EMPTY.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_UPLOAD_EMPTY_WITH_CHILDREN.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_UPLOAD_EMPTY_NO_CHILDREN.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_UPLOAD_REAL.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.NodeManager.DIAG_TOP_LEVEL_NO_DATA_DEFER.get()));
-            Logger.info(String.format(
-                    "[Metal-BAKE  f=%d] invocations=%d  nonzeroPixels=%d  fullAlpha=%d  zeroAlpha=%d  dilateRuns=%d  dilateFilled=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.client.core.model.bakery.GlViewCapture.DIAG_BAKE_INVOCATIONS.get(),
-                    me.cortex.voxy.client.core.model.bakery.GlViewCapture.DIAG_BAKE_NONZERO_PIXEL_INVOCATIONS.get(),
-                    me.cortex.voxy.client.core.model.bakery.GlViewCapture.DIAG_BAKE_FULL_ALPHA_INVOCATIONS.get(),
-                    me.cortex.voxy.client.core.model.bakery.GlViewCapture.DIAG_BAKE_ZERO_ALPHA_INVOCATIONS.get(),
-                    me.cortex.voxy.client.core.model.bakery.GlViewCapture.DIAG_BAKE_DILATE_RUNS.get(),
-                    me.cortex.voxy.client.core.model.bakery.GlViewCapture.DIAG_BAKE_DILATE_PIXELS_FILLED.get()));
-            Logger.info(String.format(
-                    "[Metal-PIPE  f=%d] addEntry=%d  cpyBuf=%d  procModel=%d  atlasUpload=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.client.core.model.ModelFactory.DIAG_ADDENTRY_CALLS.get(),
-                    me.cortex.voxy.client.core.model.ModelFactory.DIAG_CPYBUF_CALLBACKS.get(),
-                    me.cortex.voxy.client.core.model.ModelFactory.DIAG_PROCESS_MODEL_RESULTS.get(),
-                    me.cortex.voxy.client.core.model.ModelFactory.DIAG_ATLAS_UPLOADS.get()));
-            Logger.info(String.format(
-                    "[Metal-REQ   f=%d] last=%d  total=%d  directRead=%d  downloadRead=%d",
-                    this.metalFrame,
-                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_LAST_REQUEST_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_TOTAL_REQUEST_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DIRECT_READ_COUNT.get(),
-                    me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser.DIAG_REQUEST_DOWNLOAD_COUNT.get()));
-        }
+        // The [Metal-FLICKER] renderList-variance probe that read GPU-written memory HERE, on every
+        // frame, is GONE -- and it is worth recording why it could not simply be sampled less often,
+        // because that constraint is not obvious: its entire meaning is variance ACROSS frames
+        // (`changes` counts frames where the count moved), so reading it once per 600 frames would
+        // have made `changes` structurally near-zero while still printing under the same label. The
+        // only honest options were to pay for it per frame or to remove it, and the flicker it
+        // diagnosed is fixed. Recoverable from git.
     }
 
 
