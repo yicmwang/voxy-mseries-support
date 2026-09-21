@@ -382,6 +382,22 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPipelineDescriptorSet
     }
 }
 
+// Per-attachment colour WRITE MASK. This was the one per-attachment pipeline property nothing in this
+// tree ever set, at any index: blending is configured for index 0 only, so attachment 1's descriptor
+// was never touched at all and its write mask sat at Metal's documented default of
+// MTLColorWriteMaskAll. That default is almost certainly what it says, which is why this setter is
+// expected to change nothing -- but it was the last unfalsifiable link in the chain that ends with
+// [[color(1)]] never appearing, and an unfalsifiable link is worth a JNI function.
+extern "C" JNIEXPORT void JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPipelineDescriptorSetColorAttachmentWriteMask(
+        JNIEnv *, jclass, jlong descHandle, jint index, jint mask) {
+    @autoreleasepool {
+        if (descHandle == 0) return;
+        MTLRenderPipelineDescriptor *desc = voxy_handle_cast<MTLRenderPipelineDescriptor *>(descHandle);
+        desc.colorAttachments[(NSUInteger)index].writeMask = (MTLColorWriteMask)mask;
+    }
+}
+
 // -------- Depth-stencil descriptor + state --------
 
 extern "C" JNIEXPORT jlong JNICALL

@@ -1045,6 +1045,19 @@ public class MetalRenderBackend implements RenderBackend {
                         mapBlendFactor(blend.srcColor), mapBlendFactor(blend.dstColor),
                         mapBlendFactor(blend.srcAlpha), mapBlendFactor(blend.dstAlpha));
             }
+            // Every declared colour attachment gets an EXPLICIT write mask. Metal documents the
+            // default as MTLColorWriteMaskAll and this sets exactly that, so it should be a no-op --
+            // but note the asymmetry it corrects: blending above is configured for index 0 ONLY, so
+            // before this loop NOTHING ever touched attachment 1's pipeline descriptor at all. That
+            // made "attachment 1's write mask is All" an assumption rather than something the pipeline
+            // states, and attachment 1 is precisely the output whose write never appears. Stating it
+            // costs one JNI call per pipeline and removes the last unfalsifiable link.
+            for (int i = 0; i < desc.colorAttachmentFormats.length; i++) {
+                if (desc.colorAttachmentFormats[i] != 0) {
+                    MetalNative.mtlRenderPipelineDescriptorSetColorAttachmentWriteMask(
+                            pipelineDesc, i, MetalNative.MTLColorWriteMaskAll);
+                }
+            }
 
             // Build + attach vertex descriptor if the pipeline declares vertex inputs.
             // Empty layout → no descriptor (gl_VertexIndex-driven shaders).

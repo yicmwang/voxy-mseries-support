@@ -401,6 +401,22 @@ public final class MetalNative {
             int rgbOp, int alphaOp,
             int srcRgb, int dstRgb, int srcAlpha, int dstAlpha);
 
+    /**
+     * Sets color attachment N's write mask on a render pipeline descriptor.
+     *
+     * <p>Added because the write mask was the one per-attachment pipeline property this tree never
+     * set, at any index — blending is configured for index 0 only, and every other attachment was
+     * left at Metal's documented default of {@code MTLColorWriteMaskAll}. Setting it explicitly is
+     * almost certainly a no-op; it exists so that "the default is not what we think it is" stops
+     * being the last unfalsifiable link in the MRT chain. See {@link MetalNative#MTLColorWriteMaskAll}.
+     */
+    public static native void mtlRenderPipelineDescriptorSetColorAttachmentWriteMask(
+            long descriptor, int index, int mask);
+
+    /** {@code MTLColorWriteMaskAll} — red | green | blue | alpha. */
+    public static final int MTLColorWriteMaskAll = 0xF;
+    public static final int MTLColorWriteMaskNone = 0x0;
+
     public static native long mtlNewDepthStencilDescriptor();
     public static native void mtlDepthStencilDescriptorSetCompareFunction(long descriptor, int compareFunction);
     public static native void mtlDepthStencilDescriptorSetDepthWriteEnabled(long descriptor, boolean enabled);

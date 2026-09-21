@@ -559,7 +559,21 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //    sections. That attachment bug is fixed (see HiZBuffer's class doc), and VOXY_HIZ_BUILD=1
         //    is what turns the corrected build on so it can be A/B'd against the zero-filled default.
         if (HIZ_BUILD && this.metalDepthTex != null && this.metalDepthTex.id() != -1) {
-            viewport.hiZBuffer.buildMipChain(this.metalDepthTex, viewport.width, viewport.height);
+            // VOXY_HIZ_SOURCE_COLOUR=1 -- EXPERIMENTAL BISECTION, not a feature. Build the pyramid from
+            // the LOD pass's ALBEDO attachment (metallumColor) instead of the depth-as-colour one.
+            //
+            // It exists because the two defects in this cull cannot be told apart by the pyramid probe
+            // alone: metalDepthTex (attachment 1) reads empty, so the pyramid is zero whether or not its
+            // build is correct, and "the build works" is unfalsifiable. metallumColor is a colour
+            // attachment this tree has already read back at 100% nonzero, so pointing the build at it
+            // separates the two cleanly:
+            //   pyramid non-zero with this switch -> the colour-attachment BUILD works (Defect A fixed),
+            //                                        and the remaining fault is the source (Defect B);
+            //   pyramid still zero with a source that has data -> the build is still broken.
+            final boolean sourceIsColour = "1".equals(System.getenv("VOXY_HIZ_SOURCE_COLOUR"));
+            final me.cortex.voxy.client.core.gpu.IGpuTexture hizSource =
+                    sourceIsColour && this.metallumColor != null ? this.metallumColor : this.metalDepthTex;
+            viewport.hiZBuffer.buildMipChain(hizSource, viewport.width, viewport.height);
             if (!this.hizBuildLogged) {
                 this.hizBuildLogged = true;
                 me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] built pyramid from the LOD pass's"
@@ -970,7 +984,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // and was read as a finding anyway. Hence two firings rather than one -- see hizProbeFires.
         boolean probeAttachment = false;
         if (HIZ_BUILD && this.metalDepthTex != null && this.hizProbeFires < HIZ_PROBE_FIRES
-                && this.metalFrame > (this.hizProbeFires == 0 ? 300L : 2000L)) {
+                && this.metalFrame > (this.hizProbeFires == 0 ? 300L : 600L)) {
             try {
                 if (this.hizProbeBuffer == null) {
                     this.hizProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
@@ -984,7 +998,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             }
         }
         boolean probePyramid = false;
-        if (HIZ_BUILD && !this.hizPyramidProbeDone && this.metalFrame > 2000) {
+        if (HIZ_BUILD && !this.hizPyramidProbeDone && this.metalFrame > 900) {
             // Mip 0's dimensions are the highest one bits of the viewport -- HiZBuffer rounds down to a
             // square power of two, so fbw x fbh is NOT the level-0 size.
             final int pw = Integer.highestOneBit(fbw);
