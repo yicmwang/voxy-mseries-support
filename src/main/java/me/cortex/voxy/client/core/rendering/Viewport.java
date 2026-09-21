@@ -12,19 +12,10 @@ import org.joml.*;
 import java.lang.reflect.Field;
 
 public abstract class Viewport <A extends Viewport<A>> {
-    //public final HiZBuffer2 hiZBuffer = new HiZBuffer2();
-    // The HiZ stencil aspect is never used (depth-only FBO attach + depth
-    // sampling). On Metal D24S8 maps to the PACKED Depth32Float_Stencil8,
-    // which Metal requires on BOTH depth and stencil attachments — the
-    // zero-fill/mip passes attach depth only, so use a pure depth format
-    // there. GL keeps the upstream D24S8.
-    // R32F on Metal, depth on GL. A depth-format texture sampled through `sampler2D` returns zeros on
-    // Metal -- see HiZBuffer's constructor -- so the pyramid has to be a colour texture there for the
-    // build blit and the traversal to read it at all.
-    public final HiZBuffer hiZBuffer = new HiZBuffer(
-            RenderBackendFactory.get().getType() != BackendType.OPENGL
-                    ? org.lwjgl.opengl.GL30C.GL_R32F
-                    : org.lwjgl.opengl.GL30C.GL_DEPTH24_STENCIL8);
+    // R32F, and the format is no longer a choice: the pyramid is a COLOUR target because a
+    // depth-format texture sampled through the `sampler2D` the traversal declares becomes MSL
+    // `texture2d<float>`, from which Metal silently reads zeros. See HiZBuffer's class doc.
+    public final HiZBuffer hiZBuffer = new HiZBuffer();
     public final DepthFramebuffer depthBoundingBuffer = new DepthFramebuffer();
     /**
      * Metal only (round 20): {@link #depthBoundingBuffer}'s depth blitted to

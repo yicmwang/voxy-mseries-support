@@ -141,26 +141,11 @@ public class HierarchicalOcclusionTraverser {
         m.put("MAX_ITERATIONS", Integer.toString(MAX_ITERATIONS));
         m.put("LOCAL_SIZE_BITS", Integer.toString(LOCAL_WORK_SIZE_BITS));
         m.put("MAX_REQUEST_QUEUE_SIZE", Integer.toString(MAX_REQUEST_QUEUE_SIZE));
-        // The occlusion test is now ENABLED on Metal, and this is deliberately landing as its own step
-        // with no other change so that it can be checked for being a no-op.
-        //
-        // It should be one. The pyramid is zero-filled by ensureAllocated on (re)allocation -- which is
-        // the fix for the original failure, where a Metal Shared texture is NOT zeroed and the test
-        // therefore culled subtrees on noise (sections dropping out at random, distant nodes flickering
-        // in as black masses). With real zeros every sample is 0.0, which is <= the guard, so
-        // isCulledByHiz() returns false for every box and nothing is culled. Identical behaviour to
-        // VOXY_NO_HIZ, by a different route.
-        //
-        // So if the frame time or the draw count moves here, the guard reasoning is wrong -- not the
-        // build, which does not exist yet. That is the whole reason to land this alone.
-        if (me.cortex.voxy.client.core.gpu.RenderBackendFactory.get().getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-            // The whole-frame Metal path is reverse-Z (near 1, far 0), so the pyramid it reads is
-            // min-reduced and the box test is flipped -- see screenspace.glsl and hiz/blit.fsh. Both
-            // branches compile only under this define, so it has to be injected wherever the traversal
-            // is built, not only once the pyramid starts being populated.
-            m.put("VOXY_HIZ_REVERSE_Z", "");
-        }
+        // The occlusion test is enabled, and screenspace.glsl is written for ONE depth convention:
+        // this frame's, which is reverse-Z (near 1, far 0). The pyramid is therefore min-reduced
+        // (hiz/blit.fsh) and the box test is `tileFarthest > boxNearest`. There is no define to inject
+        // for that any more -- the other convention's branches are deleted, because this project has
+        // one backend and it is not going to grow a second one.
         m.put("HIZ_BINDING", Integer.toString(HIZ_BINDING));
         m.put("SCENE_UNIFORM_BINDING", Integer.toString(SCENE_UNIFORM_BINDING));
         m.put("REQUEST_QUEUE_BINDING", Integer.toString(REQUEST_QUEUE_BINDING));

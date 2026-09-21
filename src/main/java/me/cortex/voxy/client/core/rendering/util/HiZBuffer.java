@@ -2,7 +2,6 @@ package me.cortex.voxy.client.core.rendering.util;
 
 import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc;
-import me.cortex.voxy.client.core.gpu.IGpuFramebuffer;
 import me.cortex.voxy.client.core.gpu.IGpuPipeline;
 import me.cortex.voxy.client.core.gpu.IGpuSampler;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
@@ -14,38 +13,45 @@ import me.cortex.voxy.client.core.gpu.RenderPassDesc;
 import me.cortex.voxy.client.core.gpu.SamplerDesc;
 import me.cortex.voxy.client.core.gpu.VertexLayout;
 
-import static org.lwjgl.opengl.GL11C.GL_DEPTH_COMPONENT;
-import static org.lwjgl.opengl.GL11C.GL_TEXTURE_2D;
-import static org.lwjgl.opengl.GL30C.GL_DEPTH24_STENCIL8;
-import static org.lwjgl.opengl.GL30C.GL_DEPTH_ATTACHMENT;
-import static org.lwjgl.opengl.GL12C.GL_TEXTURE_BASE_LEVEL;
-import static org.lwjgl.opengl.GL12C.GL_TEXTURE_MAX_LEVEL;
-import static me.cortex.voxy.client.core.gl.GLCompat.textureParameteri;
+import static org.lwjgl.opengl.GL30C.GL_R32F;
 
 /**
  * Hierarchical-Z buffer — power-of-two depth pyramid sampled by the
  * traversal compute pass for occlusion culling.
  *
  * Build strategy (one per frame): for each mip level i in [0, levels), draw
- * a fullscreen quad with depth-test=ALWAYS into the depth attachment at
- * level i, sampling from the source depth at level (i-1). For i=0 the
- * source is the externally supplied depth texture (vanilla MC's depth
- * target); for i&gt;0 the source is this texture's own previous mip,
- * selected via GL_TEXTURE_BASE_LEVEL/MAX_LEVEL state mutation.
+ * a fullscreen quad with depth-test=DISABLED into the COLOUR attachment at
+ * level i, sampling from level (i-1). For i=0 the source is the LOD pass's
+ * depth-as-colour attachment; for i&gt;0 the source is this texture's own
+ * previous mip, wrapped in a single-mip
+ * {@code IGpuTexture.createView(level, 1)} so that {@code textureGather} in
+ * {@code hiz/blit.fsh} sees it as LOD 0.
  *
- * M9 status: blit graphics pipeline now flows through the
- * {@link RenderBackend} encoder abstraction — per-mip render pass, draw
- * 4 vertices as TRIANGLE_STRIP (was TRIANGLE_FAN; blit.vsh re-ordered
- * to match). The remaining raw GL calls are
- * {@code glBindTextureUnit} for the source texture (external GL id —
- * no IGpuTexture available; caller side is not yet migrated) and the
- * BASE/MAX_LEVEL mutation that selects the source mip for sampling.
- * Both are sampling-state side effects that GL handles globally; on
- * Metal/Vulkan they will be replaced by per-mip
- * {@code IGpuTexture.createView(level, count)} (the M9 follow-up
- * tracked in M-SERIES-PORT-STATE).
+ * <h2>Why this is R32F colour and not a depth texture</h2>
+ * A depth-format texture sampled through the {@code sampler2D} that both this
+ * blit and the traversal declare becomes MSL {@code texture2d&lt;float&gt;}, and
+ * Metal silently reads ZEROS from a depth texture read that way — it needs
+ * {@code depth2d}, which SPIRV-Cross only emits for a shadow sampler. This
+ * tree measured that once already and wrote it down ({@code quads.frag}'s
+ * depth-bound note). So the pyramid is an R32F COLOUR texture, the blit writes
+ * {@code colour} instead of {@code gl_FragDepth}, and the frame's reverse-Z
+ * convention makes the tile reduction a {@code min} (near is 1, far is 0, and
+ * the pyramid keeps the tile's FARTHEST occluder — the smallest value).
+ *
+ * <h2>The attachment must be a colour attachment, and that was the bug</h2>
+ * {@link #zeroFillPyramid} and {@link #buildMipChain(IGpuTexture, int, int)}
+ * used to attach this texture with {@code depthAttachment(...)}. The pipeline
+ * declares depth DISABLED and an R32F COLOUR format, so the blit's
+ * {@code colour} output had no target and was dropped — silently, like every
+ * other member of this failure class in this codebase. Nothing wrote the
+ * pyramid at any point, which made the cull a no-op no matter what fed it.
+ * A colour-only pass with a pipeline that declares a depth format is fine:
+ * {@code MetalBudgetBufferRenderer} does exactly that and bakes the atlas.
  */
 public class HiZBuffer {
+
+    /** R32F is the only pyramid format — see the class doc for why it is not a depth format. */
+    private static final int FORMAT = GL_R32F;
 
     private final RenderBackend backend = RenderBackendFactory.get();
     private final IGpuPipeline blitPipeline;
@@ -56,59 +62,25 @@ public class HiZBuffer {
             .label("hizBlitSampler")
             .build());
 
-    private final IGpuFramebuffer fb = RenderBackendFactory.get().createFramebuffer().name("HiZ");
-    private final int type;
     private IGpuTexture texture;
-    /** True when the pyramid is R32F colour rather than depth; see the constructor. */
-    private final boolean colourPyramid;
     private int levels;
     private int width;
     private int height;
 
     public HiZBuffer() {
-        this(GL_DEPTH24_STENCIL8);
-    }
-
-    public HiZBuffer(int type) {
-        this.type = type;
-        // Depth-only pass: ALWAYS pass + write depth, no blend, no cull,
-        // empty vertex layout (gl_VertexID-driven fullscreen quad).
-        // The whole-frame Metal path builds a COLOUR pyramid, not a depth one. A depth-format texture
-        // sampled through the `sampler2D` both this blit and the traversal declare becomes MSL
-        // `texture2d<float>`, and Metal silently reads ZEROS from a depth texture read that way -- it
-        // needs `depth2d`. This tree already measured that once and wrote it down (quads.frag's
-        // depth-bound note: "the texture2d<float> declaration SPIRV-Cross emits for sampler2D silently
-        // reads ZEROS on Metal ... same bug class as the round-18 Iris depth export"). It is why the
-        // pyramid came out all zeros no matter how it was fed.
-        //
-        // So on Metal the pyramid is R32F and the blit writes `colour` instead of gl_FragDepth, which is
-        // what the shader's OUTPUT_COLOUR branch is for. GL keeps the depth pyramid it has always had.
-        this.colourPyramid = this.backend.getType()
-                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
+        // Depth-test DISABLED: the blit renders a fullscreen quad and writes
+        // every texel; there is no depth attachment to test against.
         PipelineState state = new PipelineState(
-                this.colourPyramid
-                        ? PipelineState.DepthState.DISABLED
-                        : new PipelineState.DepthState(true, true, PipelineState.CompareOp.ALWAYS),
+                PipelineState.DepthState.DISABLED,
                 PipelineState.BlendState.OPAQUE,
                 PipelineState.RasterState.NO_CULL);
-        // The frame's depth convention decides the whole pyramid: GL is standard-Z (near 0, far 1) and
-        // reduces with a max; the whole-frame Metal path is reverse-Z (near 1, far 0) and must reduce
-        // with a min. Getting this wrong does not fail to compile -- it produces a pyramid whose
-        // "farthest occluder" is actually the nearest one, which culls geometry that is in front of
-        // everything. Injected rather than branched at runtime so the two variants are separately
-        // compiled and separately testable.
-        java.util.Map<String, String> blitDefines = new java.util.LinkedHashMap<>();
-        if (this.colourPyramid) {
-            blitDefines.put("VOXY_HIZ_REVERSE_Z", "");
-            blitDefines.put("OUTPUT_COLOUR", "");
-        }
         this.blitPipeline = this.backend.createGraphicsPipeline(new GraphicsPipelineDesc(
                 ShaderLoader.parse("voxy:hiz/blit.vsh"),
                 ShaderLoader.parse("voxy:hiz/blit.fsh"),
-                blitDefines,
+                java.util.Map.of(),
                 null, null,                  // no MSL
                 null, null,                  // no SPIRV
-                this.colourPyramid ? this.type : 0,   // R32F on Metal; GL stays depth-only
+                FORMAT,
                 VertexLayout.EMPTY,
                 state,
                 "HiZBuffer.blit"));
@@ -122,23 +94,19 @@ public class HiZBuffer {
         freeSelfViews();
 
         this.texture = this.backend.createTexture()
-                .store(this.type, this.levels, width, height)
+                .store(FORMAT, this.levels, width, height)
                 .name("HiZ");
 
         this.width = width;
         this.height = height;
-
-        this.fb.bind(GL_DEPTH_ATTACHMENT, this.texture, 0).verify();
     }
 
     /**
      * Ensure the HiZ texture is allocated for the given viewport size, but
      * do not populate it. Lets callers that can't (yet) build the mip chain
      * still bind the HiZ slot in HOT without dereferencing a null texture.
-     * Used by the Metal path until cross-context depth-source binding lands;
-     * a zero-initialized HiZ texture trivially passes the traversal's
-     * "is occluded?" test for every section (no early reject — slower than
-     * real occlusion, but functionally correct).
+     * A zero-filled pyramid makes the traversal's test answer "not occluded"
+     * for every section — slower than real occlusion, but correct.
      */
     public void ensureAllocated(int width, int height) {
         int targetW = Integer.highestOneBit(width);
@@ -149,27 +117,24 @@ public class HiZBuffer {
                 this.texture = null;
             }
             this.alloc(targetW, targetH);
-            // Metal: a fresh MTLTexture's contents are UNDEFINED, and HOT's
-            // unbuilt-pyramid guard (screenspace.glsl "pointSample <= 0.0")
-            // depends on reading 0.0 — garbage > 0 would nondeterministically
-            // cull sections. Clear every mip once per allocation. GL skips
-            // this: it rebuilds the full pyramid each frame before sampling.
-            if (this.backend.getType() != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
-                this.zeroFillPyramid();
-            }
+            // A fresh MTLTexture's contents are UNDEFINED, and the traversal
+            // treats "pyramid says 0.0" as "nothing occludes here". Garbage
+            // would nondeterministically cull sections, so clear every mip
+            // once per allocation.
+            this.zeroFillPyramid();
         }
     }
 
-    /** Clears every mip of the pyramid to depth 0.0 via load-action-only passes. */
+    /** Clears every mip of the pyramid to 0.0 via load-action-only passes. */
     private void zeroFillPyramid() {
         int cw = this.width;
         int ch = this.height;
         for (int i = 0; i < this.levels; i++) {
             try (RenderEncoder ignored = this.backend.beginRenderPass(
                     RenderPassDesc.builder(cw, ch)
-                            .depthAttachment(this.texture, i,
+                            .addColorAttachment(this.texture, i,
                                     RenderPassDesc.LoadAction.CLEAR,
-                                    RenderPassDesc.StoreAction.STORE, 0.0f)
+                                    RenderPassDesc.StoreAction.STORE, 0f, 0f, 0f, 0f)
                             .build())) {
                 // no draws — the CLEAR load action does the fill
             }
@@ -178,77 +143,17 @@ public class HiZBuffer {
         }
     }
 
-    public void buildMipChain(int srcDepthTex, int width, int height) {
-        this.ensureAllocated(width, height);
-
-        // Pre-bind the external source texture to unit 0 (sampler slot 0). The
-        // encoder won't call setTexture(0, ...) inside the pass, so this binding
-        // persists across the draw. GL only — Metal/Vulkan replacement is the
-        // per-mip createView API tracked in M-SERIES-PORT-STATE.
-        org.lwjgl.opengl.GL45C.glBindTextureUnit(0, srcDepthTex);
-
-        int cw = this.width;
-        int ch = this.height;
-        for (int i = 0; i < this.levels; i++) {
-            try (RenderEncoder encoder = this.backend.beginRenderPass(
-                    this.colourPyramid
-                            ? RenderPassDesc.builder(cw, ch)
-                                    .addColorAttachment(this.texture, i,
-                                            RenderPassDesc.LoadAction.DONT_CARE,
-                                            RenderPassDesc.StoreAction.STORE, 0f, 0f, 0f, 0f)
-                                    .build()
-                            : RenderPassDesc.builder(cw, ch)
-                                    .depthAttachment(this.texture, i,
-                                            RenderPassDesc.LoadAction.DONT_CARE,
-                                            RenderPassDesc.StoreAction.STORE, 1.0f)
-                                    .build())) {
-                encoder.setPipeline(this.blitPipeline);
-                encoder.setSampler(0, this.sampler);
-                encoder.setViewport(0, 0, cw, ch, 0, 1);
-                encoder.draw(RenderEncoder.PRIMITIVE_TRIANGLE_STRIP, 0, 4, 1, 0);
-            }
-
-            cw = Math.max(cw / 2, 1);
-            ch = Math.max(ch / 2, 1);
-
-            // After drawing mip i, restrict the texture's sampling range so the
-            // next pass reads from level i. GL_TEXTURE_BASE_LEVEL affects
-            // sampling only, not FBO attachment (which uses an explicit level),
-            // so this is safe even though we'll attach level i+1 next.
-            textureParameteri(this.texture.id(), GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, i);
-            textureParameteri(this.texture.id(), GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, i);
-            if (i == 0) {
-                // Switch from external source to self.
-                org.lwjgl.opengl.GL45C.glBindTextureUnit(0, this.texture.id());
-            }
-        }
-
-        // Restore the full sampling range so traversal samples the whole pyramid.
-        textureParameteri(this.texture.id(), GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-        textureParameteri(this.texture.id(), GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
-
-        // The encoder's close() rebinds FBO 0 and ends the pass.
-        // Restore the viewport for the caller's outer pass.
-        org.lwjgl.opengl.GL11C.glViewport(0, 0, width, height);
-    }
-
     /**
-     * M13 chunk 3: cross-backend mip-chain build that takes the source depth
-     * as an {@link IGpuTexture} and binds it via the encoder's
-     * {@link RenderEncoder#setTexture}, avoiding the raw GL
-     * {@code glBindTextureUnit} from the int-handle overload. Used on Metal,
-     * where the source depth is a Shared-storage mirror of MC's depth (see
-     * {@link DepthMirror}). The pyramid is the same {@link #texture} the GL
-     * path writes to, so HOT samples a populated pyramid either way.
+     * Cross-backend mip-chain build that takes the source depth-as-colour as
+     * an {@link IGpuTexture} and binds it via the encoder's
+     * {@link RenderEncoder#setTexture}. The pyramid is the same {@link #texture}
+     * the traversal samples, so HOT reads a populated pyramid.
      *
-     * <p>Per-mip view dance: textureGather in {@code hiz/blit.fsh} samples
-     * at LOD 0, so for mips 1+ we wrap the pyramid texture in a single-mip
-     * view targeting level i-1 before binding. Views are cached by level so
-     * we don't burn a JNI allocation per frame. The external source (mip 0
-     * input) is bound as-is.
-     *
-     * <p>The blit pipeline + sampler + RenderPassDesc shape are unchanged —
-     * only the source-bind path differs.
+     * <p>Per-mip view dance: {@code textureGather} in {@code hiz/blit.fsh}
+     * samples at LOD 0, so for mips 1+ we wrap the pyramid texture in a
+     * single-mip view targeting level i-1 before binding. Views are cached by
+     * level so we don't burn a JNI allocation per frame. The external source
+     * (mip 0 input) is bound as-is.
      */
     public void buildMipChain(IGpuTexture srcDepth, int width, int height) {
         this.ensureAllocated(width, height);
@@ -266,9 +171,9 @@ public class HiZBuffer {
         for (int i = 0; i < this.levels; i++) {
             try (RenderEncoder encoder = this.backend.beginRenderPass(
                     RenderPassDesc.builder(cw, ch)
-                            .depthAttachment(this.texture, i,
+                            .addColorAttachment(this.texture, i,
                                     RenderPassDesc.LoadAction.DONT_CARE,
-                                    RenderPassDesc.StoreAction.STORE, 1.0f)
+                                    RenderPassDesc.StoreAction.STORE, 0f, 0f, 0f, 0f)
                             .build())) {
                 encoder.setPipeline(this.blitPipeline);
                 encoder.setTexture(0, currentSource);
@@ -294,7 +199,7 @@ public class HiZBuffer {
 
     /**
      * Cached single-mip views of the HiZ pyramid texture, indexed by parent
-     * mip level. Populated lazily by the Metal mip-chain build; held until
+     * mip level. Populated lazily by the mip-chain build; held until
      * {@link #free} or a re-alloc clears them. Sized to {@code levels} but
      * only entries 0..levels-2 are ever populated (the last mip needs no
      * self-source view because the build stops).
@@ -314,7 +219,6 @@ public class HiZBuffer {
 
     public void free() {
         freeSelfViews();
-        this.fb.free();
         if (this.texture != null) {
             this.texture.free();
             this.texture = null;
@@ -327,7 +231,7 @@ public class HiZBuffer {
         return this.texture.id();
     }
 
-    /** Backend-agnostic accessor used by callers migrated onto the encoder API. */
+    /** Backend-agnostic accessor used by the traversal to bind the pyramid. */
     public IGpuTexture getHizTexture() {
         return this.texture;
     }
@@ -335,11 +239,4 @@ public class HiZBuffer {
     public int getPackedLevels() {
         return (this.width << 16) | this.height;
     }
-
-    // Suppressed-but-still-referenced field aliases so callers that reach in
-    // continue to compile after the API tightened. GL_DEPTH_COMPONENT is the
-    // sampler swizzle target depth textures still default to; left as a
-    // documented constant.
-    @SuppressWarnings("unused")
-    private static final int LEGACY_DEPTH_FORMAT_HINT = GL_DEPTH_COMPONENT;
 }

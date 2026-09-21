@@ -145,9 +145,23 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * sampleable Voxy-owned texture -- can be added and A/B'd with this one switch.
      */
     private static final boolean HIZ_BUILD = "1".equals(System.getenv("VOXY_HIZ_BUILD"));
-    /** One-shot readback of the Voxy-owned depth copy; see [Metal-HIZPROBE]. */
+    /** How many times the attachment probe fires: an early frame and a late one. See {@link #hizProbeFires}. */
+    private static final int HIZ_PROBE_FIRES = 2;
+    /** Readback of the LOD pass's depth-as-colour attachment; see [Metal-HIZPROBE]. */
     private me.cortex.voxy.client.core.gpu.IGpuBuffer hizProbeBuffer;
-    private boolean hizProbeDone;
+    /**
+     * How many times the attachment probe has fired, out of {@link #HIZ_PROBE_FIRES}.
+     *
+     * <p>It fires MORE THAN ONCE on purpose. The earlier one-shot version latched on the first frame
+     * past the gate and an all-zero read could not be told apart from a frame with nothing to draw --
+     * an ambiguity that already cost this investigation one wrong conclusion, when probes that had
+     * measured frame 1 (which draws nothing) were read as "depth readback cannot read depth". Two
+     * readings, one early and one deep into the run, separate "empty" from "not yet populated".
+     */
+    private int hizProbeFires;
+    /** Readback of the pyramid's mip 0 -- the thing the cull actually samples; see [Metal-HIZPROBE]. */
+    private me.cortex.voxy.client.core.gpu.IGpuBuffer hizPyramidProbeBuffer;
+    private boolean hizPyramidProbeDone;
 
     /** Report the distribution of a full-screen depth readback. Shared by the two [Metal-HIZPROBE] calls. */
     private static void logDepthProbe(final String what,
@@ -357,8 +371,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     protected void innerPrimaryWork(Viewport<?> viewport, int depthBuffer) {
 
-        //Compute the mip chain
-        viewport.hiZBuffer.buildMipChain(depthBuffer, viewport.width, viewport.height);
+        // The pyramid build is GONE from this path, and the GL path now runs with an
+        // unpopulated pyramid -- i.e. no occlusion. Its only source was a raw GL texture
+        // id, and HiZBuffer's int-handle overload was deleted with the rest of the
+        // GL-shaped pyramid code (the pyramid is an R32F COLOUR texture on the one
+        // backend this project has, and a colour target cannot be described by a raw GL
+        // depth id). This whole method is GL-only and is on the deletion list; nothing
+        // reaches it on Metal, which has its own traversal loop in runPipelineMetal.
 
         do {
             TimingStatistics.main.stop();
@@ -399,6 +418,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (this.metalDepthTex != null) {
             this.metalDepthTex.free();
             this.metalDepthTex = null;
+        }
+        if (this.hizProbeBuffer != null) {
+            this.hizProbeBuffer.free();
+            this.hizProbeBuffer = null;
+        }
+        if (this.hizPyramidProbeBuffer != null) {
+            this.hizPyramidProbeBuffer.free();
+            this.hizPyramidProbeBuffer = null;
         }
         super.free0();
     }
@@ -514,24 +541,31 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.metalDepthHeight = fbh;
             this.hizBuildLogged = false;   // a resize invalidates whatever the pyramid held
         }
-        //    OFF BY DEFAULT, and that is a measured decision rather than caution. The build works --
-        //    it runs clean, no Metal validation errors -- but it culls nothing, because the depth
-        //    attachment it samples reads as zeros: MC's attachment is Depth32Float (fmt 252) yet cannot
-        //    be sampled, which is a USAGE-flag problem, not a format one, and is exactly why the
-        //    orphaned metalDepthTex was created as a copy target. Until that copy exists the pyramid is
-        //    pure cost: measured +3.7 to +7 ms of `submit` across two runs, for zero culled sections
-        //    (`maxDrawCount` unchanged at ~27k). Roughly eleven mip-chain render passes per frame.
+        //    The source is metalDepthTex -- the LOD pass's SECOND COLOUR attachment, which carries each
+        //    fragment's depth as colour. It is NOT MC's depth attachment, and that is deliberate: a
+        //    depth-format texture sampled through a `sampler2D` becomes MSL `texture2d<float>`, from
+        //    which Metal silently reads zeros. See quads.frag's VOXY_LOD_DEPTH_COLOUR block.
         //
-        //    So the default path is ensureAllocated -- a zero-filled pyramid, whose guard makes the cull
-        //    a no-op, which is the behaviour verified before this was written. VOXY_HIZ_BUILD=1 turns
-        //    the build on, which is what makes the eventual fix A/B-able with one switch.
+        //    ONE FRAME BEHIND, by construction. This call sits before doTraversal() below and before
+        //    the LOD pass that CLEARs and rewrites metalDepthTex, so the traversal culls frame N against
+        //    frame N-1's depth. That is the ordinary Hi-Z lag and it is fine. An earlier comment here
+        //    claimed the pyramid "reads the very texture the geometry was drawn into" -- true of the
+        //    texture, false of the timing, and the sort of claim that sends the next reader looking in
+        //    the wrong place.
+        //
+        //    OFF BY DEFAULT because it used to be pure cost: the pyramid it built was attached as a
+        //    depth attachment while its pipeline declares an R32F colour format, so the blit's output
+        //    was dropped and nothing ever wrote it -- +3.7 to +7 ms of `submit` for zero culled
+        //    sections. That attachment bug is fixed (see HiZBuffer's class doc), and VOXY_HIZ_BUILD=1
+        //    is what turns the corrected build on so it can be A/B'd against the zero-filled default.
         if (HIZ_BUILD && this.metalDepthTex != null && this.metalDepthTex.id() != -1) {
             viewport.hiZBuffer.buildMipChain(this.metalDepthTex, viewport.width, viewport.height);
             if (!this.hizBuildLogged) {
                 this.hizBuildLogged = true;
-                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] built pyramid from the Voxy-owned"
-                        + " sampleable depth copy " + viewport.width + "x" + viewport.height
-                        + " (source handle=" + (this.metallumDepth == null ? "null"
+                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] built pyramid from the LOD pass's"
+                        + " depth-as-colour attachment, " + viewport.width + "x" + viewport.height
+                        + " (attachment=" + this.metalDepthTex.id()
+                        + ", depth=" + (this.metallumDepth == null ? "null"
                                 : Long.toString(this.metallumDepth.metalHandle())) + ")");
             }
         } else {
@@ -920,37 +954,66 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         final long perfT3 = System.nanoTime();
         this.perfEncode += perfT3 - perfT2;  // encoding the LOD pass (CPU side)
 
-        // No depth copy any more: the LOD pass renders straight into metalDepthTex (see its
-        // depthAttachment above), so the pyramid reads the very texture the geometry was drawn
-        // into. The blit that used to feed it is gone with the MC-depth dependency.
-        // One-shot probe, encoded before submit so it rides this command buffer: read the LOD pass's
-        // OWN depth attachment back. That texture is the pyramid's source now, so if it is empty the
-        // cull has nothing to test and no amount of pyramid wiring helps. Encoded here, read after the
-        // drain below.
-        // The frame gate is the whole point: an earlier version of this probe latched on the FIRST LOD
-        // frame, which draws nothing (the log shows sections=0 on frame 1), so its all-zero result
-        // said nothing about whether depth can be read -- it was the correct answer for an empty
-        // frame, and it was read as a finding anyway. Wait until the scene is populated.
-        if (HIZ_BUILD && !this.hizProbeDone && this.hizProbeBuffer == null
-                && this.metalDepthTex != null && this.metalFrame > 300) {
+        // Two probes, encoded here so they ride this command buffer, and read after the drain below.
+        //
+        // 1. `metalDepthTex` -- the LOD pass's SECOND COLOUR attachment, which carries this fragment's
+        //    depth as colour (VOXY_LOD_DEPTH_COLOUR). It is the pyramid's source, so if it reads empty
+        //    the cull has nothing to test and no amount of pyramid wiring helps.
+        // 2. The pyramid's own mip 0 -- what the traversal actually samples. This is the probe that was
+        //    missing: every previous reading measured the SOURCE and then inferred the pyramid, and the
+        //    pyramid's build was attaching it as a depth attachment while its pipeline declares an R32F
+        //    COLOUR format, so the blit's output was dropped and nothing wrote it. A non-zero source
+        //    with a zero pyramid is exactly that signature; both non-zero is a working cull.
+        //
+        // The frame gates are the whole point: an earlier version latched on the FIRST LOD frame, which
+        // draws nothing (sections=0), so its all-zero result was the correct answer for an empty frame
+        // and was read as a finding anyway. Hence two firings rather than one -- see hizProbeFires.
+        boolean probeAttachment = false;
+        if (HIZ_BUILD && this.metalDepthTex != null && this.hizProbeFires < HIZ_PROBE_FIRES
+                && this.metalFrame > (this.hizProbeFires == 0 ? 300L : 2000L)) {
             try {
-                this.hizProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
+                if (this.hizProbeBuffer == null) {
+                    this.hizProbeBuffer = backend.createBuffer(16L + (long) fbw * fbh * 4L);
+                }
                 voxyMb.copyTextureToBuffer(this.metalDepthTex, this.hizProbeBuffer, fbw, fbh, 16);
+                this.hizProbeFires++;
+                probeAttachment = true;
             } catch (Throwable t) {
-                this.hizProbeDone = true;
-                me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] readback unavailable: " + t);
+                this.hizProbeFires = HIZ_PROBE_FIRES;
+                me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] attachment readback unavailable: " + t);
             }
+        }
+        boolean probePyramid = false;
+        if (HIZ_BUILD && !this.hizPyramidProbeDone && this.metalFrame > 2000) {
+            // Mip 0's dimensions are the highest one bits of the viewport -- HiZBuffer rounds down to a
+            // square power of two, so fbw x fbh is NOT the level-0 size.
+            final int pw = Integer.highestOneBit(fbw);
+            final int ph = Integer.highestOneBit(fbh);
+            try {
+                final me.cortex.voxy.client.core.gpu.IGpuTexture pyramid = viewport.hiZBuffer.getHizTexture();
+                if (pyramid != null) {
+                    this.hizPyramidProbeBuffer = backend.createBuffer(16L + (long) pw * ph * 4L);
+                    voxyMb.copyTextureToBuffer(pyramid, this.hizPyramidProbeBuffer, pw, ph, 16);
+                    probePyramid = true;
+                }
+            } catch (Throwable t) {
+                me.cortex.voxy.common.Logger.info("[Metal-HIZPROBE] pyramid readback unavailable: " + t);
+            }
+            this.hizPyramidProbeDone = true;
         }
         backend.submit();
         this.perfSubmit += System.nanoTime() - perfT3;
         this.perfReport();
         this.metalFrame++;
 
-        // Report once the drain has returned, so the buffer is CPU-visible and complete.
-        if (!this.hizProbeDone && this.hizProbeBuffer != null) {
-            this.hizProbeDone = true;
-            logDepthProbe("the LOD pass's own depth attachment (the pyramid's source)",
+        // Report once the drain has returned, so the buffers are CPU-visible and complete.
+        if (probeAttachment) {
+            logDepthProbe("attachment 1 (depth-as-colour), firing " + this.hizProbeFires + "/" + HIZ_PROBE_FIRES,
                     this.hizProbeBuffer, fbw * fbh);
+        }
+        if (probePyramid) {
+            logDepthProbe("pyramid mip0 (what the cull samples)",
+                    this.hizPyramidProbeBuffer, Integer.highestOneBit(fbw) * Integer.highestOneBit(fbh));
         }
 
         // [Metal-VXPLANES] one-shot CPU read-back of the material g-buffer planes

@@ -14,15 +14,14 @@
 
 layout(binding = HIZ_BINDING) uniform sampler2D hizDepthSampler;
 
-// Perspective divide, then the window transform for xy and the DEPTH for z. See the call site for why
-// z differs by convention. One place, so the two cannot drift apart.
+// Perspective divide, then the window transform for XY ONLY. The z is returned untouched because it is
+// ALREADY depth on this frame: the traversal's VP is vanilla's reverse-Z projection, whose NDC z is in
+// [0,1]. Applying the `* 0.5 + 0.5` window transform to z as well -- as the other convention needs --
+// squashes box depth into [0.5,1] against a pyramid that holds [0,1], and the test then reads the wrong
+// half of the range. One place, so the caller's two corners cannot drift apart.
 vec3 toScreenspace(vec4 p) {
     vec3 n = p.xyz / p.w;
-#ifdef VOXY_HIZ_REVERSE_Z
     return vec3(n.xy * 0.5f + 0.5f, n.z);
-#else
-    return n * 0.5f + 0.5f;
-#endif
 }
 
 
@@ -161,12 +160,6 @@ bool outsideFrustum() {
 }
 
 bool isCulledByHiz() {
-#ifdef VOXY_NO_HIZ
-    // The pyramid is never built on this backend (see HierarchicalOcclusionTraverser.traversalDefines),
-    // so sampling it tests noise. The guard below assumes an unbuilt pyramid reads zero, which holds
-    // for a zeroed buffer and not for raw allocated texture memory.
-    return false;
-#endif
     //Things start breaking down if the area is the entire scree, no idea why, just abort if we hit this case
     if ((maxBB.xy-minBB.xy)==vec2(1.0f)) return false;
 
@@ -183,60 +176,28 @@ bool isCulledByHiz() {
     ivec2 mxbb = min(ivec2(maxBB.xy*ssize),ssize-1);
     ivec2 mnbb = ivec2(minBB.xy*ssize);
 
-#ifdef VOXY_HIZ_REVERSE_Z
     // Reverse-Z frame: near is 1, far is 0, and the pyramid holds the tile's FARTHEST occluder --
-    // the smallest value -- so this is a min-reduce. It starts at 1.0 (the near plane) rather than
-    // -1.0, because a min over non-negative depths would otherwise just return the initial value.
+    // the smallest value -- so this is a min-reduce. It starts at 1.0 (the near plane) because a min
+    // over non-negative depths would otherwise just return the initial value.
     float pointSample = 1.0f;
-#else
-    float pointSample = -1.0f;
-#endif
     for (int x = mnbb.x; x<=mxbb.x; x++) {
         for (int y = mnbb.y; y<=mxbb.y; y++) {
             float sp = texelFetch(hizDepthSampler, ivec2(x, y), ml).r;
-            //pointSample2 = max(sp, pointSample2);
-            //sp = mix(sp, pointSample, 0.9999999f<=sp);
-#ifdef VOXY_HIZ_REVERSE_Z
             pointSample = min(sp, pointSample);
-#else
-            pointSample = max(sp, pointSample);
-#endif
         }
     }
-    //pointSample = mix(pointSample, pointSample2, pointSample<=0.000001f);
-
-    // M13 2026-05-15: on backends that haven't built the HiZ pyramid yet, every texelFetch returns 0.0,
-    // and the GL branch's `pointSample <= minBB.z` returns TRUE for any box with minBB.z >= 0 -- i.e.
-    // every visible box -- which would cull all top-level LOD nodes and leave the renderList empty. So
-    // an uninitialised pyramid has to read as "always pass".
-    //
-    // GL ONLY, and that restriction IS the fix for the cull never firing. On this convention sky
-    // max-reduces to 1.0, so a 0.0 tile means either genuinely-all-near geometry or an unbuilt pyramid,
-    // and "not occluded" is right for both.
-    //
-    // On the reverse-Z branch it was catastrophic. There far is 0.0, which makes 0.0 BOTH the unbuilt
-    // sentinel AND the most common legitimate value in the scene -- sky. A min-reduce drags any tile
-    // containing one sky texel down to 0.0, so this returned false for every box whose footprint touched
-    // sky, and in an outdoor scene that is nearly all of them. The cull could therefore only ever fire
-    // for boxes entirely covered by opaque geometry, which at the coarse mips the top-level nodes select
-    // (a full-screen node lands on ml=9, 2x1 texels) is essentially never. That is why maxDrawCount never
-    // moved.
-    //
-    // The test below needs no guard at all: `0.0 > maxBB.z` is false for every box, so an unbuilt pyramid
-    // and a sky tile both already answer "not occluded" correctly, by the arithmetic rather than by a
-    // special case. The earlier claim here that the guard "is convention-independent" was the error.
-#ifndef VOXY_HIZ_REVERSE_Z
-    if (pointSample <= 0.0) return false;
-#endif
-#ifdef VOXY_HIZ_REVERSE_Z
-    // A box is occluded when it lies entirely BEHIND the tile's farthest occluder. Under reverse-Z
+    // A box is occluded when it lies entirely BEHIND the tile's farthest occluder. On reverse-Z
     // "behind" means a SMALLER depth, and the box's nearest point is maxBB.z (its largest corner, since
-    // larger is nearer), so the test is `tileFarthest > boxNearest` -- the GL branch with both sides
-    // flipped.
+    // larger is nearer), so the test is `tileFarthest > boxNearest`.
+    //
+    // No unbuilt-pyramid guard, deliberately. Far is 0.0 on this convention, which makes 0.0 BOTH the
+    // unbuilt sentinel AND the commonest legitimate value in the scene -- sky. A guard such as
+    // `pointSample <= 0.0 -> not occluded` would therefore reject every box whose footprint touches
+    // sky, and in an outdoor scene that is nearly all of them; that guard was in fact present once and
+    // is why the cull never fired. The arithmetic already gives the right answer for both cases:
+    // `0.0 > maxBB.z` is false for every box, so an unbuilt pyramid and a sky tile both read as
+    // "not occluded" without a special case.
     return pointSample > maxBB.z;
-#else
-    return pointSample<=minBB.z;
-#endif
 }
 
 
