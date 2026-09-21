@@ -292,7 +292,7 @@ class BuiltSectionMaskTest {
         // loaded and unloaded.
         assertTrue(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd),
                 "at the radius, inclusive -- the strict form was one ring short (cull.MD 8.10)");
-        assertFalse(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "sqrt(72) = 8.49 > 8");
+        assertTrue(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "Chebyshev 6 <= 8: the drawn set is the superset, measured (cull.MD 8.11)");
         assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd));
     }
 

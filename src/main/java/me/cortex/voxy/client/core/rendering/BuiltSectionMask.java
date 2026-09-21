@@ -284,7 +284,16 @@ public final class BuiltSectionMask {
      */
     /** Public so the under-claim audit in the render hook can call the real rule instead of a copy. */
     public static boolean withinRenderDistance(final int dx, final int dy, final int dz, final int rd) {
-        return withinRenderCylinder(dx, dz, rd) && Math.abs(dy) <= rd;
+        // CHEBYSHEV horizontally, and this is measured rather than derived. Upstream at the pinned tag
+        // (cull.MD 8.10, 8.11) tests the cylinder -- and the audit built for exactly this question says
+        // the render list contradicts it: with a pinned camera at rd=2, Sodium DRAWS sections the
+        // cylinder refuses, all of them horizontal and all at Chebyshev 2 ((2,1) is Euclidean 2.24,
+        // (2,2) is 2.83). RenderSectionManager.renderOutOfGraph traverses with a
+        // FallbackVisibleChunkCollector, a different visitor, so the drawn set is the SUPERSET. Since
+        // this rule exists to mirror what Sodium draws, the superset is the correct operand: refuse one
+        // of these and both draw it, which is the reported double rendering at the vanilla edge.
+        // The vertical bound stays |dy| <= rd -- the same audit reports zero refused for the cap.
+        return Math.max(Math.abs(dx), Math.abs(dz)) <= rd && Math.abs(dy) <= rd;
     }
 
     /**
