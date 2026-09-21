@@ -33,6 +33,23 @@ void main() {
     }
 #endif
 
+#ifdef MRT_DISCARD_LIVE
+    // A REACHABLE discard. MRT_DISCARD's `vColor.r < 0.0` is provably false, so the compiler may
+    // eliminate it and the case proves nothing about discard. This one can fire on the triangle's
+    // interpolated colour, which is what the terrain's alpha cutout actually is.
+    if (vColor.r < 0.5) {
+        discard;
+    }
+#endif
+
+#ifdef MRT_HELPER
+    // Reads gl_HelperInvocation, which quads.frag does twice. A candidate for the ICB rejection:
+    // quads.frag writes no gl_FragDepth, so the trigger is either this or the gl_FragCoord read below.
+    if (gl_HelperInvocation) {
+        outColour0 = vec4(0.0);
+    }
+#endif
+
 #ifdef MRT_FRAGCOORD
     // quads.frag writes gl_FragCoord.z here, and declares [[position]] in the process. A constant was
     // tried in the game (occ4) and was also dropped, so the value is not the fault -- but gl_FragCoord

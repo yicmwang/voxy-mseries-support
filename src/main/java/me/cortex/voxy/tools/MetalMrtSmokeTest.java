@@ -129,8 +129,144 @@ public final class MetalMrtSmokeTest {
                         + "shape IS the difference; bisect from the first failing variant.");
                 throw new RuntimeException("MRT harness found a failing variant");
             }
+
+            icbCompatProbe(backend, shadersRoot, vertGlsl, vertCompiled);
         } finally {
             backend.shutdown();
+        }
+    }
+
+    /**
+     * Can a pipeline used inside an {@code MTLIndirectCommandBuffer} be built from these shaders?
+     *
+     * <p>This is the question that decides the largest item on the optimisation docket. An ICB would
+     * remove both the per-draw {@code baseInstance} host read AND the synchronous drain it forces
+     * (optimisation.MD 10.1) — together 79 % of the frame. Metal accepts {@code baseInstance} inside an
+     * ICB, where it drops it on a plain indirect indexed draw.
+     *
+     * <p>The blocker is that a pipeline used in an ICB is rejected if its fragment shader is
+     * ICB-incompatible, and this project's records disagree about what triggers that:
+     * {@code MetalRenderBackend:800-810} names "fragment shaders that write gl_FragDepth or use certain
+     * outputs" and does NOT name {@code discard}, while optimisation.MD 7.2 names {@code discard}.
+     *
+     * <p>Three cases, and the third is the one that matters:
+     * <ol>
+     *   <li>the toy shader with no discard — the control; if this fails the harness is wrong</li>
+     *   <li>the toy shader with a never-taken {@code discard} — isolates discard alone</li>
+     *   <li>the REAL terrain shaders — and case 2 can pass while this fails, which is exactly why it
+     *       must be here rather than inferred</li>
+     * </ol>
+     * Nothing is drawn: Metal rejects the pipeline at creation, so acceptance is the whole answer, and
+     * the rejection text (captured from {@code localizedDescription}) names the offending feature.
+     */
+    private static void icbCompatProbe(MetalRenderBackend backend, Path shadersRoot, String vertGlsl,
+                                       RuntimeShaderCompiler.Result vertCompiled) {
+        System.out.println();
+        System.out.println("=== ICB compatibility probe (does Metal accept an ICB pipeline?) ===");
+
+        // Case 3's shaders: the real terrain pair, with the defines ShaderCompilerSmokeTest uses for
+        // quads.frag's Metal baseline. A copy rather than a reference on purpose -- if that harness's
+        // case changes, this probe should be re-checked rather than silently following it.
+        // Through ShaderLoader.parse, NOT Files.readString: these shaders carry `#import <voxy:...>`
+        // directives and resolve them against the resource path. Reading them raw hands shaderc a bare
+        // `#import`, which it rejects as an invalid directive -- an earlier version of this probe did
+        // exactly that and its failure said nothing about the ICB. ShaderLoader is what the game uses.
+        String terrainVert;
+        String terrainFrag;
+        try {
+            terrainVert = me.cortex.voxy.client.core.gpu.shader.ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
+            terrainFrag = me.cortex.voxy.client.core.gpu.shader.ShaderLoader.parse("voxy:lod/gl46/quads.frag");
+        } catch (Throwable e) {
+            System.out.println("  case 3 SKIPPED: could not load the terrain shaders via ShaderLoader: " + e);
+            return;
+        }
+        Map<String, String> terrainVertDefines = Map.of(
+                "NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0", "DOWN_FACE_TINT", "0.5",
+                "Z_AXIS_FACE_TINT", "0.8", "X_AXIS_FACE_TINT", "0.6",
+                "VOXY_METAL_BI_FIX", "");
+        Map<String, String> terrainFragDefines = Map.of(
+                "VOXY_NO_DEPTH_BOUND", "", "VOXY_FORCE_OPAQUE_ALPHA", "");
+        // Used whenever the ordinary define map would not compile
+        Map<String, String> toyFragDefines = Map.of();
+
+        icbCase(backend, 1, "tools/mrt.frag, no discard (CONTROL — must pass)",
+                vertGlsl, vertCompiled, "tools/mrt.frag",
+                Files0.frag(shadersRoot, "tools/mrt.frag"), toyFragDefines);
+        icbCase(backend, 2, "tools/mrt.frag + a never-taken discard (isolates discard alone)",
+                vertGlsl, vertCompiled, "tools/mrt.frag",
+                Files0.frag(shadersRoot, "tools/mrt.frag"), Map.of("MRT_DISCARD", ""));
+        icbCase(backend, 3, "the REAL terrain shaders (THE ANSWER)",
+                terrainVert, null, "lod/gl46/quads3.vert",
+                terrainFrag, terrainFragDefines);
+        // Case 3 says the terrain fragment shader is ICB-incompatible, and case 2 says it is NOT the
+        // discard. quads.frag writes no gl_FragDepth, so two candidates remain -- and these two cases
+        // name which, so the fix targets the right one.
+        icbCase(backend, 4, "toy + gl_FragCoord read (quads.frag reads it for the Hi-Z output)",
+                vertGlsl, vertCompiled, "tools/mrt.frag",
+                Files0.frag(shadersRoot, "tools/mrt.frag"), Map.of("MRT_FRAGCOORD", ""));
+        icbCase(backend, 5, "toy + gl_HelperInvocation read (quads.frag reads it twice)",
+                vertGlsl, vertCompiled, "tools/mrt.frag",
+                Files0.frag(shadersRoot, "tools/mrt.frag"), Map.of("MRT_HELPER", ""));
+        // Case 2's discard is guarded by a provably-false condition, so the compiler may have removed
+        // it -- which would make that PASS meaningless. This one is REACHABLE, like the terrain's
+        // alpha cutout. If this fails, discard is the trigger after all and case 2 was a false negative.
+        icbCase(backend, 6, "toy + a REACHABLE discard (what the terrain cutout actually is)",
+                vertGlsl, vertCompiled, "tools/mrt.frag",
+                Files0.frag(shadersRoot, "tools/mrt.frag"), Map.of("MRT_DISCARD_LIVE", ""));
+        // Now bisect the REAL shader with its own switches. quads.frag features the toy lacks:
+        // atlas sampling (incl. textureGather), the chunk-cull SSBO read, and the imported helpers.
+        // VOXY_NO_ATLAS removes the sampling path, so a PASS here names the atlas fetch as the cause.
+        icbCase(backend, 7, "real terrain + VOXY_NO_ATLAS (removes the atlas sampling path)",
+                terrainVert, null, "lod/gl46/quads3.vert", terrainFrag,
+                Map.of("VOXY_NO_DEPTH_BOUND", "", "VOXY_FORCE_OPAQUE_ALPHA", "", "VOXY_NO_ATLAS", ""));
+        // The inverse: keep sampling, remove everything else that reads a buffer or a derivative.
+        icbCase(backend, 8, "real terrain + FLAT_FRAG (constant colour, no atlas, no tinting)",
+                terrainVert, null, "lod/gl46/quads3.vert", terrainFrag,
+                Map.of("VOXY_NO_DEPTH_BOUND", "", "VOXY_FORCE_OPAQUE_ALPHA", "",
+                        "VOXY_NO_ATLAS", "", "VOXY_LOD_FLAT_FRAG", ""));
+    }
+
+    /** One ICB case. Reports acceptance or Metal's own rejection text; never throws. */
+    private static void icbCase(MetalRenderBackend backend, int n, String label,
+                                String vertGlsl, RuntimeShaderCompiler.Result vertCompiled,
+                                String fragPath, String fragGlsl, Map<String, String> fragDefines) {
+        IGpuPipeline pipeline = null;
+        try {
+            RuntimeShaderCompiler.Result v = vertCompiled != null ? vertCompiled
+                    : RuntimeShaderCompiler.compile(vertGlsl, RuntimeShaderCompiler.Stage.VERTEX,
+                            Map.of("NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0",
+                                    "DOWN_FACE_TINT", "0.5", "Z_AXIS_FACE_TINT", "0.8",
+                                    "X_AXIS_FACE_TINT", "0.6", "VOXY_METAL_BI_FIX", ""),
+                            RuntimeShaderCompiler.Target.METAL_MSL);
+            RuntimeShaderCompiler.Result f = RuntimeShaderCompiler.compile(fragGlsl,
+                    RuntimeShaderCompiler.Stage.FRAGMENT, fragDefines,
+                    RuntimeShaderCompiler.Target.METAL_MSL);
+
+            GraphicsPipelineDesc desc = new GraphicsPipelineDesc(
+                    vertGlsl, fragGlsl, Map.of(),
+                    v.mslSource(), f.mslSource(), v.spirv(), f.spirv(),
+                    new int[]{0x8058}, VertexLayout.EMPTY, PipelineState.OPAQUE_MESH,
+                    "icb-probe-" + n).withIndirectCommandBufferUsage(true);
+
+            pipeline = backend.createGraphicsPipeline(desc);
+            System.out.println("  case " + n + " PASS  " + label);
+            System.out.println("        -> an ICB pipeline IS available for this shader");
+        } catch (Throwable t) {
+            System.out.println("  case " + n + " FAIL  " + label);
+            System.out.println("        -> Metal rejected it: " + t.getMessage());
+        } finally {
+            if (pipeline != null) pipeline.close();
+        }
+    }
+
+    /** Tiny helper so the case table above reads as a table. */
+    private static final class Files0 {
+        static String frag(Path root, String rel) {
+            try {
+                return Files.readString(root.resolve(rel), StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
