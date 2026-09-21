@@ -126,40 +126,8 @@ public class GPUTiming {
             while (!INFLIGHT.isEmpty()) INFLIGHT.dequeue();
         }
     }
-    /*
-    private static final class GlTimestampQuerySet extends TrackedObject {
-        private final int query = glGenQueries();
-        public final GlBuffer store;
-        public final int[] metadata;
-        public int index;
-        public GlTimestampQuerySet(int maxCount) {
-            this.store = new GlBuffer(maxCount*8L);
-            this.metadata = new int[maxCount];
-        }
-
-        public void capture(int metadata) {
-            if (this.index>this.metadata.length) {
-                throw new IllegalStateException();
-            }
-            int slot = this.index++;
-            this.metadata[slot] = metadata;
-            glQueryCounter(this.query, GL_TIMESTAMP);//This should be gpu side, so should be fast
-            GlCompat.finish();
-            glGetQueryBufferObjectui64v(this.query, this.store.id, GL_QUERY_RESULT_NO_WAIT, slot*8L);
-            glMemoryBarrier(-1);
-        }
-
-        public void download(TimingDataConsumer consumer) {
-            var meta = Arrays.copyOf(this.metadata, this.index);
-            this.index = 0;
-            //DownloadStream.INSTANCE.download(this.store, buffer->consumer.accept(meta, buffer));
-        }
-
-        @Override
-        public void free() {
-            super.free0();
-            glDeleteQueries(this.query);
-            this.store.free();
-        }
-    }*/
+    // A commented-out `GlTimestampQuerySet` (a GL query-object timing path) stood here. It is
+    // deleted: the GL backend, GlBuffer and glDeleteQueries are all gone, so it could never be
+    // un-commented. The timing surface this class still offers is marker()/tick(), which are
+    // no-ops on Metal - see the note above them.
 }
