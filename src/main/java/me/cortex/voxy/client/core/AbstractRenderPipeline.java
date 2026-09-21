@@ -227,6 +227,9 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      */
     private double perfGpuSum;
     private int perfGpuSamples;
+    /** Same, for the PRE-LOD segment: traversal + the five prepasses + the Hi-Z pyramid build. */
+    private double perfGpuPreSum;
+    private int perfGpuPreSamples;
 
     private void perfReport() {
         if (++this.perfFrames < 600) return;
@@ -234,15 +237,23 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // `gpu` is APPENDED, not inserted: tools/parse_perf.py's regex matches the named fields in
         // order and is not anchored at the end, so a trailing field is safe and reordering is not.
         // -1 means Metal reported no timestamps for any frame in the window.
+        // `gpu` is the LOD pass segment; `gpuPre` is everything encoded before it (traversal, the five
+        // prepasses, the Hi-Z build). They are reported separately because a single untagged number
+        // could not say which segment a duration belonged to, and an empty LOD pass once appeared to
+        // cost 9.81 ms with nothing able to confirm or deny it.
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-PERF] ms/frame  prep=%.2f  split=%.2f  encode=%.2f  submit=%.2f  total=%.2f  gpu=%.2f",
+                "[Metal-PERF] ms/frame  prep=%.2f  split=%.2f  encode=%.2f  submit=%.2f  total=%.2f  "
+                        + "gpu=%.2f  gpuPre=%.2f",
                 this.perfPrep / n / 1e6, this.perfSplit / n / 1e6,
                 this.perfEncode / n / 1e6, this.perfSubmit / n / 1e6,
                 (this.perfPrep + this.perfSplit + this.perfEncode + this.perfSubmit) / n / 1e6,
-                this.perfGpuSamples > 0 ? this.perfGpuSum / this.perfGpuSamples : -1.0));
+                this.perfGpuSamples > 0 ? this.perfGpuSum / this.perfGpuSamples : -1.0,
+                this.perfGpuPreSamples > 0 ? this.perfGpuPreSum / this.perfGpuPreSamples : -1.0));
         this.perfPrep = this.perfSplit = this.perfEncode = this.perfSubmit = 0;
         this.perfGpuSum = 0.0;
         this.perfGpuSamples = 0;
+        this.perfGpuPreSum = 0.0;
+        this.perfGpuPreSamples = 0;
         this.perfFrames = 0;
     }
 
@@ -254,10 +265,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      */
     private void sampleGpuTime(me.cortex.voxy.client.core.gpu.RenderBackend backend) {
         if (backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mb) {
-            double gpu = mb.lastSubmitGpuMs();
+            double gpu = mb.lastGpuMsFor(me.cortex.voxy.client.core.metal.MetalRenderBackend.GPU_TAG_POST_LOD);
             if (gpu >= 0.0) {
                 this.perfGpuSum += gpu;
                 this.perfGpuSamples++;
+            }
+            double gpuPre = mb.lastGpuMsFor(me.cortex.voxy.client.core.metal.MetalRenderBackend.GPU_TAG_PRE_LOD);
+            if (gpuPre >= 0.0) {
+                this.perfGpuPreSum += gpuPre;
+                this.perfGpuPreSamples++;
             }
         }
     }

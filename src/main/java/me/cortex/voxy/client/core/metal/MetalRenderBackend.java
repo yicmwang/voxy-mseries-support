@@ -63,18 +63,64 @@ public class MetalRenderBackend implements RenderBackend {
     }
 
     /**
+     * Segment tags for {@link #captureGpuTime}. A frame commits more than one command buffer, and
+     * WHICH one a duration belongs to is the difference between a usable budget and a single
+     * unattributable number — the reading is only meaningful next to the name of its segment.
+     *
+     * <p>{@link #GPU_TAG_PRE_LOD} is the buffer committed by {@code submitDeferWait()} and waited on in
+     * {@link #awaitCommitted()}: it carries the traversal, the five compute prepasses <em>and</em> the
+     * Hi-Z pyramid build, everything encoded before the LOD pass begins.
+     * {@link #GPU_TAG_POST_LOD} is the buffer the final {@code submit()} commits, which carries the
+     * LOD render pass and nothing else.
+     */
+    public static final String GPU_TAG_PRE_LOD = "preLod";
+    public static final String GPU_TAG_POST_LOD = "postLod";
+    public static final String GPU_TAG_OWNED = "owned";
+
+    /** Last GPU duration per segment tag, in ms; -1 when unavailable. */
+    private final java.util.Map<String, Double> lastGpuByTag =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Last GPU duration recorded for {@code tag}, in ms, or -1 when there is none. */
+    public double lastGpuMsFor(String tag) {
+        Double v = this.lastGpuByTag.get(tag);
+        return v == null ? -1.0 : v;
+    }
+
+    /**
      * Record the GPU duration of a command buffer that has just COMPLETED, in milliseconds.
      *
      * <p>Must be called after a wait and before release — Metal reports {@code GPUStartTime} /
      * {@code GPUEndTime} as 0.0 until the buffer completes, so calling this early records -1 rather
      * than failing, and a caller that ignored that would read "the GPU took no time".
+     *
+     * <p>{@code tag} names the segment the buffer carries; see the {@code GPU_TAG_*} constants. The
+     * caller must pass the right one — a mislabelled duration is worse than no duration, because it
+     * looks like an answer.
      */
-    private void captureGpuTime(long cmdBuffer) {
+    private void captureGpuTime(long cmdBuffer, String tag) {
         if (cmdBuffer == 0L) return;
         final double start = MetalNative.mtlCommandBufferGetGpuStartTime(cmdBuffer);
         final double end = MetalNative.mtlCommandBufferGetGpuEndTime(cmdBuffer);
-        this.lastSubmitGpuMs = (start > 0.0 && end > 0.0) ? (end - start) * 1000.0 : -1.0;
+        final double ms = (start > 0.0 && end > 0.0) ? (end - start) * 1000.0 : -1.0;
+        this.lastGpuByTag.put(tag, ms);
+        if (GPU_TAG_POST_LOD.equals(tag)) this.lastSubmitGpuMs = ms;
+        if (GPU_TRACE) {
+            me.cortex.voxy.common.Logger.info(String.format(
+                    "[Metal-GPUTRACE] %-8s cb=%d start=%.3f end=%.3f span=%.2f ms",
+                    tag, cmdBuffer, start * 1000.0, end * 1000.0, ms));
+        }
     }
+
+    /**
+     * VOXY_GPU_TRACE=1: log every GPU-time capture with its segment tag, handle and window.
+     *
+     * <p>Off by default because it is one log line per commit — several per frame at 60 fps. It exists
+     * because the untagged version of this instrument produced a reading of 9.81 ms for a segment that
+     * contains only an empty render pass, and there was no way to tell from the output which segment
+     * that number came from.
+     */
+    private static final boolean GPU_TRACE = "1".equals(System.getenv("VOXY_GPU_TRACE"));
 
     /**
      * Commit exactly as {@link #submit()} does, but leave the ordered wait for {@link #awaitCommitted()}.
@@ -107,7 +153,8 @@ public class MetalRenderBackend implements RenderBackend {
         if (h != 0L) {
             this.pendingOrderedWait = 0L;
             MetalNative.mtlCommandBufferWaitUntilCompleted(h);
-            this.captureGpuTime(h);
+            // The buffer submitDeferWait() committed: traversal + the five prepasses + the Hi-Z build.
+            this.captureGpuTime(h, GPU_TAG_PRE_LOD);
         }
     }
 
@@ -1106,7 +1153,8 @@ public class MetalRenderBackend implements RenderBackend {
                         this.pendingOrderedWait = committed;
                     } else {
                         MetalNative.mtlCommandBufferWaitUntilCompleted(committed);
-                        this.captureGpuTime(committed);
+                        // The buffer this submit() just committed: the LOD render pass alone.
+                        this.captureGpuTime(committed, GPU_TAG_POST_LOD);
                     }
                 }
                 return;
@@ -1120,7 +1168,7 @@ public class MetalRenderBackend implements RenderBackend {
         // before the buffer is released. M5+ will move to async + per-frame fences.
         MetalNative.mtlCommandBufferWaitUntilCompleted(this.activeCommandBuffer);
         // Capture BEFORE the release below -- the timestamps live on the command buffer.
-        this.captureGpuTime(this.activeCommandBuffer);
+        this.captureGpuTime(this.activeCommandBuffer, GPU_TAG_OWNED);
         int status = MetalNative.mtlCommandBufferGetStatus(this.activeCommandBuffer);
         MetalNative.mtlRelease(this.activeCommandBuffer);
         this.activeCommandBuffer = 0;
