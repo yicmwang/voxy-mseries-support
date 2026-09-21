@@ -4,24 +4,17 @@ import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.textures.GpuSampler;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
-import me.cortex.voxy.client.core.rendering.BuiltSectionMask;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
-import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
 import net.caffeinemc.mods.sodium.client.gpu.device.context.DrawContext;
-import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderList;
 import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderListIterable;
-import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.DefaultTerrainRenderPasses;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
 import net.caffeinemc.mods.sodium.client.util.FogParameters;
-import net.caffeinemc.mods.sodium.client.util.iterator.ByteIterator;
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.SectionPos;
-import net.minecraft.util.Mth;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -73,9 +66,6 @@ public abstract class MixinDefaultChunkRenderer {
      */
     private static final boolean NO_VANILLA = "1".equals(System.getenv("VOXY_NO_VANILLA"));
 
-    /** Whether this frame's feed runs: true only on the frame the camera entered a new section. */
-    private static boolean voxy$feedThisFrame;
-
     @Redirect(method = "render", at = @At(value = "INVOKE",
             target = "Lnet/caffeinemc/mods/sodium/client/gpu/device/batch/MultiDrawBatch;draw(Lnet/caffeinemc/mods/sodium/client/gpu/device/context/DrawContext;)V"),
             remap = false)
@@ -107,24 +97,6 @@ public abstract class MixinDefaultChunkRenderer {
                                    GpuBufferSlice uniformData,
                                    GpuBuffer sectionTimeInfo,
                                    CallbackInfo ci) {
-        // The mask is the union over the frame's terrain passes, not just this one. Sodium renders
-        // SOLID, CUTOUT then TRANSLUCENT in that order (DefaultTerrainRenderPasses.ALL), so SOLID is
-        // the frame boundary: clear there and let every pass contribute. Gating the feed to SOLID
-        // alone would leave a section with no SOLID geometry unclaimed, and that is a section whose
-        // surface is grass, leaves or a flower -- at RD 2 that is most of the visible surface, so the
-        // LOD survived over exactly the cutout terrain.
-        //
-        // The clear is gated on the CAMERA'S SECTION rather than on the frame, so the culled region's
-        // edges step at chunk boundaries instead of sliding along with the player. See
-        // BuiltSectionMask.beginFrameIfSectionChanged for the measurement behind that and for the one
-        // thing it costs.
-        if (renderPass == DefaultTerrainRenderPasses.SOLID) {
-            voxy$feedThisFrame = BuiltSectionMask.beginFrameIfSectionChanged(
-                    Mth.floor(camera.x) >> 4, Mth.floor(camera.y) >> 4, Mth.floor(camera.z) >> 4);
-        }
-        if (voxy$feedThisFrame) {
-            feedBuiltSectionMask(renderLists);
-        }
         if (renderPass != DefaultTerrainRenderPasses.SOLID) {
             return;
         }
@@ -134,49 +106,5 @@ public abstract class MixinDefaultChunkRenderer {
         }
         Viewport<?> viewport = renderer.setupViewport(matrices, fogParameters, camera.x, camera.y, camera.z);
         renderer.renderOpaque(viewport);
-    }
-
-    /**
-     * Hand {@link BuiltSectionMask} the sections vanilla is drawing THIS FRAME.
-     *
-     * <p>This is the fix for the whole cull saga, and it is a deletion rather than a calculation. The
-     * mask used to be fed from {@code RenderRegionManager.uploadResults} — what Sodium had MESHED — and
-     * a distance rule was then asked to turn that into what Sodium RENDERS. It cannot: a distance is
-     * not a frustum. Four versions of that rule were tried and each was wrong somewhere (sphere,
-     * cylinder, conjunction, Sodium's own union), because they were all approximating the set that
-     * {@code renderLists} already IS. The parameter is right here, it is a {@code ChunkRenderListIterable},
-     * and its entries are exactly the sections about to be drawn in this pass.
-     *
-     * <p>Decoding is upstream's own, not reverse-engineered: a list entry is a
-     * {@code RenderSection.getSectionIndex()}, which {@link LocalSectionIndex} packs from the section's
-     * position within its region ({@code x & 7, y & 3, z & 7} — the region is 8x4x8 chunks), and the
-     * region carries its own origin. So origin + unpack is the section, with no arithmetic of ours to
-     * get wrong.
-     *
-     * <p>The caller clears the mask once per frame, at the first terrain pass, so this accumulates
-     * SOLID + CUTOUT + TRANSLUCENT between calls.
-     */
-    private static void feedBuiltSectionMask(ChunkRenderListIterable renderLists) {
-        java.util.Iterator<ChunkRenderList> lists = renderLists.iterator();
-        while (lists.hasNext()) {
-            ChunkRenderList list = lists.next();
-            RenderRegion region = list.getRegion();
-            final int originX = region.getChunkX();
-            final int originY = region.getChunkY();
-            final int originZ = region.getChunkZ();
-            ByteIterator it = list.sectionsWithGeometryIterator(false);
-            // Sodium returns NULL here, not an empty iterator, for a list with no geometry in this
-            // pass -- verified in the shipped bytecode, where `sectionsWithGeometryCount == 0` is an
-            // explicit `return null`. The same pattern is on sectionsWithSpritesIterator and the
-            // block-entity accessors, so it is worth remembering rather than re-learning as an NPE.
-            if (it == null) continue;
-            while (it.hasNext()) {
-                final int idx = it.nextByteAsInt();
-                BuiltSectionMask.addDrawn(SectionPos.asLong(
-                        originX + LocalSectionIndex.unpackX(idx),
-                        originY + LocalSectionIndex.unpackY(idx),
-                        originZ + LocalSectionIndex.unpackZ(idx)));
-            }
-        }
     }
 }
