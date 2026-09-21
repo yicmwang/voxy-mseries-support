@@ -31,7 +31,10 @@ public abstract class Viewport <A extends Viewport<A>> {
      * inert since M13 chunk 3). Layout: uint width + 12 pad bytes, then
      * width*height floats. Owned/resized by ChunkBoundRenderer; null on GL.
      */
-    public me.cortex.voxy.client.core.gpu.IGpuBuffer metalBoundReadBuffer;
+    // metalBoundReadBuffer used to live here: the CPU-visible SSBO holding the depth-bound mask as raw
+    // floats. Removed with the mask's Metal renderer, which had no callers -- so the buffer was never
+    // allocated, and MDICSectionRenderer's per-frame bind of it fed a shader path that VOXY_NO_DEPTH_BOUND
+    // compiles out by default. depthBoundingBuffer above is still live for the GL path.
 
     private static final Field planesField;
     static {
@@ -77,10 +80,6 @@ public abstract class Viewport <A extends Viewport<A>> {
     protected void delete0() {
         this.hiZBuffer.free();
         this.depthBoundingBuffer.free();
-        if (this.metalBoundReadBuffer != null) {
-            this.metalBoundReadBuffer.free();
-            this.metalBoundReadBuffer = null;
-        }
     }
 
     public A setVanillaProjection(Matrix4fc projection) {

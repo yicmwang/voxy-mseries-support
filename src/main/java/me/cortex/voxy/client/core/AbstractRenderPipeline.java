@@ -182,7 +182,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * Lazy — allocated on the first Metal frame that has a non-zero sized
      * source framebuffer.
      */
-    private me.cortex.voxy.client.core.rendering.util.DepthMirror metalDepthMirror;
     /** Animation counter for the placeholder Metal render — replaced by real Voxy output incrementally. */
     private int metalFrame;
     /** VOXY_UNDERWATER_LOD=1 forces LOD draws even when submerged-fog saturates the far field. */
@@ -374,10 +373,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             this.metalDepthTex.free();
             this.metalDepthTex = null;
         }
-        if (this.metalDepthMirror != null) {
-            this.metalDepthMirror.free();
-            this.metalDepthMirror = null;
-        }
         super.free0();
     }
 
@@ -476,6 +471,22 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             }
             this.metallumDepth.refresh();
         }
+
+        // 2b) The Voxy-owned depth texture, allocated BEFORE the build because it is the build's source.
+        //     PURE D32F, not packed D24S8: Depth32Float_Stencil8 cannot be sampled as texture2d<float>
+        //     (the Iris-inject depth export read zeros from it and every injected LOD pixel discarded),
+        //     whereas pure D32F is the sampleable format. MetalTexture.store() creates it with
+        //     ShaderRead -- precisely the flag MC's own attachment lacks -- so this is the texture the
+        //     pyramid can actually read.
+        if (this.metalDepthTex == null || this.metalDepthWidth != fbw || this.metalDepthHeight != fbh) {
+            if (this.metalDepthTex != null) this.metalDepthTex.free();
+            this.metalDepthTex = backend.createTexture()
+                    .store(org.lwjgl.opengl.GL30C.GL_DEPTH_COMPONENT32F, 1, fbw, fbh)
+                    .name("VoxyMetalDepth");
+            this.metalDepthWidth = fbw;
+            this.metalDepthHeight = fbh;
+            this.hizBuildLogged = false;   // a resize invalidates whatever the pyramid held
+        }
         //    OFF BY DEFAULT, and that is a measured decision rather than caution. The build works --
         //    it runs clean, no Metal validation errors -- but it culls nothing, because the depth
         //    attachment it samples reads as zeros: MC's attachment is Depth32Float (fmt 252) yet cannot
@@ -487,15 +498,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //    So the default path is ensureAllocated -- a zero-filled pyramid, whose guard makes the cull
         //    a no-op, which is the behaviour verified before this was written. VOXY_HIZ_BUILD=1 turns
         //    the build on, which is what makes the eventual fix A/B-able with one switch.
-        if (HIZ_BUILD && this.metallumDepth != null && this.metallumDepth.id() != -1) {
-            viewport.hiZBuffer.buildMipChain(this.metallumDepth, viewport.width, viewport.height);
+        if (HIZ_BUILD && this.metalDepthTex != null && this.metalDepthTex.id() != -1) {
+            viewport.hiZBuffer.buildMipChain(this.metalDepthTex, viewport.width, viewport.height);
             if (!this.hizBuildLogged) {
                 this.hizBuildLogged = true;
-                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] built pyramid from depth attachment"
-                        + " handle=" + this.metallumDepth.metalHandle()
-                        + " fmt=" + this.metallumDepth.mtlPixelFormat()
-                        + " " + viewport.width + "x" + viewport.height
-                        + " levels=" + viewport.hiZBuffer.getPackedLevels());
+                me.cortex.voxy.common.Logger.info("[Metal-HIZBUILD] built pyramid from the Voxy-owned"
+                        + " sampleable depth copy " + viewport.width + "x" + viewport.height
+                        + " (source handle=" + (this.metallumDepth == null ? "null"
+                                : Long.toString(this.metallumDepth.metalHandle())) + ")");
             }
         } else {
             viewport.hiZBuffer.ensureAllocated(viewport.width, viewport.height);
@@ -518,23 +528,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             }
         }
 
-        // 2b) Lazy-allocate the Metal-side depth texture for our render pass.
-        //     PURE depth format (not D24S8): the packed Depth32Float_Stencil8
-        //     cannot be reliably sampled as texture2d<float> on Metal — the
-        //     Iris-inject depth export read zeros from it, so every injected
-        //     LOD pixel discarded (d<=0) and LODs vanished under packs. The
-        //     stencil aspect was never used by the LOD pass; pure D32F is the
-        //     proven-sampleable format (same fix as HiZ + the chunk-bound
-        //     mask) and depth-only attachment of it is validation-clean.
-        //     The encoder pass clears it to 1.0 (far plane) each frame.
-        if (this.metalDepthTex == null || this.metalDepthWidth != fbw || this.metalDepthHeight != fbh) {
-            if (this.metalDepthTex != null) this.metalDepthTex.free();
-            this.metalDepthTex = backend.createTexture()
-                    .store(org.lwjgl.opengl.GL30C.GL_DEPTH_COMPONENT32F, 1, fbw, fbh)
-                    .name("VoxyMetalDepth");
-            this.metalDepthWidth = fbw;
-            this.metalDepthHeight = fbh;
-        }
+        // 2b) The Metal-side depth texture used to be allocated here, lazily, and its comment claimed
+        //     "the encoder pass clears it to 1.0 (far plane) each frame" -- which was never true of this
+        //     pass (it LOADs MC's attachment, so a clear value is inert) and would have been the wrong
+        //     value under reverse-Z anyway, where 1.0 is the NEAR plane. It is now allocated in step 2b
+        //     above, because the Hi-Z build reads it and the build has to run before the traversal.
 
         // 3) Compute side — copy of innerPrimaryWork's body minus the GL bits
         //    (HiZBuffer.buildMipChain, raw glMemoryBarrier, FrEx loop). Each
@@ -859,6 +857,24 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // mirrors metalBridge's resize discipline above.
         final long perfT3 = System.nanoTime();
         this.perfEncode += perfT3 - perfT2;  // encoding the LOD pass (CPU side)
+
+        // Copy this frame's combined depth into the Voxy-owned sampleable texture, for next frame's
+        // Hi-Z build. Taken HERE -- after the LOD passes, before submit() -- because at this point MC's
+        // attachment holds vanilla terrain AND the LOD just drawn, so one copy carries both the terrain
+        // occlusion and the LOD self-occlusion the pyramid needs. Encoded before submit() so it rides
+        // the same command buffer rather than adding a wait.
+        if (HIZ_BUILD && metallumTarget && this.metalDepthTex != null
+                && this.metallumDepth != null && this.metallumDepth.id() != -1) {
+            // The destination handle comes from MetalHandleMap, NOT from MetallumBridge.textureHandle:
+            // that bridge resolves a BLAZE3D texture via reflection (it exists so Voxy can sample MC's
+            // own atlas) and throws "argument type mismatch" on a Voxy IGpuTexture. MetalTexture
+            // registers its raw handle here in store(), which is the lookup that matches the type.
+            final long dstHandle = me.cortex.voxy.client.core.metal.MetalHandleMap
+                    .getHandle(this.metalDepthTex.id());
+            if (dstHandle != 0) {
+                voxyMb.copyTextureToTexture(this.metallumDepth.metalHandle(), dstHandle, fbw, fbh);
+            }
+        }
         backend.submit();
         this.perfSubmit += System.nanoTime() - perfT3;
         this.perfReport();

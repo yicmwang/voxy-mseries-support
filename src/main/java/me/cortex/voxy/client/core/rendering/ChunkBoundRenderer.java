@@ -58,11 +58,13 @@ import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
  * stay raw GL (glUseProgram + glDrawElementsInstanced); per-call SSBO/UBO
  * binding lives in {@link #render}.
  *
- * M13 chunk 3: {@link #renderMetal} is the encoder-based Metal port — a
- * depth-only render pass into {@code viewport.depthBoundingBuffer} whose
- * result quads.frag's depth-bound test samples to discard LOD fragments
- * inside MC's loaded-chunk volume. {@link #clearMetal} mirrors the GL
- * gate's clear-to-0 branch.
+ * M13 chunk 3 introduced an encoder-based Metal port (renderMetal/clearMetal) with a
+ * depth-readback leg (exportBoundMaskMetal). All three are DELETED: they had no callers, so the mask was
+ * never rasterized on Metal, {@code viewport.depthBoundingBuffer} was never written, and the per-frame
+ * binds of it that MDICSectionRenderer still did were paying for nothing. The sample they fed was
+ * already compiled out by VOXY_NO_DEPTH_BOUND anyway, which is injected unless the env var is exactly
+ * "0". Only the GL path remains live, and only for a GL backend: this class is effectively GL-only.
+ * Reviving a Metal mask needs all of that revisited, not just the renderer restored.
  */
 public class ChunkBoundRenderer {
     private static final int INIT_MAX_CHUNK_COUNT = 1 << 12;
@@ -281,118 +283,7 @@ public class ChunkBoundRenderer {
         UploadStream.INSTANCE.commit();
     }
 
-    /**
-     * Metal port of {@link #render} — same remove-queue drain, same
-     * SceneUniform upload (plus the shared NDC remap so this pass and the
-     * LOD terrain pass agree on depth convention), then a depth-only render
-     * pass rasterizing the loaded-chunk AABBs into
-     * {@code viewport.depthBoundingBuffer}. quads.frag's depth-bound test
-     * (binding 2) discards LOD fragments nearer than this mask, so LOD never
-     * renders inside MC's loaded-chunk volume.
-     *
-     * One instanced draw of ceil(count/32) batches over the uint16 cube
-     * index buffer; the shader-side section.w guard collapses the last
-     * batch's over-draw slots (no baseInstance tail draw — Metal's
-     * base_instance propagation is unreliable, see VOXY_METAL_BI_FIX).
-     * Depth/cull state is baked into the pipeline (GREATER + write against
-     * the 0.0 clear keeps the farthest AABB face per pixel).
-     */
-    public void renderMetal(Viewport<?> viewport, RenderBackend backend) {
-        if (viewport.width <= 0 || viewport.height <= 0) return; // mirrors runPipelineMetal's guard
-        if (!this.remQueue.isEmpty()) {
-            boolean wasEmpty = this.chunk2idx.isEmpty();
-            this.remQueue.forEach(this::_remPos);
-            this.remQueue.clear();
-            if (!wasEmpty) UploadStream.INSTANCE.commit();
-        }
-        // Round 23: drain the ADD queue BEFORE the mask draw, not after.
-        // Adds are enqueued during Sodium's setupTerrain (section upload),
-        // which runs earlier in the same frame — draining after the draw
-        // meant every freshly built section was rendered by Sodium for >=1
-        // frame while ABSENT from the mask, so the SOLID-head LOD depth
-        // inject stomped its pixels (real-terrain flicker during camera
-        // movement; the dominant underwater x-ray trigger).
-        if (!this.addQueue.isEmpty()) {
-            this.addQueue.forEach(this::_addPos);
-            this.addQueue.clear();
-            UploadStream.INSTANCE.commit();
-        }
-
-        this.uploadSceneUniform(viewport, true);
-
-        int count = this.chunk2idx.size();
-        try (RenderEncoder encoder = backend.beginRenderPass(boundDepthPass(viewport))) {
-            if (count > 0) {
-                encoder.setPipeline(this.rasterPipeline);
-                encoder.setViewport(0, 0, viewport.width, viewport.height, 0, 1);
-                encoder.setBuffer(SCENE_UNIFORM_BINDING, this.uniformBuffer, 0);
-                encoder.setBuffer(CHUNK_POS_BINDING, this.chunkPosBuffer, 0);
-                encoder.bindIndexBuffer(SharedIndexBuffer.INSTANCE_BB_SHORT.getBuffer(),
-                        RenderEncoder.INDEX_TYPE_UINT16, 0);
-                encoder.drawIndexed(RenderEncoder.PRIMITIVE_TRIANGLES,
-                        6 * 2 * 3 * 32, (count + 31) / 32, 0, 0, 0);
-            }
-        }
-
-        exportBoundMaskMetal(viewport, backend);
-    }
-
-    /**
-     * Metal equivalent of the GL gate's {@code depthBoundingBuffer.clear(0)}
-     * branch — a load-action-only pass clearing the bound mask to 0.0
-     * ("no bound; never discard"), no draws. Pattern:
-     * HiZBuffer.zeroFillPyramid.
-     */
-    public void clearMetal(Viewport<?> viewport) {
-        if (viewport.width <= 0 || viewport.height <= 0) return; // mirrors runPipelineMetal's guard
-        try (RenderEncoder ignored = RenderBackendFactory.get().beginRenderPass(boundDepthPass(viewport))) {
-            // no draws — the CLEAR load action does the fill
-        }
-        exportBoundMaskMetal(viewport, RenderBackendFactory.get());
-    }
-
-    /**
-     * Round 20: blit the bound mask's depth into a plain buffer for
-     * quads.frag's VOXY_METAL_BOUND_SSBO read. Sampling the depth texture
-     * directly silently reads ZEROS on Metal (texture2d&lt;float&gt; vs
-     * depth-format mismatch — same bug class as the round-18 Iris depth
-     * export), which left the bound test inert since M13 chunk 3: LODs drew
-     * inside the loaded-chunk volume, and once the Iris inject started
-     * writing real depth they stomped the pack's terrain depth test
-     * ("only a few blocks textured", underwater cave X-ray under BSL).
-     * Encoder order on the active command buffer = bound pass → this blit →
-     * LOD pass, so the LOD fragments read this frame's mask. Layout: uint
-     * width + 12 pad bytes, floats at offset 16.
-     */
-    private static void exportBoundMaskMetal(Viewport<?> viewport, RenderBackend backend) {
-        if (!(backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mrb)) {
-            return;
-        }
-        long size = 16L + (long) viewport.width * viewport.height * 4L;
-        var buf = viewport.metalBoundReadBuffer;
-        if (buf == null || buf.size() != size) {
-            if (buf != null) buf.free();
-            buf = backend.createBuffer(size);
-            viewport.metalBoundReadBuffer = buf;
-            // Width header, written once per (re)alloc — Shared storage is
-            // CPU-visible and the GPU only ever writes from offset 16 on.
-            org.lwjgl.system.MemoryUtil.memPutInt(
-                    ((me.cortex.voxy.client.core.metal.MetalBuffer) buf).getContentsPtr(),
-                    viewport.width);
-        }
-        mrb.copyTextureToBuffer(viewport.depthBoundingBuffer.getDepthTex(), buf,
-                viewport.width, viewport.height, 16);
-    }
-
-    private static RenderPassDesc boundDepthPass(Viewport<?> viewport) {
-        return RenderPassDesc.builder(viewport.width, viewport.height)
-                .depthAttachment(viewport.depthBoundingBuffer.getDepthTex(), 0,
-                        RenderPassDesc.LoadAction.CLEAR,
-                        RenderPassDesc.StoreAction.STORE, 0.0f)
-                .build();
-    }
-
-    private void _remPos(long pos) {
+                    private void _remPos(long pos) {
         int idx = this.chunk2idx.remove(pos);
         if (idx == -1) {
             Logger.warn("Chunk not in map: " + pos);

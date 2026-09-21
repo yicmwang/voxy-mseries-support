@@ -493,6 +493,35 @@ public class MetalRenderBackend implements RenderBackend {
     }
 
     /**
+     * Copy one texture's region into another, on the GPU. Same encoder discipline as
+     * {@link #copyBufferSubData}: encode into the active command buffer so the copy executes in request
+     * order with the frame's passes, and take the blit encoder slot rather than opening one while a
+     * caller's render pass is still encoding -- Metal refuses that, which is what broke the borrowed
+     * encoder arrangement.
+     *
+     * <p>Used to copy Minecraft's depth attachment into a Voxy-owned sampleable texture for the Hi-Z
+     * pyramid. MC's attachment is Depth32Float but is missing {@code MTLTextureUsageShaderRead}, so a
+     * sampler reads zeros from it however correct its format is, and a blit is the only way across.
+     */
+    public void copyTextureToTexture(final long srcHandle, final long dstHandle,
+                                     final int width, final int height) {
+        if (srcHandle == 0 || dstHandle == 0) return;
+        this.ensureActiveCommandBuffer();
+        if (this.activeBlitEncoder == 0) {
+            this.endForeignEncoderIfNeeded();
+            logEncoderOp("blit newBlitEncoder (texture copy)");
+            this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
+            if (this.activeBlitEncoder == 0) {
+                throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
+            }
+        }
+        MetalNative.mtlBlitEncoderCopyTextureToTexture(this.activeBlitEncoder,
+                srcHandle, 0, 0, 0, width, height, dstHandle, 0, 0, 0);
+        this.activeBufferHasBlits = true;
+        this.closeBlitEncoderIfGuest();
+    }
+
+    /**
      * Encode a texture→buffer copy into the ACTIVE command buffer, preserving
      * frame encoding order (lands after already-encoded passes; the next
      * {@code beginRenderPass} closes the blit encoder, so passes encoded later

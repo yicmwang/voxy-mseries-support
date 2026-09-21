@@ -327,8 +327,42 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlBlitEncoderCopyTextureToBuf
     }
 }
 
-// -------- Blend state on render pipeline descriptor --------
+// Copies one texture into another on the GPU.
+//
+// Added for the Hi-Z pyramid source. Minecraft's depth attachment IS Depth32Float -- the format the
+// parked attempt blamed is not what this path has -- but the sampler still reads zeros from it,
+// because it was not created with MTLTextureUsageShaderRead. A USAGE problem, not a format one, and
+// no shader-side change can work around it.
+//
+// A blit copy is the only way across: it needs no shader-read usage on the source and runs no shader
+// at all, whereas any render-pass copy would have to sample the very texture that cannot be sampled.
+// The destination is a Voxy-owned texture created with ShaderRead, which the sampler can then read.
+extern "C" JNIEXPORT void JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlBlitEncoderCopyTextureToTexture(
+        JNIEnv *, jclass, jlong encoderHandle,
+        jlong srcTextureHandle, jint srcLevel, jint srcX, jint srcY, jint srcWidth, jint srcHeight,
+        jlong dstTextureHandle, jint dstLevel, jint dstX, jint dstY) {
+    @autoreleasepool {
+        if (encoderHandle == 0 || srcTextureHandle == 0 || dstTextureHandle == 0) return;
+        id<MTLBlitCommandEncoder> encoder = voxy_handle_cast<id<MTLBlitCommandEncoder>>(encoderHandle);
+        id<MTLTexture> srcTexture = voxy_handle_cast<id<MTLTexture>>(srcTextureHandle);
+        id<MTLTexture> dstTexture = voxy_handle_cast<id<MTLTexture>>(dstTextureHandle);
+        MTLOrigin srcOrigin = MTLOriginMake((NSUInteger)srcX, (NSUInteger)srcY, 0);
+        MTLOrigin dstOrigin = MTLOriginMake((NSUInteger)dstX, (NSUInteger)dstY, 0);
+        MTLSize size = MTLSizeMake((NSUInteger)srcWidth, (NSUInteger)srcHeight, 1);
+        [encoder copyFromTexture:srcTexture
+                     sourceSlice:0
+                     sourceLevel:(NSUInteger)srcLevel
+                    sourceOrigin:srcOrigin
+                      sourceSize:size
+                       toTexture:dstTexture
+                destinationSlice:0
+                destinationLevel:(NSUInteger)dstLevel
+               destinationOrigin:dstOrigin];
+    }
+}
 
+// -------- Blend state on render pipeline descriptor --------
 extern "C" JNIEXPORT void JNICALL
 Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderPipelineDescriptorSetColorAttachmentBlending(
         JNIEnv *, jclass, jlong descHandle, jint index, jboolean enable,

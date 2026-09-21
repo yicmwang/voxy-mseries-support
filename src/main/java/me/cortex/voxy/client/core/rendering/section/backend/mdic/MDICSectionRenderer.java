@@ -88,7 +88,6 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      * sampler). Metal-only — the GL path binds the raw texture unit in
      * {@link #bindRenderingBuffers}; null on OpenGL.
      */
-    private final me.cortex.voxy.client.core.gpu.IGpuSampler boundDepthSampler;
 
     // M9 migration: MDIC's 5 non-Iris-patched shaders (4 compute + 1 graphics)
     // now flow through RenderBackend.create*Pipeline so they compile cleanly on
@@ -343,20 +342,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         this.pipeline = pipeline;
         //The pipeline can be used to transform the renderer in abstract ways
 
-        // M13 chunk 3: sampler for the bound-depth texture at binding 2 —
-        // quads.frag only texelFetches it, but the MSL signature still wants
-        // a sampler bound alongside the texture.
-        this.boundDepthSampler = this.backend.getType() != BackendType.OPENGL
-                ? this.backend.createSampler(me.cortex.voxy.client.core.gpu.SamplerDesc.builder()
-                        .filter(me.cortex.voxy.client.core.gpu.SamplerDesc.Filter.NEAREST,
-                                me.cortex.voxy.client.core.gpu.SamplerDesc.Filter.NEAREST)
-                        .mipFilter(me.cortex.voxy.client.core.gpu.SamplerDesc.MipFilter.NEAREST)
-                        .wrap(me.cortex.voxy.client.core.gpu.SamplerDesc.Wrap.CLAMP_TO_EDGE,
-                                me.cortex.voxy.client.core.gpu.SamplerDesc.Wrap.CLAMP_TO_EDGE)
-                        .label("MDIC.boundDepthSampler")
-                        .build())
-                : null;
-
+        // The bound-depth sampler used to be created here, for the depth mask at binding 2. Removed
+        // with the binding: the mask is never rasterized on Metal (ChunkBoundRenderer.renderMetal has
+        // no callers), quads.frag's depth-bound sample is compiled out by default anyway, and a sampler
+        // for a texture nothing samples is a GPU object created to sit idle for the session.
         String vertex = ShaderLoader.parse("voxy:lod/gl46/quads3.vert");
         String taa = pipeline.taaFunction("taaShift");
         if (taa != null) {
@@ -2173,26 +2162,18 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         // Texture / sampler binding 1 — MC's 16×16 RGBA8 lightmap, mirrored
         // into a Shared-storage Metal texture each frame (M13 chunk 2).
         LightMapHelper.bindMetal(encoder, 1);
-        // Texture / sampler binding 2 — the chunk-bound depth mask
-        // (ChunkBoundRenderer.renderMetal rasterized it into
-        // viewport.depthBoundingBuffer earlier this frame; same command
-        // queue, so ordering is guaranteed). quads.frag's depth-bound test
-        // texelFetches it to discard LOD fragments inside MC's loaded-chunk
-        // volume (M13 chunk 3). Bound for all three Metal draws (opaque /
-        // temporal / translucent share this method). Harmlessly unused when
-        // the VOXY_NO_DEPTH_BOUND kill switch removed the sample.
-        if (this.boundDepthSampler != null) {
-            encoder.setTexture(2, viewport.depthBoundingBuffer.getDepthTex());
-            encoder.setSampler(2, this.boundDepthSampler);
-        }
-        // Buffer binding 9 — the bound mask as raw floats (round 20,
-        // VOXY_METAL_BOUND_SSBO; 6 is quads3.vert's per-draw UBO slot, 7/8
-        // are cmdgen compute bindings). The texture binding above is kept
-        // for compatibility but the shader no longer samples it (depth-
-        // format textures read zeros through texture2d<float> declarations).
-        if (viewport.metalBoundReadBuffer != null) {
-            encoder.setBuffer(9, viewport.metalBoundReadBuffer, 0);
-        }
+        // Texture/sampler binding 2 and buffer binding 9 used to carry the chunk-bound depth mask here.
+        // Both are gone, and they were carried for nothing on this path:
+        //   - the mask's raster is ChunkBoundRenderer.renderMetal, which has NO callers -- so nothing
+        //     ever writes viewport.depthBoundingBuffer on Metal;
+        //   - quads.frag's depth-bound test is compiled out anyway, because VOXY_NO_DEPTH_BOUND is
+        //     injected unless the env var is exactly "0" (see the terrain defines above);
+        //   - and the binding-9 comment already conceded "the shader no longer samples it" -- a
+        //     depth-format texture reads zeros through a texture2d<float> declaration, which is the
+        //     same usage-flag wall that blocks the Hi-Z pyramid from reading MC's depth directly.
+        // So this was a per-frame bind of an unwritten, unsampled texture plus an SSBO nothing read.
+        // Kept as a note rather than silently deleted: if the mask is ever revived on Metal it needs
+        // all three of those facts revisited, not just the bind restored.
         // Buffer binding 10 — the built-section mask again, for the per-chunk-column cull. The same
         // upload cmdgen read this frame; the compute pass that maintains it runs before the draws.
         // Bound for all three draws (this method is shared), because the cull has to apply to the
@@ -2512,6 +2493,5 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         this.translucentGenPipeline.close();
         this.prefixSumPipeline.close();
         this.statisticsBuffer.free();
-        if (this.boundDepthSampler != null) this.boundDepthSampler.close();
     }
 }

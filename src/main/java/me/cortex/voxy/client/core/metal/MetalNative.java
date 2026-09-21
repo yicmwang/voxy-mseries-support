@@ -545,6 +545,24 @@ public final class MetalNative {
             int srcX, int srcY, int srcWidth, int srcHeight,
             long dstBuffer, long dstOffset, int bytesPerRow, int bytesPerImage);
 
+    /**
+     * Copies a region of one texture into another, on the GPU, with no shader involved.
+     *
+     * <p>Exists because Minecraft's depth attachment cannot be sampled: its format is Depth32Float,
+     * but it was not created with {@code MTLTextureUsageShaderRead}, so a sampler reads zeros from it
+     * no matter how correct the format is. A blit needs no shader-read usage on the source, whereas a
+     * render-pass copy would have to sample exactly the texture that cannot be sampled. The
+     * destination is a Voxy-owned texture that <i>is</i> created with ShaderRead.
+     *
+     * <p>Used to feed the Hi-Z pyramid a combined depth image: MC's attachment after the LOD pass holds
+     * vanilla terrain AND the LOD's own depth, so one copy per frame gives the occlusion pyramid both
+     * terrain occlusion and LOD self-occlusion.
+     */
+    public static native void mtlBlitEncoderCopyTextureToTexture(
+            long encoder, long srcTexture, int srcLevel,
+            int srcX, int srcY, int srcWidth, int srcHeight,
+            long dstTexture, int dstLevel, int dstX, int dstY);
+
     // --- Metal primitive types (match MTLPrimitiveType) ---
     public static final int MTLPrimitiveTypePoint         = 0;
     public static final int MTLPrimitiveTypeLine          = 1;
