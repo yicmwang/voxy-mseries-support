@@ -13,27 +13,9 @@
 #endif
 
 layout(binding = 0) uniform sampler2D blockModelAtlas;
-layout(binding = 2) uniform sampler2D depthTex;
+// `layout(binding = 2) uniform sampler2D depthTex;` used to sit here, feeding the chunk-bound
+// depth mask whose test is deleted below. Nothing binds texture 2 any more.
 
-#ifdef VOXY_METAL_BOUND_SSBO
-// Metal-only (round 20): the chunk-bound mask arrives as raw floats in a
-// plain buffer, NOT via depthTex — sampling a depth-format texture through
-// the texture2d<float> declaration SPIRV-Cross emits for sampler2D silently
-// reads ZEROS on Metal (same bug class as the round-18 Iris depth export),
-// which left this mask inert since M13 chunk 3. ChunkBoundRenderer blits
-// the bound depth into this buffer after the bound pass; width rides in
-// the header so no pipeline rebuild is needed on resize.
-// Binding 9: 0-5 are the terrain draw's buffer table, 6 is quads3.vert's
-// per-draw UBO (Metal setVertexBytes slot — setBuffer would clobber it),
-// 7/8 belong to the cmdgen compute defines.
-layout(binding = 9, std430) readonly restrict buffer BoundDepthBuffer {
-    uint boundWidth;
-    uint _boundPad1;
-    uint _boundPad2;
-    uint _boundPad3;
-    float boundDepths[];
-};
-#endif
 
 #ifdef VOXY_LOD_CHUNK_CULL
 // Per-SECTION cull of the LOD against the set of sections vanilla has drawn.
@@ -544,32 +526,14 @@ void main() {
         return;
     }
 
-#ifndef VOXY_NO_DEPTH_BOUND
-    //Check the minimum bounding texture and ensure we are greater than it.
-    // M13 chunk 1 split: this used to live under `#ifndef VOXY_NO_ATLAS` so
-    // the atlas-disabled debug path also skipped the depth-bounding check.
-    // M13 chunk 3: the chunk-bound depth mask now renders on Metal too
-    // (ChunkBoundRenderer.renderMetal → depthBoundingBuffer, bound at
-    // texture slot 2), so this check is ON by default on every backend;
-    // VOXY_NO_DEPTH_BOUND=1 is the Metal kill switch that removes it.
-#ifdef VOXY_METAL_BOUND_SSBO
-    float voxyBoundDepth = boundDepths[uint(gl_FragCoord.y) * boundWidth + uint(gl_FragCoord.x)];
-#else
-    float voxyBoundDepth = texelFetch(depthTex, ivec2(gl_FragCoord.xy), 0).r;
-#endif
-    if (gl_FragCoord.z < voxyBoundDepth) {
-        #ifdef VOXY_BOUND_DEBUG
-        // VOXY_BOUND_DEBUG=1 (Metal mask-verification aid): paint the
-        // bound-discarded fragments solid red instead of discarding so a
-        // screenshot shows exactly where the chunk-bound depth mask bites.
-        outColour = vec4(1.0, 0.0, 0.0, 1.0);
-        return;
-        #else
-        discard;
-        return;
-        #endif
-    }
-#endif // VOXY_NO_DEPTH_BOUND
+    // The chunk-bound depth mask used to be tested here, under `#ifndef VOXY_NO_DEPTH_BOUND`. Deleted,
+    // and it was dead before it was deleted: the define was injected by default, so the block was
+    // compiled out of every shipping build; its `VOXY_METAL_BOUND_SSBO` arm had no producer anywhere in
+    // the tree; and the comment it carried claimed the mask "renders on Metal too" via a
+    // ChunkBoundRenderer.renderMetal that had already been removed. Nothing replaces it deliberately --
+    // Voxy draws straight into Minecraft's own depth attachment, so the ordinary depth test already IS
+    // the occlusion, per pixel, for free, and a chunk-AABB mask could only ever be chunk-granular.
+
 
 #ifndef VOXY_NO_ATLAS
 #ifndef VOXY_LOD_NO_DISCARD

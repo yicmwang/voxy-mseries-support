@@ -163,22 +163,16 @@ public final class ShaderCompilerSmokeTest {
                 new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
                         Map.of("VOXY_NO_DEPTH_BOUND", "", "VOXY_DEBUG_MAGENTA_MISSING", "", "USE_ENV_FOG", ""),
                         "lod/gl46/quads.frag (Metal — atlas bakery + magenta missing)"),
-                // M13 chunk 3: chunk-bound depth mask. The Metal default now
-                // ENABLES the depth-bound sample (no VOXY_NO_DEPTH_BOUND) —
-                // verify the depthTex texelFetch path transpiles for both the
-                // opaque and translucent pipelines, plus the VOXY_BOUND_DEBUG
-                // red-tint verification variant. The mask's own raster
-                // pipeline (chunkoutline/outline.vsh + outline.fsh) is
-                // covered by the cases near the top of this list.
+                // The chunk-bound depth mask's cases are GONE with the mask itself. Its
+                // `VOXY_BOUND_DEBUG` red-tint case was the only thing that ever injected that define,
+                // and the mask's real define was injected ON by default — so the branch was compiled
+                // out of every shipping build and only this test ever compiled it in.
                 new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
                         Map.of("VOXY_FORCE_OPAQUE_ALPHA", "", "USE_ENV_FOG", ""),
                         "lod/gl46/quads.frag (Metal — depth-bound enabled default)"),
                 new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
                         Map.of("VOXY_FORCE_OPAQUE_ALPHA", "", "TRANSLUCENT", "", "USE_ENV_FOG", ""),
                         "lod/gl46/quads.frag (Metal — depth-bound enabled translucent)"),
-                new ShaderCase("lod/gl46/quads.frag", RuntimeShaderCompiler.Stage.FRAGMENT,
-                        Map.of("VOXY_FORCE_OPAQUE_ALPHA", "", "USE_ENV_FOG", "", "VOXY_BOUND_DEBUG", ""),
-                        "lod/gl46/quads.frag (Metal — depth-bound VOXY_BOUND_DEBUG red tint)"),
                 // M9 — MDIC's compute pipelines (cmdgen already covered above).
                 new ShaderCase("util/prefixsum/simple.comp", RuntimeShaderCompiler.Stage.COMPUTE,
                         Map.of("IO_BUFFER", "0"),

@@ -55,9 +55,6 @@ struct DrawCommand {
 };
 
 
-#ifdef BLOCK_MODEL_TEXTURE_BINDING
-layout(binding = BLOCK_MODEL_TEXTURE_BINDING) uniform sampler2D blockModelAtlas;
-#endif
 
 
 #ifndef Quad

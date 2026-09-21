@@ -443,11 +443,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // CUTOUT pass, so SOLID and CUTOUT_MIPPED are in the depth buffer but CUTOUT and
                 // TRANSLUCENT are not yet. LOD can therefore still land where water or cutout foliage
                 // will draw. That is an ordering problem and belongs fixed as one.
-                // VOXY_NO_DEPTH_BOUND=0 restores the old mask path for an A/B.
-                if (!"0".equals(System.getenv("VOXY_NO_DEPTH_BOUND"))) {
-                    opaqueDefines.put("VOXY_NO_DEPTH_BOUND", "");
-                    translucentDefines.put("VOXY_NO_DEPTH_BOUND", "");
-                }
+                // VOXY_NO_DEPTH_BOUND is no longer injected: quads.frag's depth-bound mask test is
+                // deleted, so the define had nothing left to guard. It was injected by DEFAULT, which
+                // is why the mask was compiled out of every shipping build while a comment claimed it
+                // was live -- see the note where the test used to be.
 
                 // quads.frag's second colour output: this fragment's depth as colour, which is the Hi-Z
                 // pyramid's source. Metal ONLY, and that is not tidiness -- a shader declaring an output
@@ -466,8 +465,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if (lodBias == null || lodBias.isBlank()) lodBias = "1e-5";
                 opaqueDefines.put("VOXY_LOD_DEPTH_BIAS", lodBias + "f");
                 translucentDefines.put("VOXY_LOD_DEPTH_BIAS", lodBias + "f");
-                boolean noDepthBound = true;
-                boolean boundDebug = false;
+                // `noDepthBound` and `boundDebug` used to sit here as constants feeding the
+                // [Metal-DEFINES] prose below. Both were assigned once and never reassigned, so the
+                // prose they fed described a branch that could not vary -- and the prose was
+                // hand-maintained besides, which is why that log line misled this investigation twice.
+                // It now prints the ACTUAL define key set instead of a sentence someone remembered.
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
                 // VOXY_LOD_FORCE_MAGENTA=1 -- bisection switch (see quads.frag). Solid magenta
                 // emitted before every discard/early-out, so the frame shows whether LOD geometry
@@ -720,11 +722,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // grep can't.
                 boolean bakeryOff = "1".equals(System.getenv("VOXY_BAKERY_OFF"));
                 boolean debugMissing = "1".equals(System.getenv("VOXY_BAKERY_DEBUG_MISSING"));
+                // The depth-bound clause is gone from this prose with the mask itself; both the defining
+                // branch and the red-tint variant it named are deleted from quads.frag.
                 Logger.info("[Metal-DEFINES] terrain shader injections: " +
-                        (noDepthBound
-                                ? "VOXY_NO_DEPTH_BOUND (depth-bound kill switch)"
-                                : "depth-bound ON" + (boundDebug ? " + VOXY_BOUND_DEBUG (red tint)" : "")) +
-                        " + VOXY_FORCE_OPAQUE_ALPHA" +
+                        "VOXY_FORCE_OPAQUE_ALPHA" +
                         (bakeryOff
                                 ? " + VOXY_NO_ATLAS (bakery disabled hash-colour fallback)"
                                 : (debugMissing ? " + VOXY_DEBUG_MAGENTA_MISSING" : " + atlas bakery")) +

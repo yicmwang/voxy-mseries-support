@@ -87,9 +87,6 @@ void enqueueSelfForRender(in UnpackedNode node) {
             if (renderIndex < renderQueueMaxSize) {
                 renderQueue[renderIndex] = getMesh(node);
 
-                #ifdef IS_DEBUG
-                debugRenderNodeQueue[atomicAdd(debugRenderNodeQueueIndex, 1)] = node.nodeId;
-                #endif
 
                 #ifdef HAS_STATISTICS
                 atomicAdd(renderCounts[node.lodLevel], 1);
