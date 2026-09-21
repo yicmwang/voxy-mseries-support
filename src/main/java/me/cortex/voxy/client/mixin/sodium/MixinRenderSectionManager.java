@@ -38,12 +38,11 @@ public class MixinRenderSectionManager {
     @Inject(method = "<init>", at = @At("TAIL"))
     private void voxy$resetChunkTracker(ClientLevel level, int renderDistance, SortBehavior sortBehavior, CallbackInfo ci) {
         this.bottomSectionY = this.level.getMinY()>>4;
-        // A new manager is built on a level change AND on every render-distance change, but only the
-        // first means the mask's contents are wrong. Clearing on a distance change is what left the
-        // mask empty for the rest of a session (measured: built=0 for 3600 consecutive frames after
-        // an RD change), and an empty mask culls nothing. See resetForLevel for why the distance case
-        // does not need it.
-        me.cortex.voxy.client.core.rendering.BuiltSectionMask.resetForLevel(level);
+        // No mask reset here any more. BuiltSectionMask holds nothing across frames -- it is rebuilt
+        // from each frame's render list -- so there is no accumulated set to invalidate when Sodium
+        // rebuilds its section manager. Clearing it here used to be needed to drop another world's
+        // sections, and that clear was also what disabled the cull for a whole session: the set only
+        // refilled from mesh-upload deltas, and Sodium does not re-mesh what is already built.
     }
 
     @Inject(method = "onChunkRemoved", at = @At("HEAD"))

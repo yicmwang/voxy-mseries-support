@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core.rendering;
 
+import net.minecraft.core.SectionPos;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -7,331 +8,133 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Pins the rule that decides whether a LOD section may be removed because vanilla Minecraft is
- * already drawing it.
+ * Pins the packing that turns "the sections vanilla is drawing this frame" into the column bitmask
+ * the LOD's fragment stage tests.
  *
- * <p>The rule is a safety property, not a preference: removing a section vanilla does not draw
- * leaves a hole, because the LOD was the only thing that would have drawn it. Measured on device:
- * with the cull off the missing chunks disappear; with it on their positions follow the camera.
+ * <p>What this class used to test is worth recording, because the tests were green through every
+ * version of a broken cull. They tested a DISTANCE RULE — sphere, then cylinder, then a cylinder with
+ * a vertical cap, then Sodium's own union — as a pure function. Each was green while the feature was
+ * wrong, because the rule was never the whole problem: the rule existed to approximate a set that
+ * Sodium hands over directly, and no pure-function test can see an approximation being wrong.
  *
- * <p>Two things about the rule are load-bearing and were each wrong in an earlier version.
- *
- * <p><b>It is per SECTION, not per LOD node.</b> A node is 2x2 chunk columns at detail 0 and more
- * above, so a node-level answer decides for columns nobody asked about.
- *
- * <p><b>It is three-dimensional, not two.</b> Sodium enforces a vertical render distance as well as
- * a horizontal one, so a column having geometry says nothing about whether the section above it
- * does. A column-keyed cull removes LOD sections vanilla never drew — a hole in the air — and
- * because the square is camera-relative those holes travel with the player.
+ * <p>So the properties pinned here are the ones on the seam instead: that the producer's packing and
+ * the consumer's lookup agree ({@link #theShaderLookupAgreesWithThePacking}), that a frame's feed does
+ * not leak into the next ({@link #aSectionDrawnLastFrameIsNotCoveredThisFrame}), and that the address
+ * space's edges fail toward keeping the LOD rather than removing it.
  */
 class BuiltSectionMaskTest {
 
-    private static final int SIDE = 17;
-    private static final int C = SIDE / 2;   // the camera's own column in the square's indices
+    private static final int SIDE = 33;          // 4*rd+1 at rd 8
+    private static final int ANCHOR_X = -100;
+    private static final int ANCHOR_Z = -100;
+    private static final int CAM_SEC_Y = 8;
 
-    /** The square is anchored so that world sections -C..C land on indices 0..2C. */
-    private static final int ANCHOR = -C;
-    private static long[] empty() {
-        return new long[SIDE * SIDE];
+    private static long at(int x, int y, int z) {
+        return SectionPos.asLong(x, y, z);
     }
 
-    private static void mark(long[] columnY, int secX, int secY, int secZ) {
-        int cx = secX - ANCHOR, cz = secZ - ANCHOR;
-        if (cx < 0 || cz < 0 || cx >= SIDE || cz >= SIDE) return;
-        int bit = secY + 32;
-        if (bit < 0 || bit > 63) return;
-        columnY[cz * SIDE + cx] |= 1L << bit;
+    private static long[] columnsOf(long... sections) {
+        BuiltSectionMask.beginFrame();
+        for (long s : sections) {
+            BuiltSectionMask.addDrawn(s);
+        }
+        return BuiltSectionMask.buildColumns(SIDE, ANCHOR_X, CAM_SEC_Y, ANCHOR_Z);
     }
 
-    private static boolean covered(long[] columnY, int secX, int secY, int secZ) {
-        return BuiltSectionMask.sectionCovered(columnY, SIDE, ANCHOR, 0, ANCHOR, secX, secY, secZ);
-    }
-
-    @Test
-    void aBuiltSectionIsCovered() {
-        long[] m = empty();
-        mark(m, 3, 4, 5);
-        assertTrue(covered(m, 3, 4, 5));
+    private static boolean covered(long[] columnY, int x, int y, int z) {
+        return BuiltSectionMask.shaderSaysCovered(columnY, SIDE, ANCHOR_X, CAM_SEC_Y, ANCHOR_Z, x, y, z);
     }
 
     @Test
-    void aColumnBeingBuiltDoesNotCoverItsOtherHeights() {
-        // THE regression, and the one the user found by eye. Vanilla has geometry at section
-        // (2, 0, 2). The section above it is not built -- vanilla renders nothing there, at any
-        // altitude -- so the LOD must not be removed there. A column-keyed cull removed it, which
-        // is a hole in the air directly above terrain vanilla draws, and the hole follows the camera
-        // because the square does.
-        long[] m = empty();
-        mark(m, 2, 0, 2);
-
-        assertTrue(covered(m, 2, 0, 2), "the section vanilla built");
-        assertFalse(covered(m, 2, 1, 2), "one section up: vanilla draws nothing here");
-        assertFalse(covered(m, 2, 8, 2), "far above");
-        assertFalse(covered(m, 2, -1, 2), "and below");
+    void aDrawnSectionIsClaimed() {
+        long[] m = columnsOf(at(-92, 8, -92));       // the camera's own section
+        assertTrue(covered(m, -92, 8, -92));
+        assertEquals(1, BuiltSectionMask.drawnCount());
     }
 
     @Test
-    void everyHeightVanillaBuiltIsCoveredIndependently() {
-        long[] m = empty();
-        mark(m, 0, -4, 0);
-        mark(m, 0, 5, 0);
-        assertTrue(covered(m, 0, -4, 0));
-        assertTrue(covered(m, 0, 5, 0));
-        assertFalse(covered(m, 0, 0, 0), "the gap between them is not covered");
-        assertFalse(covered(m, 0, 6, 0), "nor the section above the top one");
+    void nothingIsClaimedBeforeAnyFeed() {
+        BuiltSectionMask.beginFrame();
+        long[] m = BuiltSectionMask.buildColumns(SIDE, ANCHOR_X, CAM_SEC_Y, ANCHOR_Z);
+        for (long c : m) {
+            assertEquals(0L, c, "an empty feed must claim nothing");
+        }
+    }
+
+    @Test
+    void aSectionDrawnLastFrameIsNotCoveredThisFrame() {
+        // The property that replaces the whole reset/prune story. The mask is not a set that
+        // accumulates and has to be invalidated when Sodium rebuilds; it is a snapshot of one frame's
+        // render list, so a section that stops being drawn stops being claimed with no policy at all.
+        // This is also why a render-distance change needs no reset: the old version cleared the mask
+        // there and could never refill it, and the cull was silently off for the rest of the session.
+        columnsOf(at(-92, 8, -92), at(-91, 8, -92));
+
+        long[] next = BuiltSectionMask.buildColumns(SIDE, ANCHOR_X, CAM_SEC_Y, ANCHOR_Z);
+        assertTrue(covered(next, -92, 8, -92), "still drawn, so still claimed");
+
+        // A new frame offers only one of the two.
+        long[] after = columnsOf(at(-91, 8, -92));
+        assertFalse(covered(after, -92, 8, -92), "no longer drawn, so no longer claimed");
+        assertTrue(covered(after, -91, 8, -92));
+    }
+
+    @Test
+    void theShaderLookupAgreesWithThePacking() {
+        // The seam that had no test: the producer writes columnY[dz*side+dx] with bit (secY-camSecY)+32,
+        // and quads.frag reads columnY[cz*sd+cx] with bit (secY-camSecY)+32. If the two ever disagreed,
+        // the symptom would be a hole or an over-draw in the world with nothing else to go on.
+        long[] fed = { at(-92, 8, -92), at(-88, 4, -95), at(-95, 12, -88) };
+        long[] m = columnsOf(fed);
+        for (long s : fed) {
+            assertTrue(covered(m, SectionPos.x(s), SectionPos.y(s), SectionPos.z(s)),
+                    "every section fed must be covered by the shader's own lookup");
+        }
+        // A control that was never fed, and is inside the square and the bit span.
+        assertFalse(covered(m, -93, 8, -93));
+        assertFalse(covered(m, -92, 9, -92));
+        assertFalse(covered(m, -92, 7, -92));
+    }
+
+    @Test
+    void theTwoHalvesOfTheColumnAreAddressedCorrectly() {
+        // bit < 32 lives in the low word and bit >= 32 in the high one, and the shader picks between
+        // them by the same comparison. A section 32 or more above the camera's own is the only way to
+        // reach the high word, so it is the only case that can catch a swapped pair.
+        long[] m = columnsOf(at(-92, 8 + 31, -92), at(-92, 8 - 31, -92));
+        assertTrue(covered(m, -92, 8 + 31, -92), "bit 63, the last bit of the high word");
+        assertTrue(covered(m, -92, 8 - 31, -92), "bit 1, the low word");
+    }
+
+    @Test
+    void theVerticalWindowEndsAtTheBitSpanAndKeepsTheLodOutsideIt() {
+        // 64 bits, biased by 32: sections from 32 below the camera to 31 above are addressable, and
+        // outside that the answer is "not covered", which KEEPS the LOD. An over-drawn LOD z-fights,
+        // an under-drawn one shows the void, and this is the direction that only z-fights.
+        long[] m = columnsOf(at(-92, 8 + 31, -92), at(-92, 8 - 32, -92), at(-92, 8 + 32, -92));
+        assertTrue(covered(m, -92, 8 + 31, -92), "the last addressable bit");
+        assertTrue(covered(m, -92, 8 - 32, -92), "the first addressable bit");
+        assertFalse(covered(m, -92, 8 + 32, -92), "one past the span is not covered");
+    }
+
+    @Test
+    void columnsOutsideTheSquareAreNotClaimed() {
+        // The square is the address space, not a claim about visibility. A drawn section outside it is
+        // simply not claimed, which keeps the LOD there -- the safe direction, and the reason the
+        // square is sized with slack on every side of the camera.
+        long[] m = columnsOf(at(ANCHOR_X - 1, 8, -92), at(-92, 8, ANCHOR_Z + SIDE));
+        assertFalse(covered(m, ANCHOR_X - 1, 8, -92), "left of the square");
+        assertFalse(covered(m, -92, 8, ANCHOR_Z + SIDE), "behind the square");
     }
 
     @Test
     void neighbouringColumnsAreDistinguished() {
-        // A node-level rule cannot tell these apart: both are in the same 2x2 node at detail 0.
-        long[] m = empty();
-        mark(m, 0, 0, 0);
-        assertTrue(covered(m, 0, 0, 0));
-        assertFalse(covered(m, 1, 0, 0), "one column across");
-        assertFalse(covered(m, -1, 0, 0), "and on the negative side of the origin");
-        assertFalse(covered(m, 0, 0, 1));
-    }
-
-    @Test
-    void blockCoordinatesFloorRatherThanTruncate() {
-        // The fragment has block coordinates, not section coordinates, so the shift is what puts it
-        // in a section. An arithmetic shift floors a negative; a cast truncates toward zero, which
-        // would put block -1 in section 0 and cull the wrong section across the whole negative half
-        // of the world.
-        long[] m = empty();
-        mark(m, -1, 0, 0);   // section -1 covers blocks -16..-1
-        assertTrue(BuiltSectionMask.blockCovered(m, SIDE, ANCHOR, 0, ANCHOR, -1, 0, 0));
-        assertTrue(BuiltSectionMask.blockCovered(m, SIDE, ANCHOR, 0, ANCHOR, -16, 0, 0));
-        assertFalse(BuiltSectionMask.blockCovered(m, SIDE, ANCHOR, 0, ANCHOR, 0, 0, 0));
-
-        long[] v = empty();
-        mark(v, 0, -1, 0);   // section -1 covers blocks -16..-1 vertically
-        assertTrue(BuiltSectionMask.blockCovered(v, SIDE, ANCHOR, 0, ANCHOR, 0, -1, 0));
-        assertFalse(BuiltSectionMask.blockCovered(v, SIDE, ANCHOR, 0, ANCHOR, 0, 0, 0));
-    }
-
-    @Test
-    void outsideTheSquareIsNeverCovered() {
-        long[] m = empty();
-        for (int x = -C; x <= C; x++) {
-            for (int z = -C; z <= C; z++) {
-                for (int y = -20; y <= 20; y++) mark(m, x, y, z);
-            }
-        }
-        assertFalse(covered(m, C + 1, 0, 0), "one column past +x");
-        assertFalse(covered(m, 0, 0, C + 1), "one column past +z");
-        assertFalse(covered(m, -(C + 1), 0, 0), "one column past -x");
-    }
-
-    @Test
-    void outsideTheRepresentableVerticalSpanIsNeverCovered() {
-        // The per-column bitmask spans 64 sections, +/-32 around the camera's. Outside that reads as
-        // not covered, which keeps the LOD -- the safe direction, since an over-drawn LOD z-fights
-        // and an under-drawn one shows the void.
-        long[] m = empty();
-        assertFalse(covered(m, 0, 32, 0), "bit 64 does not exist");
-        assertFalse(covered(m, 0, -33, 0), "bit -1 does not exist");
-        assertFalse(BuiltSectionMask.sectionCovered(new long[] {0}, 1, 0, 0, 0, 0, 31, 0),
-                "and a 1x1 square with no bits covers nothing at all");
-    }
-
-    @Test
-    void theVerticalBitsDoNotLeakIntoEachOther() {
-        // Bit packing: 32 sections below the camera through 31 above, so bit 32 is the camera's own
-        // section. Off-by-one here would cull one section too high or too low everywhere.
-        long[] m = empty();
-        mark(m, 0, 0, 0);
-        assertTrue(covered(m, 0, 0, 0), "the camera's own section");
-        assertFalse(covered(m, 0, 1, 0));
-        assertFalse(covered(m, 0, -1, 0));
-        for (int y = -32; y <= 31; y++) {
-            long[] one = empty();
-            mark(one, 0, y, 0);
-            for (int probe = -32; probe <= 31; probe++) {
-                if (probe == y) {
-                    assertTrue(covered(one, 0, probe, 0), "height " + y + " must cover itself");
-                } else {
-                    assertFalse(covered(one, 0, probe, 0), "height " + y + " must not cover " + probe);
-                }
-            }
-        }
-    }
-
-    @Test
-    void theAnchorStepKeepsTheCameraInsideWithMargin() {
-        // The anchor must be a deterministic function of the camera and leave at least the render
-        // distance of margin on every side, or the square would not cover the region the cull is
-        // asked about and the far edge would read as "not covered" everywhere.
-        int rd = 8;
-        int side = rd * 2 + 1 + rd * 2;          // slack == rd, as ANCHOR_SLACK resolves to
-        int step = side - rd * 2;
-        for (int cam = -100; cam <= 100; cam++) {
-            int anchor = BuiltSectionMask.floorToStep(cam - rd, step);
-            assertTrue(anchor <= cam - rd, "anchor must be at or before cam-rd");
-            assertTrue(cam + rd < anchor + side, "and the far margin must fit inside the square");
-        }
-    }
-
-    @Test
-    void floorToStepFloorsNegativesRatherThanTruncating() {
-        // floorDiv, not integer division: -17 / 16 truncates to -1 in Java but floors to -2, and the
-        // difference anchors the square on the wrong side of the camera for half the world.
-        assertEquals(-32, BuiltSectionMask.floorToStep(-17, 16));
-        assertEquals(-16, BuiltSectionMask.floorToStep(-16, 16));
-        assertEquals(-16, BuiltSectionMask.floorToStep(-1, 16));
-        assertEquals(0, BuiltSectionMask.floorToStep(0, 16));
-        assertEquals(16, BuiltSectionMask.floorToStep(16, 16));
-        assertEquals(16, BuiltSectionMask.floorToStep(31, 16));
-    }
-
-    @Test
-    void theAnswerDoesNotDependOnTheCamera() {
-        // The point of a world-anchored origin: the predicate takes no camera argument at all, so a
-        // world section's answer cannot change as the player moves within an anchor cell. The lag
-        // the user saw -- "I feel like I'm dragging the LOD edge with me" -- is impossible by
-        // construction rather than merely made smaller by re-uploading faster.
-        long[] m = empty();
-        mark(m, 4, 3, -2);
-        assertTrue(covered(m, 4, 3, -2));
-        assertTrue(BuiltSectionMask.sectionCovered(m, SIDE, ANCHOR, 0, ANCHOR, 4, 3, -2),
-                "the same question from any caller gives the same answer");
-    }
-
-
-    @Test
-    void onlySectionsInsideSodiumsRenderCylinderAreClaimed() {
-        // Sodium MESHES a square but RENDERS a Euclidean cylinder. Measured at a moved camera:
-        // built=779 with 45 sections (5.8%) past the render distance, out to Chebyshev 10 against
-        // rd=8, concentrated in the square corners. Every one is meshed and never drawn, so a mask
-        // that counted them culled the LOD in a ring just outside vanilla render distance -- the
-        // edge holes. This is the rule that excludes them, in the metric Sodium draws in.
-        int rd = 8;
-        assertTrue(BuiltSectionMask.withinRenderCylinder(0, 0, rd));
-        assertTrue(BuiltSectionMask.withinRenderCylinder(8, 0, rd), "on the axis at the radius");
-        assertTrue(BuiltSectionMask.withinRenderCylinder(0, -8, rd));
-        assertFalse(BuiltSectionMask.withinRenderCylinder(9, 0, rd), "one past the radius on the axis");
-        // The corners of the Chebyshev square are the case that matters: distance sqrt(8^2+8^2) = 11.3.
-        assertFalse(BuiltSectionMask.withinRenderCylinder(8, 8, rd), "the square corner is outside the circle");
-        assertFalse(BuiltSectionMask.withinRenderCylinder(-8, 8, rd));
-        assertFalse(BuiltSectionMask.withinRenderCylinder(6, 6, rd), "sqrt(72)=8.49 > 8");
-        assertTrue(BuiltSectionMask.withinRenderCylinder(5, 6, rd), "sqrt(61)=7.81 <= 8");
-        // Chebyshev distance alone would have accepted every one of those corners.
-        assertEquals(8, Math.max(Math.abs(8), Math.abs(8)));
-    }
-
-
-    @Test
-    void sectionsInARenderedColumnAreClaimedHoweverDeep() {
-        // THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the point: every assertion below was
-        // assertFalse for deep sections, holding a CONJUNCTION (`horizontal < rd && |dy| < rd`).
-        //
-        // That conjunction refuses 90% of what Sodium builds, measured at the users's render distance:
-        // with VOXY_VMASK=1 on an unpinned ground-level camera at RD 2,
-        //   [Metal-VMASK3] built=192 outsideRenderDistance3D=173 (90.1%) maxChebyshev=6 (rd=2) secY 2..7
-        // and the mask claimed 6 columns out of the 81 addressable while Sodium's mesh set is a 5x5
-        // square of columns, d01=33 d02=52 sections. Columns at Chebyshev 2 were refused unless their
-        // dy was within 1, so most of the terrain at the camera's OWN LEVEL stayed LOD-covered on top
-        // of vanilla. That is the near-field overlap, and it is the cull's own operator, not its feed.
-        //
-        // Sodium's rule is a UNION -- OcclusionCuller.testDistance, called as
-        // testDistance(dx*dx+dz*dz, |dy|, searchDistance) from SectionTree.traverse:
-        //     (a < c*c) || (b < c)   with a = dx^2+dz^2, b = |dy|
-        // so a section passes on EITHER term. The vertical slab term is what claims the corners at the
-        // camera's own level; the horizontal term is what claims a column at any depth.
-        //
-        // The cost is the altitude report this conjunction was written for, and it is knowingly
-        // accepted here: a section far below the camera now IS claimed, so if the frustum is not
-        // looking at it the LOD is culled over nothing. No distance rule can tell -- the fix is to feed
-        // the mask from the sections Sodium actually RENDERS (cull.MD 6.1), not to pick a different
-        // operator. Do not "tighten" this back without fixing that first.
-        int rd = 8;
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 0, 0, rd));
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 4, 0, rd), "directly below, near ground");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 8, 0, rd),
-                "the horizontal term alone claims the whole column, and vanilla draws the column");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 14, 0, rd),
-                "224 blocks straight down is still in a rendered column -- previously refused here");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, -9, 0, rd));
-        assertTrue(BuiltSectionMask.withinRenderDistance(4, 9, 4, rd),
-                "inside the horizontal radius, so claimed whatever its height");
-    }
-
-
-    @Test
-    void sectionsInsideTheHorizontalRadiusWithModerateDepthAreClaimed() {
-        // The reported over-draw, and the case the sphere got wrong. These are sections vanilla DRAWS
-        // -- they are inside the horizontal render radius -- that the old 3-D sphere dropped, so the
-        // LOD was drawn on top of them. The band is `dx^2+dz^2 < rd^2 <= dx^2+dy^2+dz^2`.
-        int rd = 8;
-        // 7 chunks out, 4 sections down: vanilla draws it (7 < 8), the sphere scored 49+16 = 65 > 64.
-        assertTrue(BuiltSectionMask.withinRenderDistance(7, 4, 0, rd), "the sphere dropped this");
-        // The two-axis twin: horizontal 5^2+5^2 = 50 < 64, and the sphere scored 50+16 = 66 > 64.
-        assertTrue(BuiltSectionMask.withinRenderDistance(5, 4, 5, rd), "and its two-axis twin");
-        assertTrue(BuiltSectionMask.withinRenderDistance(0, 7, 0, rd), "straight down, inside the cap");
-        // These two were assertFalse under the conjunction, which treated the horizontal radius as the
-        // only term. Under Sodium's union the vertical slab term claims them: |dy| < rd, so they are
-        // drawn by vanilla at the camera's own level and must be culled. Refusing them is the
-        // corner-band over-draw -- see sectionsInARenderedColumnAreClaimedHoweverDeep.
-        assertTrue(BuiltSectionMask.withinRenderDistance(8, 0, 0, rd), "the slab term claims it");
-        assertTrue(BuiltSectionMask.withinRenderDistance(6, 4, 6, rd), "and this one: |dy| = 4 < 8");
-        assertTrue(BuiltSectionMask.withinRenderDistance(4, 4, 4, rd));
-    }
-
-
-    @Test
-    void pruningKeepsWhatCouldComeBackAndDropsWhatCannot() {
-        // BUILT accumulates one entry per section the player has ever been near -- measured 675 ->
-        // 779 -> 1632 -> 3423 across one session -- and rebuilds walk all of it. Pruning is safe
-        // ONLY because the distance filter already excludes these from the mask, so dropping one
-        // cannot change what is claimed today. The margin keeps anything that could re-enter range
-        // without a rebuild; dropping those would under-claim and show as LOD over vanilla.
-        int rd = 8;
-        assertTrue(BuiltSectionMask.worthKeeping(0, 0, 0, rd));
-        assertTrue(BuiltSectionMask.worthKeeping(rd, 0, 0, rd), "at the radius");
-        assertTrue(BuiltSectionMask.worthKeeping(rd + 3, 0, 0, rd), "just outside, could come back");
-        // WAS assertFalse. It changed because the claim rule did: the union's vertical slab term claims
-        // |dy| < rd at any horizontal distance inside the square, so this section is claimed NOW and
-        // pruning it would under-claim. The addressable bound is what still holds the set in check.
-        assertTrue(BuiltSectionMask.worthKeeping(rd + 5, 0, 0, rd), "claimed by the slab term now");
-        assertFalse(BuiltSectionMask.worthKeeping(0, 40, 0, rd), "left far below, past the bit span");
-        assertFalse(BuiltSectionMask.worthKeeping(100, 0, 0, rd), "left far behind, outside the square");
-    }
-
-    @Test
-    void anEmptyMaskCoversNothing() {
-        long[] m = empty();
-        for (int x = -C; x <= C; x += 4) {
-            for (int y = -20; y <= 20; y += 4) {
-                for (int z = -C; z <= C; z += 4) {
-                    assertFalse(covered(m, x, y, z));
-                }
-            }
-        }
-    }
-
-    @Test
-    void aRenderDistanceChangeDoesNotEmptyTheMask() {
-        // The measured defect, and the reason bug A was permanent rather than occasional.
-        //
-        // Sodium constructs a new RenderSectionManager on a render-distance change as well as on a
-        // level change, and the mixin cleared the mask on both. The set only refills from mesh-upload
-        // deltas, and Sodium does not re-mesh a chunk that is already built, so the clear never came
-        // back: a live run with VOXY_VMASK=1 held built=0, columns=0/81, sections=0 for 3600
-        // consecutive frames after its render distance went 3 to 2. An empty mask means the
-        // fragment-stage discard never fires, so during all of that the LOD was drawn over vanilla
-        // everywhere -- not a mis-shaped cull, no cull.
-        //
-        // Nothing is lost by keeping it: a section the smaller distance no longer covers cannot set a
-        // bit, because the per-frame distance filter refuses it whatever the set holds.
-        final Object level = new Object();
-        assertTrue(BuiltSectionMask.resetForLevel(level), "a level the mask has not seen clears it");
-        BuiltSectionMask.add(12345L);
-        assertEquals(1, BuiltSectionMask.builtCount());
-
-        assertFalse(BuiltSectionMask.resetForLevel(level), "the same level must not clear");
-        assertEquals(1, BuiltSectionMask.builtCount(), "a section survives a render-distance change");
-
-        assertTrue(BuiltSectionMask.resetForLevel(new Object()), "a different level does clear");
-        assertEquals(0, BuiltSectionMask.builtCount(), "another dimension's sections go with it");
+        // Row-major in (z, x) with the anchor as origin; a transpose would put every discard one
+        // column over and read as a cull that is right in one diagonal direction and wrong in the
+        // other.
+        long[] m = columnsOf(at(-92, 8, -92));
+        assertTrue(covered(m, -92, 8, -92));
+        assertFalse(covered(m, -91, 8, -92), "one column in x");
+        assertFalse(covered(m, -92, 8, -91), "one column in z");
     }
 }

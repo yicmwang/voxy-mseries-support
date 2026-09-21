@@ -4,17 +4,23 @@ import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.textures.GpuSampler;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
+import me.cortex.voxy.client.core.rendering.BuiltSectionMask;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.caffeinemc.mods.sodium.client.render.chunk.DefaultChunkRenderer;
+import net.caffeinemc.mods.sodium.client.render.chunk.LocalSectionIndex;
 import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
 import net.caffeinemc.mods.sodium.client.gpu.device.context.DrawContext;
+import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderList;
 import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderListIterable;
+import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.DefaultTerrainRenderPasses;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
 import net.caffeinemc.mods.sodium.client.util.FogParameters;
+import net.caffeinemc.mods.sodium.client.util.iterator.ByteIterator;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.SectionPos;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -104,7 +110,45 @@ public abstract class MixinDefaultChunkRenderer {
         if (renderer == null) {
             return;
         }
+        feedBuiltSectionMask(renderLists);
         Viewport<?> viewport = renderer.setupViewport(matrices, fogParameters, camera.x, camera.y, camera.z);
         renderer.renderOpaque(viewport);
+    }
+
+    /**
+     * Hand {@link BuiltSectionMask} the sections vanilla is drawing THIS FRAME.
+     *
+     * <p>This is the fix for the whole cull saga, and it is a deletion rather than a calculation. The
+     * mask used to be fed from {@code RenderRegionManager.uploadResults} — what Sodium had MESHED — and
+     * a distance rule was then asked to turn that into what Sodium RENDERS. It cannot: a distance is
+     * not a frustum. Four versions of that rule were tried and each was wrong somewhere (sphere,
+     * cylinder, conjunction, Sodium's own union), because they were all approximating the set that
+     * {@code renderLists} already IS. The parameter is right here, it is a {@code ChunkRenderListIterable},
+     * and its entries are exactly the sections about to be drawn in this pass.
+     *
+     * <p>Decoding is upstream's own, not reverse-engineered: a list entry is a
+     * {@code RenderSection.getSectionIndex()}, which {@link LocalSectionIndex} packs from the section's
+     * position within its region ({@code x & 7, y & 3, z & 7} — the region is 8x4x8 chunks), and the
+     * region carries its own origin. So origin + unpack is the section, with no arithmetic of ours to
+     * get wrong.
+     */
+    private static void feedBuiltSectionMask(ChunkRenderListIterable renderLists) {
+        BuiltSectionMask.beginFrame();
+        java.util.Iterator<ChunkRenderList> lists = renderLists.iterator();
+        while (lists.hasNext()) {
+            ChunkRenderList list = lists.next();
+            RenderRegion region = list.getRegion();
+            final int originX = region.getChunkX();
+            final int originY = region.getChunkY();
+            final int originZ = region.getChunkZ();
+            ByteIterator it = list.sectionsWithGeometryIterator(false);
+            while (it.hasNext()) {
+                final int idx = it.nextByteAsInt();
+                BuiltSectionMask.addDrawn(SectionPos.asLong(
+                        originX + LocalSectionIndex.unpackX(idx),
+                        originY + LocalSectionIndex.unpackY(idx),
+                        originZ + LocalSectionIndex.unpackZ(idx)));
+            }
+        }
     }
 }
