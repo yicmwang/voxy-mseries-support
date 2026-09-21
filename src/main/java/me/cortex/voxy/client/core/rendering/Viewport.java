@@ -18,9 +18,12 @@ public abstract class Viewport <A extends Viewport<A>> {
     // which Metal requires on BOTH depth and stencil attachments — the
     // zero-fill/mip passes attach depth only, so use a pure depth format
     // there. GL keeps the upstream D24S8.
+    // R32F on Metal, depth on GL. A depth-format texture sampled through `sampler2D` returns zeros on
+    // Metal -- see HiZBuffer's constructor -- so the pyramid has to be a colour texture there for the
+    // build blit and the traversal to read it at all.
     public final HiZBuffer hiZBuffer = new HiZBuffer(
             RenderBackendFactory.get().getType() != BackendType.OPENGL
-                    ? org.lwjgl.opengl.GL30C.GL_DEPTH_COMPONENT32F
+                    ? org.lwjgl.opengl.GL30C.GL_R32F
                     : org.lwjgl.opengl.GL30C.GL_DEPTH24_STENCIL8);
     public final DepthFramebuffer depthBoundingBuffer = new DepthFramebuffer();
     /**

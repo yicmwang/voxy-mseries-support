@@ -59,6 +59,8 @@ public class HiZBuffer {
     private final IGpuFramebuffer fb = RenderBackendFactory.get().createFramebuffer().name("HiZ");
     private final int type;
     private IGpuTexture texture;
+    /** True when the pyramid is R32F colour rather than depth; see the constructor. */
+    private final boolean colourPyramid;
     private int levels;
     private int width;
     private int height;
@@ -71,8 +73,22 @@ public class HiZBuffer {
         this.type = type;
         // Depth-only pass: ALWAYS pass + write depth, no blend, no cull,
         // empty vertex layout (gl_VertexID-driven fullscreen quad).
+        // The whole-frame Metal path builds a COLOUR pyramid, not a depth one. A depth-format texture
+        // sampled through the `sampler2D` both this blit and the traversal declare becomes MSL
+        // `texture2d<float>`, and Metal silently reads ZEROS from a depth texture read that way -- it
+        // needs `depth2d`. This tree already measured that once and wrote it down (quads.frag's
+        // depth-bound note: "the texture2d<float> declaration SPIRV-Cross emits for sampler2D silently
+        // reads ZEROS on Metal ... same bug class as the round-18 Iris depth export"). It is why the
+        // pyramid came out all zeros no matter how it was fed.
+        //
+        // So on Metal the pyramid is R32F and the blit writes `colour` instead of gl_FragDepth, which is
+        // what the shader's OUTPUT_COLOUR branch is for. GL keeps the depth pyramid it has always had.
+        this.colourPyramid = this.backend.getType()
+                != me.cortex.voxy.client.core.gpu.BackendType.OPENGL;
         PipelineState state = new PipelineState(
-                new PipelineState.DepthState(true, true, PipelineState.CompareOp.ALWAYS),
+                this.colourPyramid
+                        ? PipelineState.DepthState.DISABLED
+                        : new PipelineState.DepthState(true, true, PipelineState.CompareOp.ALWAYS),
                 PipelineState.BlendState.OPAQUE,
                 PipelineState.RasterState.NO_CULL);
         // The frame's depth convention decides the whole pyramid: GL is standard-Z (near 0, far 1) and
@@ -82,8 +98,9 @@ public class HiZBuffer {
         // everything. Injected rather than branched at runtime so the two variants are separately
         // compiled and separately testable.
         java.util.Map<String, String> blitDefines = new java.util.LinkedHashMap<>();
-        if (this.backend.getType() != me.cortex.voxy.client.core.gpu.BackendType.OPENGL) {
+        if (this.colourPyramid) {
             blitDefines.put("VOXY_HIZ_REVERSE_Z", "");
+            blitDefines.put("OUTPUT_COLOUR", "");
         }
         this.blitPipeline = this.backend.createGraphicsPipeline(new GraphicsPipelineDesc(
                 ShaderLoader.parse("voxy:hiz/blit.vsh"),
@@ -91,7 +108,7 @@ public class HiZBuffer {
                 blitDefines,
                 null, null,                  // no MSL
                 null, null,                  // no SPIRV
-                0,                           // no color format — depth-only pass
+                this.colourPyramid ? this.type : 0,   // R32F on Metal; GL stays depth-only
                 VertexLayout.EMPTY,
                 state,
                 "HiZBuffer.blit"));
@@ -174,11 +191,17 @@ public class HiZBuffer {
         int ch = this.height;
         for (int i = 0; i < this.levels; i++) {
             try (RenderEncoder encoder = this.backend.beginRenderPass(
-                    RenderPassDesc.builder(cw, ch)
-                            .depthAttachment(this.texture, i,
-                                    RenderPassDesc.LoadAction.DONT_CARE,
-                                    RenderPassDesc.StoreAction.STORE, 1.0f)
-                            .build())) {
+                    this.colourPyramid
+                            ? RenderPassDesc.builder(cw, ch)
+                                    .addColorAttachment(this.texture, i,
+                                            RenderPassDesc.LoadAction.DONT_CARE,
+                                            RenderPassDesc.StoreAction.STORE, 0f, 0f, 0f, 0f)
+                                    .build()
+                            : RenderPassDesc.builder(cw, ch)
+                                    .depthAttachment(this.texture, i,
+                                            RenderPassDesc.LoadAction.DONT_CARE,
+                                            RenderPassDesc.StoreAction.STORE, 1.0f)
+                                    .build())) {
                 encoder.setPipeline(this.blitPipeline);
                 encoder.setSampler(0, this.sampler);
                 encoder.setViewport(0, 0, cw, ch, 0, 1);

@@ -14,6 +14,18 @@
 
 layout(binding = HIZ_BINDING) uniform sampler2D hizDepthSampler;
 
+// Perspective divide, then the window transform for xy and the DEPTH for z. See the call site for why
+// z differs by convention. One place, so the two cannot drift apart.
+vec3 toScreenspace(vec4 p) {
+    vec3 n = p.xyz / p.w;
+#ifdef VOXY_HIZ_REVERSE_Z
+    return vec3(n.xy * 0.5f + 0.5f, n.z);
+#else
+    return n * 0.5f + 0.5f;
+#endif
+}
+
+
 //TODO: maybe do spher bounds aswell? cause they have different accuracies but are both over estimates (liberals (non conservative xD))
 // so can do &&
 
@@ -88,15 +100,27 @@ void setupScreenspace(in UnpackedNode node) {
     vec4 P111 = Axis[1] + P101;
 
 
-    //Perspective divide + convert to screenspace (i.e. range 0->1 if within viewport)
-    vec3 p000 = (P000.xyz/P000.w) * 0.5f + 0.5f;
-    vec3 p100 = (P100.xyz/P100.w) * 0.5f + 0.5f;
-    vec3 p001 = (P001.xyz/P001.w) * 0.5f + 0.5f;
-    vec3 p101 = (P101.xyz/P101.w) * 0.5f + 0.5f;
-    vec3 p010 = (P010.xyz/P010.w) * 0.5f + 0.5f;
-    vec3 p110 = (P110.xyz/P110.w) * 0.5f + 0.5f;
-    vec3 p011 = (P011.xyz/P011.w) * 0.5f + 0.5f;
-    vec3 p111 = (P111.xyz/P111.w) * 0.5f + 0.5f;
+    // Perspective divide + screenspace transform.
+    //
+    // xy is the same on both backends: NDC xy spans [-1,1], so *0.5+0.5 is the window transform.
+    //
+    // z is NOT, and getting it wrong is silent. GL's NDC z spans [-1,1], so *0.5+0.5 gives the window
+    // depth the pyramid stores. On the whole-frame Metal path the traversal's VP is vanilla's projection
+    // unchanged (VoxyRenderSystem.computeProjectionMat returns `base` for non-GL), which is reverse-Z
+    // with an infinite far plane -- NDC z is ALREADY the depth, in [0,1] -- and applying the window
+    // transform a second time squashes it into [0.5,1] against a pyramid holding [0,1]. A box at the far
+    // plane would then be presented to the occlusion test as if it sat at depth ~0.5.
+    //
+    // The corner CHOICE further down was already correct for reverse-Z (larger z is nearer, so max()
+    // picks the box's nearest point). It was the value that was wrong.
+    vec3 p000 = toScreenspace(P000);
+    vec3 p100 = toScreenspace(P100);
+    vec3 p001 = toScreenspace(P001);
+    vec3 p101 = toScreenspace(P101);
+    vec3 p010 = toScreenspace(P010);
+    vec3 p110 = toScreenspace(P110);
+    vec3 p011 = toScreenspace(P011);
+    vec3 p111 = toScreenspace(P111);
 
 
     {//Compute exact screenspace size
@@ -181,22 +205,29 @@ bool isCulledByHiz() {
     }
     //pointSample = mix(pointSample, pointSample2, pointSample<=0.000001f);
 
-    // M13 2026-05-15: on backends that haven't built the HiZ pyramid yet
-    // (Metal still uses ensureAllocated only — the zero-init pyramid is
-    // a parked stub until cross-context MC-depth import lands), every
-    // texelFetch returns 0.0. The GL branch's `pointSample <= minBB.z`
-    // returns TRUE for any box with minBB.z >= 0 — i.e. every visible
-    // box — which culls all top-level LOD nodes and leaves renderList
-    // empty. Skip the occlusion test when the HiZ is uninitialised
-    // (pointSample == 0) so the stub becomes a true "always pass"
-    // instead of an "always reject".
+    // M13 2026-05-15: on backends that haven't built the HiZ pyramid yet, every texelFetch returns 0.0,
+    // and the GL branch's `pointSample <= minBB.z` returns TRUE for any box with minBB.z >= 0 -- i.e.
+    // every visible box -- which would cull all top-level LOD nodes and leave the renderList empty. So
+    // an uninitialised pyramid has to read as "always pass".
     //
-    // The guard is convention-independent, which is why it needs no
-    // reverse-Z variant: sky is 0.0 in the GL pipeline too (initDepthStencil
-    // blits depth 0 wherever the stencil is 0 -- the earlier claim here that
-    // "Real GL-path HiZ writes 1.0 in sky regions" was wrong), and a
-    // min-reduce over a sky-containing footprint lands on 0.0 as well.
+    // GL ONLY, and that restriction IS the fix for the cull never firing. On this convention sky
+    // max-reduces to 1.0, so a 0.0 tile means either genuinely-all-near geometry or an unbuilt pyramid,
+    // and "not occluded" is right for both.
+    //
+    // On the reverse-Z branch it was catastrophic. There far is 0.0, which makes 0.0 BOTH the unbuilt
+    // sentinel AND the most common legitimate value in the scene -- sky. A min-reduce drags any tile
+    // containing one sky texel down to 0.0, so this returned false for every box whose footprint touched
+    // sky, and in an outdoor scene that is nearly all of them. The cull could therefore only ever fire
+    // for boxes entirely covered by opaque geometry, which at the coarse mips the top-level nodes select
+    // (a full-screen node lands on ml=9, 2x1 texels) is essentially never. That is why maxDrawCount never
+    // moved.
+    //
+    // The test below needs no guard at all: `0.0 > maxBB.z` is false for every box, so an unbuilt pyramid
+    // and a sky tile both already answer "not occluded" correctly, by the arithmetic rather than by a
+    // special case. The earlier claim here that the guard "is convention-independent" was the error.
+#ifndef VOXY_HIZ_REVERSE_Z
     if (pointSample <= 0.0) return false;
+#endif
 #ifdef VOXY_HIZ_REVERSE_Z
     // A box is occluded when it lies entirely BEHIND the tile's farthest occluder. Under reverse-Z
     // "behind" means a SMALLER depth, and the box's nearest point is maxBB.z (its largest corner, since
