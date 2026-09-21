@@ -58,6 +58,19 @@ public final class MetalRenderBackendSmokeTest {
             System.out.println("  Backend: METAL");   // the only one there is; getType() is gone
             System.out.println("  Target:  256x256 RGBA8 (id=" + target.id() + ")");
             System.out.println("  Clear:   (1.0, 0.5, 0.25, 1.0)");
+
+            // Exercise the GPU timer, so a broken JNI binding fails HERE rather than silently
+            // reporting -1 in every [Metal-PERF] line of a six-minute game run. Metal reports
+            // GPUStartTime/GPUEndTime as 0.0 until a buffer completes, so a non-negative reading
+            // also confirms captureGpuTime ran after the wait rather than before it.
+            double gpuMs = backend.lastSubmitGpuMs();
+            System.out.println("  GPU time: " + (gpuMs >= 0.0
+                    ? String.format("%.4f ms (Metal reported timestamps)", gpuMs)
+                    : "UNAVAILABLE (-1) — the timer is wired but Metal returned no timestamps"));
+            if (gpuMs < 0.0) {
+                System.out.println("    !! captureGpuTime ran but got 0.0, or the JNI symbol is missing.");
+                System.out.println("    !! [Metal-PERF]'s gpu= field will read -1; investigate before trusting it.");
+            }
         } finally {
             backend.shutdown();
         }

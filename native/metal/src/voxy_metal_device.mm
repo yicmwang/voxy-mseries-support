@@ -105,3 +105,41 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlCommandBufferGetStatus(
         return (jint)[cmdBuf status];
     }
 }
+
+// ---------------------------------------------------------------------------
+// GPU timing.
+//
+// `GPUStartTime` / `GPUEndTime` are CFTimeInterval (seconds) reported by Metal itself, and their
+// difference is the GPU-side duration of this command buffer's execution. Until now the only
+// GPU-cost reading in the tree was [Metal-PERF]'s `submit`, which is commit + waitUntilCompleted --
+// a measure of how long the CPU WAITED, not how long the GPU worked. The difference matters: the
+// wait also absorbs Metallum's flushFrame and the deferred ordered index-wait that sits in front of
+// it (MetalRenderBackend.submit's guest branch), so a fill-vs-draw split read through `submit` is a
+// reading of the wrong quantity.
+//
+// The properties are spelled GPUStartTime / GPUEndTime -- capital GPU. `gpuStartTime` is NOT a
+// selector on MTLCommandBuffer, and the compiler says so ("no known instance method for selector"),
+// which is how this was found.
+//
+// BOTH VALUES ARE ONLY MEANINGFUL AFTER THE COMMAND BUFFER COMPLETES. Metal reports 0.0 before that,
+// so a caller that reads them without having waited gets 0 ms rather than an error -- check for a
+// zero END time and treat it as "not available yet" rather than as "the GPU took no time".
+extern "C" JNIEXPORT jdouble JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlCommandBufferGetGpuStartTime(
+        JNIEnv *, jclass, jlong cmdBufHandle) {
+    @autoreleasepool {
+        if (cmdBufHandle == 0) return 0.0;
+        id<MTLCommandBuffer> cmdBuf = voxy_handle_cast<id<MTLCommandBuffer>>(cmdBufHandle);
+        return (jdouble)[cmdBuf GPUStartTime];
+    }
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlCommandBufferGetGpuEndTime(
+        JNIEnv *, jclass, jlong cmdBufHandle) {
+    @autoreleasepool {
+        if (cmdBufHandle == 0) return 0.0;
+        id<MTLCommandBuffer> cmdBuf = voxy_handle_cast<id<MTLCommandBuffer>>(cmdBufHandle);
+        return (jdouble)[cmdBuf GPUEndTime];
+    }
+}

@@ -45,6 +45,38 @@ public class MetalRenderBackend implements RenderBackend {
     private volatile long pendingOrderedWait = 0;
 
     /**
+     * GPU duration of the most recently completed command buffer, in milliseconds, or -1 when Metal
+     * did not report timestamps.
+     *
+     * <p>This is the reading {@code [Metal-PERF]}'s {@code submit} field has been standing in for.
+     * {@code submit} measures how long the CPU <em>waited</em> — {@code commit} plus
+     * {@code waitUntilCompleted}, which on the guest branch also spans {@code MetallumBridge.flushFrame()}
+     * and the deferred ordered index-wait in front of it. This measures how long the GPU <em>worked</em>.
+     * When the two disagree, the gap is queueing and other work on the queue — and that gap is the
+     * difference between "the GPU is the bottleneck" and "the CPU is waiting on someone else's GPU work".
+     */
+    private volatile double lastSubmitGpuMs = -1.0;
+
+    /** See {@link #lastSubmitGpuMs}. -1 means unavailable, never "instantaneous". */
+    public double lastSubmitGpuMs() {
+        return this.lastSubmitGpuMs;
+    }
+
+    /**
+     * Record the GPU duration of a command buffer that has just COMPLETED, in milliseconds.
+     *
+     * <p>Must be called after a wait and before release — Metal reports {@code GPUStartTime} /
+     * {@code GPUEndTime} as 0.0 until the buffer completes, so calling this early records -1 rather
+     * than failing, and a caller that ignored that would read "the GPU took no time".
+     */
+    private void captureGpuTime(long cmdBuffer) {
+        if (cmdBuffer == 0L) return;
+        final double start = MetalNative.mtlCommandBufferGetGpuStartTime(cmdBuffer);
+        final double end = MetalNative.mtlCommandBufferGetGpuEndTime(cmdBuffer);
+        this.lastSubmitGpuMs = (start > 0.0 && end > 0.0) ? (end - start) * 1000.0 : -1.0;
+    }
+
+    /**
      * Commit exactly as {@link #submit()} does, but leave the ordered wait for {@link #awaitCommitted()}.
      *
      * <p>Why this exists. The wait is load-bearing -- the guest branch commits without waiting, so the
@@ -75,6 +107,7 @@ public class MetalRenderBackend implements RenderBackend {
         if (h != 0L) {
             this.pendingOrderedWait = 0L;
             MetalNative.mtlCommandBufferWaitUntilCompleted(h);
+            this.captureGpuTime(h);
         }
     }
 
@@ -1069,9 +1102,11 @@ public class MetalRenderBackend implements RenderBackend {
                     if (this.deferOrderedWait) {
                         // The caller wants the commit now and the wait later, so it can spend the
                         // interval on CPU work that overlaps the GPU's prepasses. See submitDeferWait.
+                        // The GPU time is captured in awaitCommitted(), where the wait actually lands.
                         this.pendingOrderedWait = committed;
                     } else {
                         MetalNative.mtlCommandBufferWaitUntilCompleted(committed);
+                        this.captureGpuTime(committed);
                     }
                 }
                 return;
@@ -1084,6 +1119,8 @@ public class MetalRenderBackend implements RenderBackend {
         // Sync mode for M3: wait for completion so the smoke test can check status
         // before the buffer is released. M5+ will move to async + per-frame fences.
         MetalNative.mtlCommandBufferWaitUntilCompleted(this.activeCommandBuffer);
+        // Capture BEFORE the release below -- the timestamps live on the command buffer.
+        this.captureGpuTime(this.activeCommandBuffer);
         int status = MetalNative.mtlCommandBufferGetStatus(this.activeCommandBuffer);
         MetalNative.mtlRelease(this.activeCommandBuffer);
         this.activeCommandBuffer = 0;

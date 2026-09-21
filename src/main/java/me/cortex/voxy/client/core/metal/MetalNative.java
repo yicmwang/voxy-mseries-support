@@ -272,6 +272,26 @@ public final class MetalNative {
     public static native int mtlCommandBufferGetStatus(long cmdBuffer);
 
     /**
+     * Metal's own GPU-side start timestamp for this command buffer, in seconds.
+     *
+     * <p>The difference between this and {@link #mtlCommandBufferGetGpuEndTime} is the GPU duration,
+     * which is NOT what {@link #mtlCommandBufferWaitUntilCompleted} measures — that measures the CPU's
+     * wait and absorbs Metallum's {@code flushFrame} and the deferred ordered index-wait in front of
+     * it. Use these two together when the question is "how long did the GPU work", and the wait when
+     * the question is "how long did the frame block".
+     *
+     * <p><b>Only meaningful once the command buffer has completed</b> — Metal returns 0.0 before that,
+     * so a 0.0 end time means "not available yet", never "the GPU took no time".
+     */
+    public static native double mtlCommandBufferGetGpuStartTime(long cmdBuffer);
+
+    /**
+     * Metal's own GPU-side end timestamp for this command buffer, in seconds. See
+     * {@link #mtlCommandBufferGetGpuStartTime} for what the pair is for and the 0.0 caveat.
+     */
+    public static native double mtlCommandBufferGetGpuEndTime(long cmdBuffer);
+
+    /**
      * Creates a blit command encoder (for copy/fill operations).
      * @return encoder handle
      */

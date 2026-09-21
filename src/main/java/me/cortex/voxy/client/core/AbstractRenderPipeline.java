@@ -216,17 +216,50 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      */
     private long perfPrep, perfSplit, perfEncode, perfSubmit;
     private int perfFrames;
+    /**
+     * Sum and count of Metal's OWN GPU durations for the frames in this report window, in ms.
+     *
+     * <p>Separate from {@code perfSubmit} on purpose. {@code submit} is the CPU's wait — {@code commit}
+     * plus {@code waitUntilCompleted} — which on the guest branch also spans Metallum's
+     * {@code flushFrame()} and the deferred ordered index-wait. {@code gpu} is how long the GPU
+     * actually worked. They answer different questions and the gap between them is itself a
+     * measurement: a large gap means the CPU is blocked on someone else's queued work, not on Voxy's.
+     */
+    private double perfGpuSum;
+    private int perfGpuSamples;
 
     private void perfReport() {
         if (++this.perfFrames < 600) return;
         double n = this.perfFrames;
+        // `gpu` is APPENDED, not inserted: tools/parse_perf.py's regex matches the named fields in
+        // order and is not anchored at the end, so a trailing field is safe and reordering is not.
+        // -1 means Metal reported no timestamps for any frame in the window.
         me.cortex.voxy.common.Logger.info(String.format(
-                "[Metal-PERF] ms/frame  prep=%.2f  split=%.2f  encode=%.2f  submit=%.2f  total=%.2f",
+                "[Metal-PERF] ms/frame  prep=%.2f  split=%.2f  encode=%.2f  submit=%.2f  total=%.2f  gpu=%.2f",
                 this.perfPrep / n / 1e6, this.perfSplit / n / 1e6,
                 this.perfEncode / n / 1e6, this.perfSubmit / n / 1e6,
-                (this.perfPrep + this.perfSplit + this.perfEncode + this.perfSubmit) / n / 1e6));
+                (this.perfPrep + this.perfSplit + this.perfEncode + this.perfSubmit) / n / 1e6,
+                this.perfGpuSamples > 0 ? this.perfGpuSum / this.perfGpuSamples : -1.0));
         this.perfPrep = this.perfSplit = this.perfEncode = this.perfSubmit = 0;
+        this.perfGpuSum = 0.0;
+        this.perfGpuSamples = 0;
         this.perfFrames = 0;
+    }
+
+    /**
+     * Sample the backend's most recent GPU duration, once per frame, for {@link #perfReport()}.
+     *
+     * <p>Negative values are Metal's "no timestamps" answer and are skipped rather than averaged in,
+     * so a window where the instrument is unavailable reports -1 instead of silently reading as 0 ms.
+     */
+    private void sampleGpuTime(me.cortex.voxy.client.core.gpu.RenderBackend backend) {
+        if (backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mb) {
+            double gpu = mb.lastSubmitGpuMs();
+            if (gpu >= 0.0) {
+                this.perfGpuSum += gpu;
+                this.perfGpuSamples++;
+            }
+        }
     }
 
     private void runPipelineMetal(Viewport<?> viewport, int sourceFrameBuffer) {
@@ -683,6 +716,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         // what each one measured.
         backend.submit();
         this.perfSubmit += System.nanoTime() - perfT3;
+        this.sampleGpuTime(backend);
         this.perfReport();
         this.metalFrame++;
 
