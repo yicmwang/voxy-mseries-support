@@ -482,6 +482,20 @@ tasks.register('testMetalTriangle', JavaExec) {
     errorOutput = System.err
 }
 
+// Two-colour-attachment MRT harness. The occlusion cull's pyramid source is a SECOND colour output
+// and in the game that attachment reads empty while every structural link around it checks out, so
+// this isolates the mechanism: no Metallum, no LOD pass, no indirect draws, no depth attachment.
+// Either it reproduces the fault in seconds or it exonerates the backend. See optimisation.MD 8.6.
+tasks.register('testMetalMrt', JavaExec) {
+    group = 'verification'
+    description = 'Smoke-test a two-colour-attachment MRT pass and read both attachments back.'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'me.cortex.voxy.tools.MetalMrtSmokeTest'
+    workingDir = rootProject.projectDir
+    standardOutput = System.out
+    errorOutput = System.err
+}
+
 // M7 verification: compile a tiny SSBO-writing compute shader, dispatch
 // it on Metal, and verify the GPU wrote the expected per-invocation values.
 tasks.register('testMetalCompute', JavaExec) {
