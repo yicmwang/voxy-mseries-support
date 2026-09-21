@@ -856,6 +856,19 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             int[] onePlane = new int[]{GL_RGBA8};
             int[] opaqueFormats = vxOpaqueMat ? threePlane : onePlane;
             int[] translucentFormats = vxMaterial ? threePlane : onePlane;
+            // The Metal LOD pass carries a SECOND colour attachment -- quads.frag's depth-as-colour,
+            // which is the Hi-Z pyramid's source (VOXY_LOD_DEPTH_COLOUR). The pipeline has to declare a
+            // format for it, and this is the step that was missing: with the define injected and the
+            // attachment on the pass but only one format declared, Metal DROPS the shader's second
+            // output instead of erroring, so the attachment read empty and nothing anywhere said why.
+            // Kept to the non-GL path because GL's pass has one colour attachment.
+            if (this.backend.getType() != BackendType.OPENGL) {
+                opaqueFormats = java.util.Arrays.copyOf(opaqueFormats, opaqueFormats.length + 1);
+                opaqueFormats[opaqueFormats.length - 1] = GL_R32F;
+                translucentFormats = java.util.Arrays.copyOf(translucentFormats,
+                        translucentFormats.length + 1);
+                translucentFormats[translucentFormats.length - 1] = GL_R32F;
+            }
             this.terrainPipeline = this.backend.createGraphicsPipeline(
                     new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(
                             vertex, vxOpaqueFrag, opaqueDefines,
