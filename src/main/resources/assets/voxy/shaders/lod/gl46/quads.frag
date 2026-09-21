@@ -71,9 +71,9 @@ layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer B
     // camera sits inside its own block -- so the culled region's edges crawl along with the player
     // at sub-block granularity instead of stepping at chunk boundaries. Keeping the camera's exact
     // position here is what makes the boundary world-fixed between chunk crossings.
-    float chunkMaskCameraX;
-    float chunkMaskCameraY;
-    float chunkMaskCameraZ;
+    float chunkMaskFrameOriginX;
+    float chunkMaskFrameOriginY;
+    float chunkMaskFrameOriginZ;
     uint _chunkMaskPad;
     // One 64-bit vertical bitmask per column, bit (secY - camSecY) + 32. Two uints rather than a
     // uint64_t because MSL translation of 64-bit GLSL integers is a risk not worth taking for a
@@ -119,7 +119,7 @@ layout(location = 3) in vec2 voxyCamRelXZ;
 // The full 3D camera-relative offset, for the per-section cull: it asks about a 16x16x16 section,
 // and Sodium's vertical render distance means the horizontal column is not enough to answer it.
 // Must mirror quads3.vert's guard and location exactly.
-layout(location = 4) in vec3 voxyCamRelPos;
+layout(location = 4) in vec3 voxyFramePos;
 #endif
 
 #ifdef DEBUG_RENDER
@@ -246,14 +246,33 @@ void main() {
         // exactly; see the header fields for why flooring the offset separately is wrong. Integer
         // floor via an arithmetic shift, not a truncating cast: the world extends either side of the
         // origin and `>>` floors a negative int, which is what BuiltSectionMask's own indexing assumes.
-        int secX = int(floor(chunkMaskCameraX + voxyCamRelPos.x)) >> 4;
-        int secY = int(floor(chunkMaskCameraY + voxyCamRelPos.y)) >> 4;
-        int secZ = int(floor(chunkMaskCameraZ + voxyCamRelPos.z)) >> 4;
+        // Frame origin plus the frame-relative position, floored once. NO CAMERA TERM: the cull asks
+        // where the fragment is in the WORLD, and the world position is origin + cornerPoint, both of
+        // which are independent of where the player is standing.
+        int secX = int(floor(chunkMaskFrameOriginX + voxyFramePos.x)) >> 4;
+        int secY = int(floor(chunkMaskFrameOriginY + voxyFramePos.y)) >> 4;
+        int secZ = int(floor(chunkMaskFrameOriginZ + voxyFramePos.z)) >> 4;
         int sd = int(chunkMaskSide);
         // 0-based from the world-anchored origin. No centre bias, and nothing here depends on where
         // the camera is inside the square -- which is what stops the boundary being dragged.
         int cx = secX - chunkMaskAnchorSecX;
         int cz = secZ - chunkMaskAnchorSecZ;
+#ifdef VOXY_LOD_CULL_DEBUG
+        // Paint the SHADER'S OWN ARITHMETIC -- the column index it looked up and the bit it tested --
+        // over every LOD fragment, before any discard. R = cx, G = cz, B = bit, low 8 bits each.
+        //
+        // This exists because the mask's log proves the producer is section-quantised (identical
+        // columns and sections across 600 frames inside one section) while the region on screen
+        // follows the camera. Both cannot be true unless the LOOKUP is wrong, and nothing in the Java
+        // can see the lookup. A world-referenced fragment must keep the same colour as the camera
+        // moves; if the colour field is glued to the screen instead, the lookup is camera-referenced
+        // and that is the bug, made visible.
+        outColour = vec4(float(cx & 0xFF) / 255.0,
+                         float(cz & 0xFF) / 255.0,
+                         float(((secY - chunkMaskCamSecY) + 32) & 0xFF) / 255.0,
+                         1.0);
+        return;
+#endif
         // Outside the square, or outside the +/-512 blocks the per-column bitmask spans, is NOT
         // covered: keep the LOD. An over-drawn LOD z-fights, an under-drawn one shows the void.
         if (cx >= 0 && cz >= 0 && cx < sd && cz < sd) {

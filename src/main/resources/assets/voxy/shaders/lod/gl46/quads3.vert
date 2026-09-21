@@ -100,7 +100,7 @@ layout(location = 5) out flat uint voxyDrawIdOut;
 // location 4: the full 3D offset, because the cull asks about a 16x16x16 SECTION and Sodium
 // enforces a vertical render distance -- a horizontal column is not enough to answer it. Kept as a
 // separate varying rather than widening location 3 so the near-cull's existing path is untouched.
-layout(location = 4) out vec3 voxyCamRelPos;
+layout(location = 4) out vec3 voxyFramePos;
 #endif
 
 vec2 taaShift();
@@ -204,7 +204,7 @@ void main() {
     voxyCamRelXZ = cornerPoint.xz - cameraSubPos.xz;
     #endif
     #ifdef VOXY_LOD_CHUNK_CULL
-    voxyCamRelPos = cornerPoint - cameraSubPos;
+    voxyFramePos = cornerPoint;
     #endif
     #endif
 

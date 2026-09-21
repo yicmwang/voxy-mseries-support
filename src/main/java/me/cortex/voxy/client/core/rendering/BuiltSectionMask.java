@@ -628,9 +628,16 @@ public final class BuiltSectionMask {
         MemoryUtil.memPutInt(ptr + 4, anchorX);
         MemoryUtil.memPutInt(ptr + 8, newCamY);
         MemoryUtil.memPutInt(ptr + 12, anchorZ);
-        MemoryUtil.memPutFloat(ptr + 16, (float) viewport.cameraX);
-        MemoryUtil.memPutFloat(ptr + 20, (float) viewport.cameraY);
-        MemoryUtil.memPutFloat(ptr + 24, (float) viewport.cameraZ);
+        // The LOD's own frame origin, in blocks -- NOT the camera position. The shader gets the
+        // fragment's frame-relative position as a varying and adds this; the world position is their
+        // sum. The camera used to be in this formula as `cameraWorld + (fragment - camera)`, which
+        // cancels only if that difference is exactly the world offset -- and when it is not, the cull's
+        // lookup is displaced by however much they disagree, and the displacement tracks the camera.
+        // That is the reported symptom: a culled region offset from the player and following them.
+        // viewport.section is the 32-block frame Voxy's LOD pipeline anchors quads to, so <<5 is blocks.
+        MemoryUtil.memPutFloat(ptr + 16, (float) (viewport.section.x << 5));
+        MemoryUtil.memPutFloat(ptr + 20, (float) (viewport.section.y << 5));
+        MemoryUtil.memPutFloat(ptr + 24, (float) (viewport.section.z << 5));
         MemoryUtil.memPutInt(ptr + 28, 0);
         // uvec2 per column, lo then hi — written as two ints so no 64-bit integer type is needed in
         // the shader, where MSL translation of a GLSL uint64_t is the risk this avoids.

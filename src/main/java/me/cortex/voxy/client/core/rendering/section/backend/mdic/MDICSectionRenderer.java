@@ -938,6 +938,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             m.put("VOXY_LOD_CHUNK_CULL", "");
             m.put("VOXY_LOD_CHUNK_CULL_BINDING", Integer.toString(BUILT_MASK_CHUNK_BINDING));
         }
+        // VOXY_LOD_CULL_DEBUG=1: paint every LOD fragment with the cull's own column index and bit
+        // (R=cx, G=cz, B=bit). A readout of the shader's arithmetic, which no CPU-side counter can see.
+        if ("1".equals(System.getenv("VOXY_LOD_CULL_DEBUG"))) {
+            m.put("VOXY_LOD_CULL_DEBUG", "");
+        }
         // VOXY_LOD_CULL_SHOW=1: paint culled fragments red instead of discarding them. A diagnostic,
         // and the only way to tell a cull boundary apart from the edge of Voxy's own LOD coverage --
         // both are "no magenta" in a forced-colour frame. Paired with VOXY_LOD_FORCE_MAGENTA the frame
