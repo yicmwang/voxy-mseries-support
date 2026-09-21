@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -77,6 +78,41 @@ class BuiltSectionMaskTest {
         long[] after = columnsOf(at(-91, 8, -92));
         assertFalse(covered(after, -92, 8, -92), "no longer drawn, so no longer claimed");
         assertTrue(covered(after, -91, 8, -92));
+    }
+
+    @Test
+    void theSectionIsReconstructedByAddingBeforeFlooring() {
+        // The defect nobody caught: quads.frag floored the camera-RELATIVE offset and added it to a
+        // FLOORED camera, and floor(cam) + floor(rel) is not floor(cam + rel):
+        //
+        //     floor(camX) + floor(fragX - camX)  ==  floor(fragX) - [frac(fragX) < frac(camX)]
+        //
+        // The stray -1 lands on every fragment whose in-block fraction is below the camera's, so the
+        // culled region's edges are positioned by frac(camX) -- where the camera sits in its own
+        // block -- and crawl along with the player instead of stepping at chunk boundaries. Reported
+        // from play, and reported precisely: "the culling region should only step as I cross chunk
+        // boundaries. But now, the edges seem to follow me as I move."
+        //
+        // A one-block band out of every sixteen, so it is invisible in a still frame and in every
+        // screenshot taken from one. This walks the camera through every eighth of a block and the
+        // fragment across a section boundary, which is the only place the two forms differ.
+        for (double fragX : new double[]{ 16.0, 16.25, 16.5, 16.75, 17.0, 31.9, 32.0, -16.5, -15.75 }) {
+            for (int eighth = 0; eighth < 8; eighth++) {
+                final double camFrac = eighth / 8.0;
+                // A camera well away from the fragment, so only the fractional part can matter.
+                final float camWorld = (float) (Math.floor(fragX) - 40.0 + camFrac);
+                final float rel = (float) (fragX - camWorld);
+                assertEquals((int) Math.floor(fragX) >> 4,
+                        BuiltSectionMask.shaderSectionAxis(camWorld, rel),
+                        "block " + fragX + " with the camera " + camFrac + " into its own block");
+            }
+        }
+
+        // And the form this replaced, on one case it gets wrong, so a future reader can see the bug
+        // rather than take the paragraph above on trust.
+        final double fragX = 16.25, camX = 8.5;
+        final int old = ((int) Math.floor(camX) + (int) Math.floor(fragX - camX)) >> 4;
+        assertNotEquals((int) Math.floor(fragX) >> 4, old, "the two-part form was wrong here");
     }
 
     @Test

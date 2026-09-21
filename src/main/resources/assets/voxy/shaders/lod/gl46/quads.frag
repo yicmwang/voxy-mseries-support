@@ -60,9 +60,20 @@ layout(binding = VOXY_LOD_CHUNK_CULL_BINDING, std430) readonly restrict buffer B
     int chunkMaskAnchorSecX;
     int chunkMaskCamSecY;
     int chunkMaskAnchorSecZ;
-    int chunkMaskCamBlockX;
-    int chunkMaskCamBlockY;
-    int chunkMaskCamBlockZ;
+    // The camera's own world position, as FLOATS. The type is load-bearing, not a convenience: a
+    // fragment's section has to be reconstructed as floor(cameraWorld + rel), i.e. ADD BEFORE
+    // FLOORING. Flooring the camera-relative offset first and adding it to a floored camera is off
+    // by one for every fragment whose in-block fraction is below the camera's:
+    //
+    //     floor(camX) + floor(fragX - camX)  ==  floor(fragX) - [frac(fragX) < frac(camX)]
+    //
+    // That stray -1 is a band across the world whose position is set by frac(camX) -- where the
+    // camera sits inside its own block -- so the culled region's edges crawl along with the player
+    // at sub-block granularity instead of stepping at chunk boundaries. Keeping the camera's exact
+    // position here is what makes the boundary world-fixed between chunk crossings.
+    float chunkMaskCameraX;
+    float chunkMaskCameraY;
+    float chunkMaskCameraZ;
     uint _chunkMaskPad;
     // One 64-bit vertical bitmask per column, bit (secY - camSecY) + 32. Two uints rather than a
     // uint64_t because MSL translation of 64-bit GLSL integers is a risk not worth taking for a
@@ -230,12 +241,14 @@ void main() {
     // column costs one buffer read and nothing else. Placed above the magenta/debug early-outs so
     // a forced-colour bisection still shows exactly what survives the cull.
     {
-        // The fragment's own world section, in all three axes. Integer floor via an arithmetic
-        // shift, not a truncating cast: the world extends either side of the origin and `>>` floors
-        // a negative int, which is what BuiltSectionMask's own indexing assumes.
-        int secX = (chunkMaskCamBlockX + int(floor(voxyCamRelPos.x))) >> 4;
-        int secY = (chunkMaskCamBlockY + int(floor(voxyCamRelPos.y))) >> 4;
-        int secZ = (chunkMaskCamBlockZ + int(floor(voxyCamRelPos.z))) >> 4;
+        // The fragment's own world section, in all three axes. Add the camera's exact position to
+        // the camera-relative offset and floor ONCE, so the arithmetic cancels to floor(fragWorld)
+        // exactly; see the header fields for why flooring the offset separately is wrong. Integer
+        // floor via an arithmetic shift, not a truncating cast: the world extends either side of the
+        // origin and `>>` floors a negative int, which is what BuiltSectionMask's own indexing assumes.
+        int secX = int(floor(chunkMaskCameraX + voxyCamRelPos.x)) >> 4;
+        int secY = int(floor(chunkMaskCameraY + voxyCamRelPos.y)) >> 4;
+        int secZ = int(floor(chunkMaskCameraZ + voxyCamRelPos.z)) >> 4;
         int sd = int(chunkMaskSide);
         // 0-based from the world-anchored origin. No centre bias, and nothing here depends on where
         // the camera is inside the square -- which is what stops the boundary being dragged.

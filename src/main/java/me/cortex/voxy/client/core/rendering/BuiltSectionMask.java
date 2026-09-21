@@ -132,6 +132,28 @@ public final class BuiltSectionMask {
     }
 
     /**
+     * The fragment's section on one axis, reconstructed the way {@code quads.frag} does it: the
+     * camera's world position plus the camera-relative offset, floored ONCE.
+     *
+     * <p>The single floor is the whole point. {@code floor(cam) + floor(rel)} is not
+     * {@code floor(cam + rel)}:
+     *
+     * <pre>
+     *   floor(camX) + floor(fragX - camX)  ==  floor(fragX) - [frac(fragX) &lt; frac(camX)]
+     * </pre>
+     *
+     * so the two-part form is off by one for every fragment whose in-block fraction is below the
+     * camera's, and that band is positioned by {@code frac(camX)} — where the camera sits inside its
+     * own block. Which means the culled region's edges track the player's sub-block position, i.e.
+     * they crawl with the player instead of stepping at chunk boundaries. A one-block band out of
+     * every sixteen is invisible in a still frame, which is why this survived both the tests and the
+     * screenshots and was reported from play as "the edges seem to follow me as I move".
+     */
+    static int shaderSectionAxis(final float camWorld, final float camRel) {
+        return (int) Math.floor(camWorld + camRel) >> 4;
+    }
+
+    /**
      * The shader's own lookup, on the CPU: {@code quads.frag} takes the fragment's section, subtracts
      * the anchor for a column, reads that column's {@code uvec2} and tests
      * {@code bit = (secY - camSecY) + 32}. Reproduced here so the producer and the consumer are
@@ -200,9 +222,9 @@ public final class BuiltSectionMask {
         MemoryUtil.memPutInt(ptr + 4, anchorX);
         MemoryUtil.memPutInt(ptr + 8, newCamY);
         MemoryUtil.memPutInt(ptr + 12, anchorZ);
-        MemoryUtil.memPutInt(ptr + 16, camBlockX);
-        MemoryUtil.memPutInt(ptr + 20, camBlockY);
-        MemoryUtil.memPutInt(ptr + 24, camBlockZ);
+        MemoryUtil.memPutFloat(ptr + 16, (float) viewport.cameraX);
+        MemoryUtil.memPutFloat(ptr + 20, (float) viewport.cameraY);
+        MemoryUtil.memPutFloat(ptr + 24, (float) viewport.cameraZ);
         MemoryUtil.memPutInt(ptr + 28, 0);
         // uvec2 per column, lo then hi — written as two ints so no 64-bit integer type is needed in
         // the shader, where MSL translation of a GLSL uint64_t is the risk this avoids.
