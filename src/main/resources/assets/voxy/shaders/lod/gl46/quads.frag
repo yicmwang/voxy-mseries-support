@@ -294,6 +294,18 @@ void main() {
         }
     }
 #endif
+#ifdef VOXY_LOD_FLAT_FRAG
+    // VOXY_LOD_FLAT_FRAG=1 -- the fill-vs-per-draw probe; see MDICSectionRenderer.buildTerrainDefines.
+    // Emits a constant colour and returns, skipping the per-fragment mip computation, all three atlas
+    // fetches, the tinting, the alpha cutout and the fog.
+    //
+    // Deliberately placed AFTER the chunk-cull block rather than at the top of main() like
+    // FORCE_MAGENTA. The question is what the SHADING costs, so the culled region must still be culled:
+    // a probe that also restored the culled fragments would change what is drawn as well as what is
+    // shaded, and would answer neither question.
+    outColour = vec4(1.0, 0.0, 1.0, 1.0);
+    return;
+#endif
 #ifdef VOXY_LOD_FORCE_MAGENTA
     // VOXY_LOD_FORCE_MAGENTA=1 -- bisection, not a feature. Emits solid magenta as the FIRST
     // statement of main(), before the depth-bound test, the alpha discard, the tile clamp and

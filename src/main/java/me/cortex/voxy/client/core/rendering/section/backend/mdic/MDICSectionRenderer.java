@@ -920,6 +920,19 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if ("1".equals(System.getenv("VOXY_BI_OFFSET"))) {
             m.put("VOXY_BI_OFFSET", "");
         }
+        // VOXY_LOD_FLAT_FRAG=1: the fill-vs-per-draw probe. Emits a constant colour from the fragment
+        // stage as early as the cull allows, skipping the per-fragment mip computation, all three atlas
+        // fetches, the tinting, the alpha cutout and the fog.
+        //
+        // The image it produces is meaningless -- every LOD surface becomes one flat colour -- and that
+        // is the point. The frame costs ~50 ms, ~28 ms of which is the GPU drain, and nothing in the tree
+        // can currently say whether that is per-pixel shading or the ~29k indirect draw commands
+        // themselves. If `submit` collapses under this probe, the cost is per-pixel and the overdraw and
+        // per-fragment work are the target; if it does not move, the cost is the command count and the
+        // fragment stage is not worth optimising at all. See optimisation.MD section 7.
+        if ("1".equals(System.getenv("VOXY_LOD_FLAT_FRAG"))) {
+            m.put("VOXY_LOD_FLAT_FRAG", "");
+        }
         return m;
     }
 
