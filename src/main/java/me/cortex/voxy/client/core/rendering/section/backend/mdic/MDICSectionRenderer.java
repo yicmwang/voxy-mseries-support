@@ -864,10 +864,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // Kept to the non-GL path because GL's pass has one colour attachment.
             if (this.backend.getType() != BackendType.OPENGL) {
                 opaqueFormats = java.util.Arrays.copyOf(opaqueFormats, opaqueFormats.length + 1);
-                opaqueFormats[opaqueFormats.length - 1] = GL_R32F;
+                opaqueFormats[opaqueFormats.length - 1] = GL_RGBA8;
                 translucentFormats = java.util.Arrays.copyOf(translucentFormats,
                         translucentFormats.length + 1);
-                translucentFormats[translucentFormats.length - 1] = GL_R32F;
+                translucentFormats[translucentFormats.length - 1] = GL_RGBA8;
             }
             this.terrainPipeline = this.backend.createGraphicsPipeline(
                     new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(

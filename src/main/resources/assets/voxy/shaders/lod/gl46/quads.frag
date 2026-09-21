@@ -130,7 +130,7 @@ layout(location = 0) out vec4 outColour;
 // records that measurement at the top, from the depth-bound mask's M13 work. Emitting depth as colour
 // sidesteps it entirely: the pyramid samples an R32F texture, which is an ordinary texture2d<float>
 // read, and no blit, buffer transfer or encoder transition is involved.
-layout(location = 1) out float voxyDepthOut;
+layout(location = 1) out vec4 voxyDepthOut;
 #endif
 #else
 
@@ -322,7 +322,7 @@ void main() {
     // discards LATER (the alpha cutout) still writes, which is a known approximation -- a tile covered
     // entirely by leaves can read as occluded. If that shows up as holes, move this below the cutout
     // test and give each early-out its own write.
-    voxyDepthOut = gl_FragCoord.z;
+    voxyDepthOut = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 #endif
 #ifdef VOXY_LOD_FORCE_MAGENTA
     // VOXY_LOD_FORCE_MAGENTA=1 -- bisection, not a feature. Emits solid magenta as the FIRST

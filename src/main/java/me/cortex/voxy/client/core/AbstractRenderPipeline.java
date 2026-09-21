@@ -132,6 +132,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private boolean depthFormatLogged;
     /** One-shot guard for [Metal-HIZBUILD]: which branch the pyramid build took, and why. */
     private boolean hizBuildLogged;
+    /** One-shot guard for [Metal-PASSSHAPE]. */
+    private boolean passShapeLogged;
 
     /**
      * VOXY_HIZ_BUILD=1 enables the Hi-Z pyramid build on the Metal path.
@@ -506,7 +508,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         if (this.metalDepthTex == null || this.metalDepthWidth != fbw || this.metalDepthHeight != fbh) {
             if (this.metalDepthTex != null) this.metalDepthTex.free();
             this.metalDepthTex = backend.createTexture()
-                    .store(org.lwjgl.opengl.GL30C.GL_R32F, 1, fbw, fbh)
+                    .store(org.lwjgl.opengl.GL30C.GL_RGBA8, 1, fbw, fbh)
                     .name("VoxyLodDepthColour");
             this.metalDepthWidth = fbw;
             this.metalDepthHeight = fbh;
@@ -801,6 +803,18 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             }
         }
         var pass = passBuilder.build();
+        // One-shot: how many colour attachments did the pass actually end up with? Every other link was
+        // verified correct (the define reaches the shader, the compiled MSL declares [[color(1)]], the
+        // pipeline declares an R32F format) and the attachment still reads zero -- so the question is
+        // whether the builder kept the second one at all, which nothing reported.
+        if (!this.passShapeLogged) {
+            this.passShapeLogged = true;
+            me.cortex.voxy.common.Logger.info("[Metal-PASSSHAPE] LOD pass colourAttachments="
+                    + pass.colorAttachments().size() + " metalDepthTex="
+                    + (this.metalDepthTex == null ? "null" : "id=" + this.metalDepthTex.id())
+                    + " metallumDepth=" + (this.metallumDepth == null ? "null"
+                            : "id=" + this.metallumDepth.id()));
+        }
         // Submersion far-field skip: with the eye in water/lava the env fog
         // saturates at 24-96 blocks while every LOD fragment sits far beyond
         // it — the whole LOD field is 100% fog colour by construction. Drawing
