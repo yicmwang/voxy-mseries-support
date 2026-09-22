@@ -34,7 +34,9 @@ void writeCmd(uint idx, uint instance, uint offset, uint quadCount) {
     cmd.count = quadCount * 6;
     cmd.instanceCount = 1;
     cmd.firstIndex = 0;
-    cmd.baseVertex = int(offset)<<2;
+    // See the note in cmdgen.comp's writeCmd: `<<2` on a signed value is UB and miscompiles on this
+    // backend, and `*4` is identical for every in-range value.
+    cmd.baseVertex = int(offset)*4;
     cmd.baseInstance = instance;
     cmdBuffer[idx] = cmd;
 }

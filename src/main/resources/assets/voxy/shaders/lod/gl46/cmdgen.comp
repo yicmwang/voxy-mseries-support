@@ -55,7 +55,19 @@ void writeCmd(uint idx, uint instance, uint offset, uint quadCount) {
     cmd.count = quadCount * 6;
     cmd.instanceCount = 1;
     cmd.firstIndex = 0;
-    cmd.baseVertex = int(offset)<<2;
+    // `int(offset)<<2`, not `<<`, and the conversion is the same one screenspace.glsl and
+    // quad_util.glsl already carry. `offset` is a uint quad index, so `int(offset)` is negative once
+    // offset >= 2^31, and a left shift of a negative signed value is UB -- GL drivers treat it as an
+    // arithmetic multiply and work, but this backend's SPIRV-Cross/MSL path optimises it differently.
+    // That is the 2026-05-26 bug exactly (see screenspace.glsl's note), which presented as terrain
+    // vanishing for the nodes whose relative coordinates were negative.
+    //
+    // Whether offset ever REACHES 2^31 here is not established -- geometryCapacity is ~2^31, so it is
+    // at the very top of the range if it happens at all. Converted anyway: `*4` is identical to `<<2`
+    // for every in-range value, so this cannot change behaviour, and it removes a latent UB site of a
+    // family this renderer has already been bitten by twice. Multiplication is well-defined for
+    // negatives; a shift is not.
+    cmd.baseVertex = int(offset)*4;
     cmd.baseInstance = instance;
     cmdBuffer[idx] = cmd;
 }
