@@ -82,6 +82,45 @@ public final class MetalInterop {
     public static void endCurrentEncoder() {
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // The five below were MISSING, and their absence silently disabled the whole double.
+    //
+    // MetallumBridge.resolve() runs its lookups in order and used to latch `resolved` before the try,
+    // so the first NoSuchMethodException -- endCurrentEncoderAndReport, the sixth lookup -- left every
+    // field after it null for the process lifetime while isAvailable (the first lookup) still made
+    // available() report true. Three of MetallumBridgePresentTest's assertions read those later
+    // fields and failed with bare zeros, with no stated cause, because SLF4J is NOP in this source
+    // set and the error naming the missing method was swallowed.
+    //
+    // So the drift is one-directional and entirely in this test double: the bridge gained these five
+    // lookups on 2026-09-19 (00dccf76, c2185e95) and this file was never updated. The class comment
+    // above claims the tests "stop compiling" if the facade changes shape -- they do not, because the
+    // bridge reaches the façade reflectively and nothing links these signatures to resolve()'s
+    // strings. Kept in step by hand, and MetallumBridgePresentTest is what catches the next drift.
+    //
+    // Signatures mirror the real facade (metallum MetalInterop:165, :174, :190, :218, :266).
+    // ---------------------------------------------------------------------------------------------
+
+    public static long openEncoderHandle() {
+        return 0L;
+    }
+
+    public static long endCurrentEncoderAndReport() {
+        return 0L;
+    }
+
+    public static long acquireRenderEncoder(final long colorHandle, final long depthHandle,
+                                            final int width, final int height) {
+        return 0L;
+    }
+
+    public static long textureHandle(final com.mojang.blaze3d.textures.GpuTexture texture) {
+        return 0L;
+    }
+
+    public static void invalidateRenderPassState() {
+    }
+
     /** Records mid-frame splits so tests can assert Voxy's submit() reached Metallum. */
     public static int flushFrameCalls;
 

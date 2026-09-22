@@ -26,7 +26,24 @@ public final class MetallumBridge {
             mLogRenderPassCounters, mOpenEncoderHandle, mEndCurrentEncoderAndReport, mTextureHandle,
             mHasPendingColorClear, mHasPendingDepthClear, mPendingColorClearCount,
             mDrawProbeStyleTriangle;
+    /** An attempt has been made; do not make another (the lookups are not cheap and cannot start working). */
     private static boolean resolved;
+    /**
+     * The attempt SUCCEEDED -- every non-optional lookup resolved.
+     *
+     * <p>Distinct from {@link #resolved}, and the distinction is the whole fix. This method used to set
+     * {@code resolved = true} BEFORE its try block, so a lookup that threw partway through left the
+     * fields before it set and every field after it null, for the lifetime of the process, while
+     * {@code mIsAvailable} -- one of the first to be set -- still made {@link #available()} report
+     * true. Voxy would then take the whole "encode into Metallum's frame" path with a null colour
+     * attachment, a null render encoder and a 0x0 viewport, and the only evidence was a single log line
+     * naming the missing method.
+     *
+     * <p>That is not hypothetical: it is exactly what the testMetallum double produced, where five
+     * non-optional methods were absent and the tests failed with bare zeros from three of them. In
+     * production the real facade satisfies all of them, so it never fired -- which is why it survived.
+     */
+    private static boolean resolveOk;
 
     private MetallumBridge() {
     }
@@ -51,6 +68,9 @@ public final class MetallumBridge {
             return;
         }
         resolved = true;
+        // `resolveOk` is set only at the END of the try. A throw leaves it false, and because the
+        // fields set before the throw are left populated, `available()` must consult this flag rather
+        // than `mIsAvailable` -- see the field comment.
         try {
             Class<?> interop = Class.forName(INTEROP);
             mIsAvailable = interop.getMethod("isAvailable");
@@ -75,8 +95,18 @@ public final class MetallumBridge {
             mPendingColorClearCount = optional(interop, "pendingColorClearCount");
             mDrawProbeStyleTriangle = optional(interop, "drawProbeStyleTriangle",
                     long.class, long.class, int.class, int.class, String.class);
+            resolveOk = true;
             Logger.info("Metallum interop detected; Voxy will encode into Metallum's frame");
         } catch (Throwable t) {
+            // Clear what was set before the throw, so no accessor can hand out a half-resolved bridge.
+            // Without this, a caller that reaches an accessor without consulting available() -- and
+            // several do, via the direct helpers below -- gets a real device handle and a null
+            // everything-else.
+            mIsAvailable = mDeviceHandle = mCommandQueueHandle = mCommandBufferHandle = null;
+            mEndCurrentEncoder = mRenderEncoderHandle = mColorAttachment = mDepthAttachment = null;
+            mViewportWidth = mViewportHeight = mFlushFrame = null;
+            mAcquireRenderEncoder = mInvalidateRenderPassState = null;
+            mOpenEncoderHandle = mEndCurrentEncoderAndReport = mTextureHandle = null;
             // Name the method. A bare "interop not present" is indistinguishable from metallum
             // genuinely being absent, and it silently changes Voxy's whole rendering path -- it
             // renders standalone instead of into Metallum's frame. That cost three invalid
@@ -91,7 +121,10 @@ public final class MetallumBridge {
     /** True when Metallum is loaded and has published its device. */
     public static boolean available() {
         resolve();
-        if (mIsAvailable == null) {
+        // resolveOk, NOT just mIsAvailable. isAvailable is one of the FIRST lookups resolve() performs,
+        // so it is set even when a later one throws and leaves the bridge half-built; gating on it alone
+        // is what let a partial resolve masquerade as a working bridge.
+        if (!resolveOk || mIsAvailable == null) {
             return false;
         }
         try {
