@@ -48,6 +48,19 @@ layout(binding = RENDER_TRACKER_BINDING, std430) restrict writeonly buffer rende
 layout(binding = STATISTICS_BUFFER_BINDING, std430) restrict buffer statisticsBuffer {
     uint traversalCounts[MAX_ITERATIONS];
     uint renderCounts[MAX_ITERATIONS];
+    // WHY these three exist, per level. The traversal makes four decisions about a node -- culled by
+    // frustum, culled by occlusion, handed off to children, drawn -- and until now only two of them were
+    // counted. So when geometry goes missing there was no way to tell WHICH gate dropped it: the
+    // symptoms of a cull and of a placement bug look identical on screen (absence), and everything that
+    // removes a node at node granularity funnels through one of these four lines.
+    //
+    // Read them as a set. One counter dropping for a frame while the others hold = a gating flicker,
+    // and it names the gate. All four steady while geometry is visibly missing = nothing is being
+    // culled at all, the nodes are being drawn somewhere else, and the hunt moves to placement --
+    // which is a different family entirely and not reachable by staring at the cull.
+    uint frustumCulledCounts[MAX_ITERATIONS];
+    uint hizCulledCounts[MAX_ITERATIONS];
+    uint descendCounts[MAX_ITERATIONS];
 };
 #endif
 
@@ -113,8 +126,20 @@ void traverse(in UnpackedNode node) {
     setupScreenspace(node);
     //debugDumpNode(node);
 
-    if (outsideFrustum() || isCulledByHiz()) {
+    // Split, so the two culls can be told apart. Semantics are unchanged -- this is the same
+    // short-circuit, written out -- but a node dropped by the frustum and one dropped by occlusion are
+    // very different diagnoses and were previously indistinguishable in every counter.
+    bool frustumCulledNow = outsideFrustum();
+    bool hizCulledNow = !frustumCulledNow && isCulledByHiz();
+    if (frustumCulledNow || hizCulledNow) {
         //printf("culled");
+        #ifdef HAS_STATISTICS
+        if (frustumCulledNow) {
+            atomicAdd(frustumCulledCounts[node.lodLevel], 1);
+        } else {
+            atomicAdd(hizCulledCounts[node.lodLevel], 1);
+        }
+        #endif
     } else {
         //It is visible, TODO: maybe do a more detailed hiz test? (or make it so that )
 
@@ -148,6 +173,9 @@ void traverse(in UnpackedNode node) {
         if (node.lodLevel!=0 && (shouldDecend() || emptyMeshNeedsChildren)) {
             if (canCoverWithChildren) {
                 //printf("A");
+                #ifdef HAS_STATISTICS
+                atomicAdd(descendCounts[node.lodLevel], 1);
+                #endif
                 enqueueChildren(node);
             } else {
                 //printf("B");

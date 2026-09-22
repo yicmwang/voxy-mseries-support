@@ -46,6 +46,56 @@ public class HierarchicalOcclusionTraverser {
 
 
     private static final int MAX_ITERATIONS = WorldEngine.MAX_LOD_LAYER + 1;
+
+    /**
+     * {@code VOXY_TRAV_STATS=1} logs the traversal's per-frame decision counters.
+     *
+     * <p><b>Why every frame, not sampled.</b> The symptom this exists for is a ONE-FRAME flicker. A
+     * once-a-second readout cannot see a one-frame event at all -- it would sample 60 frames, miss the
+     * bad one, and report that nothing happened, which is exactly the false-negative this project keeps
+     * re-learning to avoid. So this logs the whole series and the ANALYSIS looks for a step in it.
+     *
+     * <p><b>How to read it.</b> Four decisions can remove a node, and all four are now counted per LOD
+     * level: culled by frustum, culled by occlusion, handed off to children (descend), and drawn
+     * (enqueued). Geometry that is missing can only come from one of two places:
+     * <ul>
+     *   <li>A counter STEPS for a frame while the others hold -- a gating flicker, and the counter that
+     *       stepped names the gate. Correlate it with the frame the user reports the flicker on.</li>
+     *   <li>All four hold steady while geometry is visibly absent -- nothing is being culled, so the
+     *       nodes are being DRAWN SOMEWHERE ELSE. That is a placement bug, not a cull bug, and this
+     *       series is what separates the two. Every "explanation" offered for these symptoms so far has
+     *       assumed a cull; this is the measurement that would refuse that assumption.</li>
+     * </ul>
+     *
+     * <p>Buffer layout is five consecutive {@code uint[MAX_ITERATIONS]} arrays, in the order the shader
+     * declares them: visited, enqueued, frustumCulled, hizCulled, descended.
+     */
+    private static final boolean TRAV_STATS = "1".equals(System.getenv("VOXY_TRAV_STATS"));
+    private static long travStatsFrame = 0;
+
+    /** Reads the five arrays back and logs one line. Called from the download callback. */
+    private static void logTraversalStats(long addr) {
+        final String[] names = {"visited", "enqueued", "frustumCulled", "hizCulled", "descended"};
+        StringBuilder sb = new StringBuilder("[Metal-TRAV f=").append(travStatsFrame++).append("] ");
+        for (int a = 0; a < names.length; a++) {
+            int total = 0;
+            for (int i = 0; i < MAX_ITERATIONS; i++) {
+                total += MemoryUtil.memGetInt(addr + (a * MAX_ITERATIONS + i) * 4L);
+            }
+            sb.append(names[a]).append('=').append(total).append("  ");
+        }
+        // Per-level breakdown for the two CULLS only: "the far sections vanish" is a statement about
+        // LOD level, and the totals alone cannot confirm or refute it.
+        for (int a : new int[]{2, 3}) {
+            sb.append("| ").append(names[a]).append("ByLevel=[");
+            for (int i = 0; i < MAX_ITERATIONS; i++) {
+                if (i > 0) sb.append(',');
+                sb.append(MemoryUtil.memGetInt(addr + (a * MAX_ITERATIONS + i) * 4L));
+            }
+            sb.append("] ");
+        }
+        me.cortex.voxy.common.Logger.info(sb.toString());
+    }
     private static final int LOCAL_WORK_SIZE_BITS = 5;
     private static final int LOCAL_WORK_SIZE = 1 << LOCAL_WORK_SIZE_BITS;
 
@@ -361,7 +411,7 @@ public class HierarchicalOcclusionTraverser {
         // tick()/addToOut() and the shader-source injection are unaffected; reviving
         // it would mean a ComputeEncoder.setBuffer inside this pass.
 
-        if (RenderStatistics.enabled) {
+        if (RenderStatistics.enabled || TRAV_STATS) {
             this.statisticsBuffer.zero();
         }
 
@@ -371,13 +421,16 @@ public class HierarchicalOcclusionTraverser {
         this.traverseInternal(viewport);
         this.downloadResetRequestQueue();
 
-        if (RenderStatistics.enabled) {
+        if (RenderStatistics.enabled || TRAV_STATS) {
             DownloadStream.INSTANCE.download(this.statisticsBuffer, down -> {
                 for (int i = 0; i < MAX_ITERATIONS; i++) {
                     RenderStatistics.hierarchicalTraversalCounts[i] = MemoryUtil.memGetInt(down.address + i * 4L);
                 }
                 for (int i = 0; i < MAX_ITERATIONS; i++) {
                     RenderStatistics.hierarchicalRenderSections[i] = MemoryUtil.memGetInt(down.address + MAX_ITERATIONS * 4L + i * 4L);
+                }
+                if (TRAV_STATS) {
+                    logTraversalStats(down.address);
                 }
             });
         }
