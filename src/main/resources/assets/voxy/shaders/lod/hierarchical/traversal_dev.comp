@@ -61,6 +61,19 @@ layout(binding = STATISTICS_BUFFER_BINDING, std430) restrict buffer statisticsBu
     uint frustumCulledCounts[MAX_ITERATIONS];
     uint hizCulledCounts[MAX_ITERATIONS];
     uint descendCounts[MAX_ITERATIONS];
+    // WHY this one exists. It counts the nodes that WANTED to descend and could not, because at
+    // least one child has no mesh yet -- i.e. the geometry that is missing from the screen because it
+    // has not been BUILT, not because anything culled it.
+    //
+    // That distinction is the whole of Bug B and nothing separated the two. A hole from a cull and a
+    // hole from an un-meshed node are the same absence on screen; every cull counter reads clean for
+    // both, because for the cull counters nothing was culled -- the node was simply never ready. So a
+    // frame full of holes with `notReady` high is a STARVATION finding, and the hunt leaves the cull
+    // entirely.
+    //
+    // It is also the natural pair to `descendCounts`: the two together partition the nodes that
+    // should have refined, into "did" and "could not".
+    uint notReadyCounts[MAX_ITERATIONS];
 };
 #endif
 
@@ -218,6 +231,11 @@ void traverse(in UnpackedNode node) {
                 enqueueChildren(node);
             } else if (canCoverWithChildren) {
                 //printf("A'");
+                // The node wanted to refine and could not: at least one child has no mesh yet. This is
+                // the line that counts as "missing geometry that was never built" (see notReadyCounts).
+                #ifdef HAS_STATISTICS
+                atomicAdd(notReadyCounts[node.lodLevel], 1);
+                #endif
                 // Children exist but at least one has no mesh yet, so descending would draw NOTHING for
                 // this volume. Cover it with our own mesh until they are ready.
                 //

@@ -87,9 +87,10 @@ public class HierarchicalOcclusionTraverser {
     private static final boolean CHILD_READY = !"0".equals(System.getenv("VOXY_LOD_CHILD_READY"));
     private static long travStatsFrame = 0;
 
-    /** Reads the five arrays back and logs one line. Called from the download callback. */
+    /** Reads the six arrays back and logs one line. Called from the download callback. */
     private static void logTraversalStats(long addr) {
-        final String[] names = {"visited", "enqueued", "frustumCulled", "hizCulled", "descended"};
+        final String[] names = {"visited", "enqueued", "frustumCulled", "hizCulled", "descended",
+                "notReady"};
         StringBuilder sb = new StringBuilder("[Metal-TRAV f=").append(travStatsFrame++).append("] ");
         for (int a = 0; a < names.length; a++) {
             int total = 0;
@@ -106,7 +107,7 @@ public class HierarchicalOcclusionTraverser {
         // should?" -- cannot be answered from totals at all. Absolute counts actively mislead here:
         // frustumCulledByLevel=[210,103,49,26,30] makes the coarsest level look least-culled, when it is
         // simply the least-visited.
-        for (int a : new int[]{0, 2, 3}) {
+        for (int a : new int[]{0, 2, 3, 5}) {
             sb.append("| ").append(names[a]).append("ByLevel=[");
             for (int i = 0; i < MAX_ITERATIONS; i++) {
                 if (i > 0) sb.append(',');
@@ -114,8 +115,21 @@ public class HierarchicalOcclusionTraverser {
             }
             sb.append("] ");
         }
+        // The request budget, on the same line as `notReady`, because they are the same question.
+        // `requestSize` is what the traversal was ALLOWED to ask for this frame; `tasks` is the mesh
+        // queue depth that decided it. When tasks >= TARGET_COUNT (4000) the quadratic fillness term
+        // goes to zero and the budget collapses to REQUEST_FLOOR -- 8, which is exactly ONE
+        // level-1 -> level-0 refinement. So a persistently saturated queue pins LOD refinement at one
+        // node per frame no matter how fast the camera moves, and the terrain that is not refined yet
+        // is terrain that is missing from the screen. Read this next to `notReady`.
+        sb.append("| reqBudget=").append(lastRequestSize)
+          .append(" tasks=").append(lastTaskCount);
         me.cortex.voxy.common.Logger.info(sb.toString());
     }
+
+    /** Published by {@link #uploadUniform} for {@link #logTraversalStats}; diagnostic only. */
+    private static volatile int lastRequestSize = -1;
+    private static volatile int lastTaskCount = -1;
     private static final int LOCAL_WORK_SIZE_BITS = 5;
     private static final int LOCAL_WORK_SIZE = 1 << LOCAL_WORK_SIZE_BITS;
 
@@ -428,7 +442,10 @@ public class HierarchicalOcclusionTraverser {
             // bake demand. VOXY_HOT_REQUEST_FLOOR tunes it (0 restores the
             // old cliff).
             requestSize = Math.max(REQUEST_FLOOR, requestSize);
-            MemoryUtil.memPutInt(ptr, Math.max(0, Math.min(MAX_REQUEST_QUEUE_SIZE, requestSize))); ptr += 4;
+            final int budget = Math.max(0, Math.min(MAX_REQUEST_QUEUE_SIZE, requestSize));
+            lastRequestSize = budget;
+            lastTaskCount = this.meshGen.getTaskCount();
+            MemoryUtil.memPutInt(ptr, budget); ptr += 4;
         }
     }
 

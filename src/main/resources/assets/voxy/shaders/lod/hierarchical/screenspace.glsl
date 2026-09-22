@@ -12,9 +12,10 @@
 // substantually for performance (for both persistent threads and incremental)
 
 
-//The HiZ sampler, toScreenspace() and the pyramid test itself now live in hiz.glsl: the per-section
-//cull pass (lod/gl46/section_cull.comp) asks the same question, and one definition is the only thing
-//that keeps the two from disagreeing about the depth convention.
+//The HiZ sampler, toScreenspace() and the pyramid test itself live in hiz.glsl. They were extracted
+//when a per-section cull pass shared this predicate; that pass is gone (2026-09-22, lod-bugs.MD 2.1)
+//and the traversal is the only caller again, but the single definition stays — the depth convention is
+//what drifts when this test is written down twice.
 #import <voxy:lod/hierarchical/hiz.glsl>
 
 

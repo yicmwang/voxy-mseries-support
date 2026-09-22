@@ -87,26 +87,32 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     // The cull graphics pipeline (lod/gl46/cull/raster.vert|frag) was built here and dispatched
     // ONLY by the GL occlusion-cull arm in buildDrawCalls; that arm is deleted, so the pipeline
-    // and its two shader sources are gone. The live cull is sectionCullPipeline below (a compute
-    // pass against the Hi-Z pyramid) plus quads.frag's per-section built-mask test.
+    // and its two shader sources are gone. The compute cull that briefly replaced it is gone too
+    // (2026-09-22) — see forceAllVisiblePipeline below for what remains and why. quads.frag's
+    // per-section built-mask test (CHUNK_CULL) is a different question and still runs.
 
     /**
-     * The per-section occlusion cull (lod/gl46/section_cull.comp), and the replacement for the
-     * M12-chunk-5 force-all-visible stub. It walks exactly the list the stub walked — the
-     * traversal's render list, `indirectLookup` — but decides each section's
-     * {@code visibilityData[sid]} with the same Hi-Z predicate the traversal uses, instead of
-     * marking everything visible. Dispatched only when {@link #SECTION_CULL} is on and the
-     * Hi-Z pyramid has a texture (see the dispatch block in buildDrawCalls). Allocated
-     * unconditionally — negligible memory cost, and gating the allocation behind a backend check
-     * would only make the class harder to read.
+     * Marks every section in the traversal's render list visible for this frame
+     * (lod/gl46/force_all_visible.comp).
+     *
+     * <p><b>It is mandatory and it is not a cull.</b> It is the only writer of {@code visibilityData},
+     * which cmdgen gates every draw on, so removing it does not remove a cull — it removes the LOD. The
+     * per-section occlusion cull that used to sit on top of this bookkeeping was deleted 2026-09-22
+     * after being measured at ~0-6 % (and at exactly 0 for its default whole-cell form, which was a
+     * provable no-op: it re-asked the traversal's own question about the traversal's own output). See
+     * the shader's header for the full reasoning, and {@code cull.MD} 8.8 for why the name matters.
+     *
+     * <p>The name is the one this pass had before it grew a cull. It was renamed to
+     * {@code section_cull.comp} when the cull landed and has now been renamed back, because a file
+     * whose name asserts the wrong meaning is exactly the failure {@code cull.MD} 8.8 records.
      */
-    private final me.cortex.voxy.client.core.gpu.IGpuPipeline sectionCullPipeline = this.backend.createComputePipeline(
+    private final me.cortex.voxy.client.core.gpu.IGpuPipeline forceAllVisiblePipeline = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
-                    ShaderLoader.parse("voxy:lod/gl46/section_cull.comp"),
-                    sectionCullDefines(),
+                    ShaderLoader.parse("voxy:lod/gl46/force_all_visible.comp"),
+                    forceAllVisibleDefines(),
                     null, null,
                     128, 1, 1,
-                    "MDICSectionRenderer.sectionCull"));
+                    "MDICSectionRenderer.forceAllVisible"));
 
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline prefixSumPipeline = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
@@ -157,63 +163,18 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             && !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"));
 
     /**
-     * VOXY_LOD_SECCULL=0 skips the per-section occlusion cull pass, so nothing writes
-     * {@code visibilityData} and cmdgen emits no sections at all (the LOD disappears). It exists to
-     * prove the pass is what changed a measurement, not as a shipping configuration.
+     * Bindings for {@code lod/gl46/force_all_visible.comp}, mirroring the defaults the shader declares
+     * for itself so neither side is the only place a binding is written down.
      *
-     * <p>A DIFFERENT question from {@link #CHUNK_CULL}, deliberately kept separate: this one asks
-     * whether a section's box is OCCLUDED (Hi-Z — it lies entirely behind the far side of what the
-     * depth buffer already shows) and decides whether a draw command is emitted at all; CHUNK_CULL
-     * asks whether vanilla has built the chunks the section overlaps, in the fragment stage, per
-     * 16x16x16 section. Both are on; neither licenses removing the other.
+     * <p>Buffers 0-3 are the scene uniform (from bindings.glsl), the section metadata, the visibility
+     * buffer and the traversal's render list. There is no texture binding any more: the pass used to
+     * sample the Hi-Z pyramid, and it no longer samples anything.
      */
-    private static final boolean SECTION_CULL = !"0".equals(System.getenv("VOXY_LOD_SECCULL"));
-
-    /**
-     * VOXY_LOD_SECCULL_BOX selects the box the cull pass tests: {@code node} (default) is the
-     * section's whole cell, {@code aabb} is the occupied sub-box the mesher recorded for it.
-     *
-     * <p>{@code node} is Stage 1 of the cull work and is a PROVABLE NO-OP: the pass's input list IS
-     * the traversal's render queue, filled only after each section's node passed that same Hi-Z test
-     * with that same box, so Stage 1 removes zero draws by construction — any movement in
-     * {@code rawOpaque} means the pass's coordinate frame is wrong. Only {@code aabb} can remove
-     * draws. Its frame is ported from upstream's raster.vert rather than measured in this tree, so
-     * confirm it by image diff, never by the derivation.
-     */
-    private static final boolean SECTION_CULL_AABB_BOX =
-            "aabb".equals(System.getenv("VOXY_LOD_SECCULL_BOX"));
-
-    /**
-     * VOXY_LOD_SECCULL_BOX=force restores the deleted {@code force_all_visible.comp} stub's behaviour:
-     * every section in the traversal's queue is marked visible-this-frame, so the pass culls nothing.
-     *
-     * <p><b>This is the A/B baseline, and it cannot be reached by disabling the pass.</b> Nothing else
-     * writes {@code visibilityData}, so skipping the dispatch leaves it stale and cmdgen emits no
-     * sections at all — the LOD disappears. A skipped pass is a no-LOD arm, not a no-cull one, and
-     * comparing against it would contrast a working frame with an empty one. The box is still computed
-     * in this mode, so the baseline and the cull arms differ in the write only.
-     */
-    private static final boolean SECTION_CULL_FORCE_VISIBLE =
-            "force".equals(System.getenv("VOXY_LOD_SECCULL_BOX"));
-
-    /**
-     * Bindings and box variant for {@code lod/gl46/section_cull.comp}, mirroring the defaults the
-     * shader declares for itself so neither side is the only place a binding is written down.
-     *
-     * <p>HIZ_BINDING is 0 and that is not a collision with the scene uniform at BUFFER 0: textures and
-     * samplers are a different namespace from buffers (the traversal binds the pyramid to the same
-     * slot while its SceneUniform sits at its own buffer binding). It names the same
-     * NEAREST/NEAREST/CLAMP_TO_EDGE sampler the traversal uses, via HiZBuffer.getSampler().
-     */
-    private static java.util.Map<String, String> sectionCullDefines() {
+    private static java.util.Map<String, String> forceAllVisibleDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
         m.put("VISIBILITY_BUFFER_BINDING", "2");
         m.put("VISIBILITY_ACCESS", "writeonly");
         m.put("INDIRECT_SECTION_LOOKUP_BINDING", "3");
-        m.put("SECTION_METADATA_BUFFER_BINDING", "1");
-        m.put("HIZ_BINDING", "0");
-        if (SECTION_CULL_AABB_BOX) m.put("SECCULL_BOX_AABB", "");
-        if (SECTION_CULL_FORCE_VISIBLE) m.put("SECCULL_FORCE_VISIBLE", "");
         return m;
     }
 
@@ -1242,6 +1203,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         int maxDrawCount = Math.min((int)(this.geometryManager.getSectionCount()*4.4+128), 400_000);
         maxDrawCount = metalDrawCount(viewport, OPAQUE_DRAW_COUNT_OFFSET, maxDrawCount);
         lodDrawDiag(viewport, this.geometryManager.getSectionCount(), maxDrawCount);
+        lodGapProbe(viewport);
         if (maxDrawCount != 0) {
             this.renderTerrainMetal(encoder, this.terrainPipeline, viewport, 0L, maxDrawCount);
         }
@@ -1419,6 +1381,232 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             }
         }
         return -1;
+    }
+
+    /**
+     * {@code VOXY_LOD_GAP=1} — the ONE-FRAME-GAP detector, and the reason it exists.
+     *
+     * <p>Every attempt on the "LOD chunks blip out for a frame" bug so far has had the same shape:
+     * change something, ask the user to fly around, be told "still there". Five hypotheses died that
+     * way. The missing piece was never a hypothesis — it was an ORACLE: nothing in this renderer can
+     * see the bug without a human watching. This is that oracle, and it runs unattended against
+     * {@code VOXY_DEV_CAM} + {@code VOXY_DEV_CAM_DRIFT}, so an A/B costs one run instead of one
+     * user session.
+     *
+     * <p>What it measures. Once per frame it reads the draw commands the GPU is about to issue — the
+     * CONSUME slot, the same memory {@link #metalDrawCount} bounds the draws with — and collects the
+     * {@code baseVertex} of every command with a non-zero count. That field is the mesh's quad offset
+     * in the geometry buffer, so it identifies the drawn geometry itself rather than a draw-list index
+     * (which is reordered every frame and would make every frame look like a difference).
+     *
+     * <p>The signature it looks for is the bug's exact shape: a {@code baseVertex} present on frame
+     * N-2, ABSENT on N-1, and present again on N. A section that legitimately changes detail level
+     * does not trigger it, because its old geometry never comes back — the reappearance is what makes
+     * this a blip rather than a transition. ALL THREE SLICES are unioned into one set for the same
+     * reason: a section migrating between the opaque and translucent slices is a real event that must
+     * not be reported as a disappearance.
+     *
+     * <p>It reports a RATE, not a cause. The point is to run it under the switches that neutralise
+     * one gate at a time — {@code VOXY_LOD_NO_CULL=1} (the traversal's frustum) and
+     * {@code VOXY_HIZ_BUILD=0} (both Hi-Z tests, and with the per-section cull deleted the traversal's
+     * is the only one left) — and let the arm that drops the rate to zero name the gate. That is the
+     * split this project has never been able to make, because the cull and a placement bug look
+     * identical on screen.
+     *
+     * <p>Cost: three bound reads of the command slices per frame, bucketed into an int set. Diagnostic
+     * only; off by default.
+     */
+    private static final boolean LOD_GAP = "1".equals(System.getenv("VOXY_LOD_GAP"));
+    private it.unimi.dsi.fastutil.ints.IntOpenHashSet gapCur, gapPrev, gapPrev2;
+    private long gapFrames, gapFramesWithGap, gapTotal, gapWorst;
+    private long gapDrawnSum, gapDrawnMax, gapDrawnMin = -1;
+    /**
+     * The SAME measurement keyed on the section's packed POSITION instead of on {@code baseVertex},
+     * carried side by side so one run can say how much of the first number was an artefact.
+     *
+     * <p>Why the first key is not trustworthy on its own. {@code baseVertex} is the mesh's offset in the
+     * geometry buffer, and **the allocator reuses a freed offset for the next mesh**. With the cull on,
+     * meshes are created and freed constantly as nodes enter and leave it; with the cull off, almost
+     * nothing is freed. So a mesh freed on frame N-1 and another allocated into its slot on frame N
+     * produces "present at N-2, absent at N-1, present at N" — this detector's exact gap signature —
+     * **from two different meshes**, and the rate rises and falls with mesh churn rather than with
+     * anything visible. Keyed on the position instead, two different meshes at the same offset are two
+     * different keys and no gap is reported, while a section that genuinely vanishes for a frame keeps
+     * its position and is still counted.
+     *
+     * <p>Both are reported, because the DIFFERENCE between them is itself the measurement: it is the
+     * churn component. A large `bv` rate with a near-zero `pos` rate means the first instrument was
+     * counting geometry-buffer recycling.
+     */
+    private it.unimi.dsi.fastutil.longs.LongOpenHashSet gapCurP, gapPrevP, gapPrev2P;
+    private long gapFramesP, gapFramesWithGapP, gapTotalP, gapWorstP;
+    private final long[] gapByDetailP = new long[8];
+    /** Gaps and drawn population per LOD detail -- a gap count without its denominator misleads. */
+    private final long[] gapByDetail = new long[8];
+    private final long[] drawnByDetail = new long[8];
+
+    private void lodGapProbe(MDICViewport viewport) {
+        if (!LOD_GAP) return;
+        if (!(viewport.drawCallConsume(viewport.frameId)
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb)) {
+            return;
+        }
+        final long p = mb.getContentsPtr();
+        if (p == 0) return;
+
+        final it.unimi.dsi.fastutil.ints.IntOpenHashSet cur =
+                new it.unimi.dsi.fastutil.ints.IntOpenHashSet(16384);
+        // Detail per baseVertex, for the gap loop below. Free to collect: the drawchk path already
+        // reads it, and `MDICSectionRenderer.java:1878` names the encoding -- "Detail lives in the top
+        // nibble of the positionBuffer entry the vertex shader reads". The command's baseInstance
+        // (offset 16) IS that index: cmdgen writes `writeCmd(cmdPtr++, drawId, ptr, count)` with
+        // `drawId = gl_GlobalInvocationID.x`, the render-list index, and writes
+        // `positionBuffer[drawId] = extractRawPos(meta)` at that same index.
+        //
+        // WHY it is worth collecting. The user's report is specific about WHERE the blip is: "chunks
+        // blip out when they go from the second finest to the finest detail level", i.e. detail 1 ->
+        // 0, the nearest chunks. A rate alone cannot say whether the gaps being counted are those, or
+        // some other one-frame geometry change that happens to have the same shape. The per-detail
+        // rate is that check, and it costs one guard and one map lookup per command.
+        final boolean havePos = viewport.positionScratchBuffer
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer pb && pb.getContentsPtr() != 0;
+        final long pp = havePos
+                ? ((me.cortex.voxy.client.core.metal.MetalBuffer) viewport.positionScratchBuffer)
+                        .getContentsPtr()
+                : 0;
+        final long posEntries = havePos
+                ? viewport.positionScratchBuffer.size() / 8L     // uvec2 per entry
+                : 0;
+        final it.unimi.dsi.fastutil.ints.Int2ByteOpenHashMap detailOf =
+                new it.unimi.dsi.fastutil.ints.Int2ByteOpenHashMap(16384);
+        // The position-keyed twin (§ gapCurP). A section's packed position is two uints; both go into
+        // one long so a single LongOpenHashSet holds it.
+        final it.unimi.dsi.fastutil.longs.LongOpenHashSet curP =
+                new it.unimi.dsi.fastutil.longs.LongOpenHashSet(16384);
+        // Slices, in the order their counts live in the count buffer. Opaque first: an empty opaque
+        // count with a non-empty translucent one is a frame that drew only water, which is still a
+        // measurement and must not be skipped by the emptiness guard below.
+        final long[] bases = {0L, (long) TEMPORAL_OFFSET * 20L, (long) TRANSLUCENT_OFFSET * 20L};
+        final long[] counts = {OPAQUE_DRAW_COUNT_OFFSET, TEMPORAL_DRAW_COUNT_OFFSET,
+                TRANSLUCENT_DRAW_COUNT_OFFSET};
+        for (int s = 0; s < 3; s++) {
+            int n = rawOpaqueCount(viewport, counts[s]);
+            if (n <= 0) continue;
+            if (n > TRANSLUCENT_OFFSET) n = TRANSLUCENT_OFFSET;
+            for (int i = 0; i < n; i++) {
+                final long e = p + bases[s] + (long) i * 20L;
+                if (MemoryUtil.memGetInt(e) <= 0) continue;          // count; 0 draws nothing
+                final int bv = MemoryUtil.memGetInt(e + 12);         // baseVertex = quad offset
+                cur.add(bv);
+                if (havePos) {
+                    final long bi = Integer.toUnsignedLong(MemoryUtil.memGetInt(e + 16));
+                    if (bi < posEntries) {
+                        final long ph = Integer.toUnsignedLong(MemoryUtil.memGetInt(pp + bi * 8L));
+                        final long pl = Integer.toUnsignedLong(MemoryUtil.memGetInt(pp + bi * 8L + 4));
+                        curP.add((ph << 32) | pl);
+                        final int d = (int) ((ph >>> 28) & 0xF);
+                        if (d < 8) {
+                            this.drawnByDetail[d]++;
+                            detailOf.put(bv, (byte) d);
+                        }
+                    }
+                }
+            }
+        }
+        // A frame that drew nothing at all is the world still loading, not a data point: it would
+        // register as "everything vanished" and then as "everything blipped back" on the next frame.
+        if (cur.isEmpty()) return;
+
+        this.gapFrames++;
+        if (this.gapPrev != null && this.gapPrev2 != null) {
+            int gaps = 0;
+            final StringBuilder ex = new StringBuilder();
+            for (final int v : cur) {
+                if (!this.gapPrev.contains(v) && this.gapPrev2.contains(v)) {
+                    gaps++;
+                    if (detailOf.containsKey(v)) this.gapByDetail[detailOf.get(v)]++;
+                    if (ex.length() < 200) ex.append(ex.length() > 0 ? "," : "").append(v);
+                }
+            }
+            if (gaps > 0) {
+                this.gapFramesWithGap++;
+                this.gapTotal += gaps;
+                if (gaps > this.gapWorst) this.gapWorst = gaps;
+                me.cortex.voxy.common.Logger.info("[Metal-GAP f=" + viewport.frameId
+                        + "] gap1frame=" + gaps + " drawn=" + cur.size()
+                        + " baseVertex=[" + ex + "]");
+            }
+        }
+        this.gapPrev2 = this.gapPrev;
+        this.gapPrev = cur;
+
+        // The same measurement on the position key, over the identical frames.
+        if (!curP.isEmpty()) {
+            this.gapFramesP++;
+            if (this.gapPrevP != null && this.gapPrev2P != null) {
+                int gapsP = 0;
+                for (final long v : curP) {
+                    if (!this.gapPrevP.contains(v) && this.gapPrev2P.contains(v)) {
+                        gapsP++;
+                        this.gapByDetailP[(int) ((v >>> 60) & 0xF)]++;
+                    }
+                }
+                if (gapsP > 0) {
+                    this.gapFramesWithGapP++;
+                    this.gapTotalP += gapsP;
+                    if (gapsP > this.gapWorstP) this.gapWorstP = gapsP;
+                }
+            }
+            this.gapPrev2P = this.gapPrevP;
+            this.gapPrevP = curP;
+        }
+
+        // Kept because the arms are compared on TWO numbers, not one. The gap rate is the bug's
+        // signature; meanDrawn is the subject check for the per-section cull, and it is the check
+        // ab_seccull.sh could not make. That script compared rawOpaqueCount sampled once per 600
+        // frames across runs -- and since the gate fires on a different frame in each run, it
+        // compared NON-CORRESPONDING frames whose own spread (5 .. 21852 draws) dwarfs any difference
+        // between the arms. The "node is a provable no-op" prediction has therefore never actually
+        // been tested. A per-frame mean over the whole run can be compared across arms safely.
+        this.gapDrawnSum += cur.size();
+        if (cur.size() > this.gapDrawnMax) this.gapDrawnMax = cur.size();
+        if (this.gapDrawnMin < 0 || cur.size() < this.gapDrawnMin) this.gapDrawnMin = cur.size();
+
+        if ((this.gapFrames % 300) == 0) {
+            final StringBuilder rate = new StringBuilder();
+            final StringBuilder pop = new StringBuilder();
+            for (int d = 0; d < 8; d++) {
+                if (this.drawnByDetail[d] == 0 && this.gapByDetail[d] == 0) continue;
+                if (rate.length() > 0) { rate.append(','); pop.append(','); }
+                // PER THOUSAND of the drawn population, not a raw count: detail 0 has by far the most
+                // geometry and would dominate any raw total, which is the same aggregation artefact
+                // that once made the Hi-Z cull look inert at 0.25 % when per level it is 4-11 %.
+                rate.append(d).append(':').append(this.drawnByDetail[d] == 0 ? "-"
+                        : String.format("%.1f", 1000.0 * this.gapByDetail[d] / this.drawnByDetail[d]));
+                pop.append(d).append(':').append(this.drawnByDetail[d]);
+            }
+            me.cortex.voxy.common.Logger.info(String.format(
+                    "[Metal-GAPSUM] frames=%d withGap=%d totalGaps=%d worstFrame=%d"
+                            + " | drawn mean=%.0f min=%d max=%d | gap/1000 byDetail=[%s]"
+                            + " drawnByDetail=[%s]",
+                    this.gapFrames, this.gapFramesWithGap, this.gapTotal, this.gapWorst,
+                    (double) this.gapDrawnSum / this.gapFrames, this.gapDrawnMin, this.gapDrawnMax,
+                    rate, pop));
+            final StringBuilder rateP = new StringBuilder();
+            for (int d = 0; d < 8; d++) {
+                if (this.drawnByDetail[d] == 0) continue;
+                if (rateP.length() > 0) rateP.append(',');
+                rateP.append(d).append(':').append(String.format("%.1f",
+                        1000.0 * this.gapByDetailP[d] / this.drawnByDetail[d]));
+            }
+            // The POSITION key, and the number to trust. `bv` above is the same measurement keyed on the
+            // geometry-buffer offset, which the allocator recycles; the difference between the two is the
+            // churn component.
+            me.cortex.voxy.common.Logger.info(String.format(
+                    "[Metal-GAPSUM-POS] frames=%d withGap=%d totalGaps=%d worstFrame=%d"
+                            + " | gap/1000 byDetail=[%s]",
+                    this.gapFramesP, this.gapFramesWithGapP, this.gapTotalP, this.gapWorstP, rateP));
+        }
     }
 
     private static int metalDrawCount(MDICViewport viewport, long countOffset, int upperBound) {
@@ -2489,48 +2677,36 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         }
         if (computeSerialize) this.backend.submit(); // serialize: prep complete
 
-        {//Test occlusion
-            // Per-section Hi-Z cull (lod/gl46/section_cull.comp), which replaced the M12 chunk 5
-            // force-all-visible stub. It walks the same list the stub walked — `indirectLookup`, the
-            // traversal's own render queue — but decides each section's visibilityData with the same
-            // Hi-Z predicate the traversal used, instead of marking everything visible. (The GL arm
-            // that rasterized each section's AABB against MC's depth buffer, with optional
-            // NV_representative_fragment_test, is deleted along with lod/gl46/cull/raster.vert|frag
-            // and the cullPipeline they compiled.)
+        {//Mark visible
+            // MANDATORY BOOKKEEPING, NOT A CULL. This is the only writer of `visibilityData`, and
+            // cmdgen gates every draw on it (`shouldRender = (visibilityData[sid] & 0x7fffffff) ==
+            // frameId`). Skipping the dispatch does not produce a no-cull frame — it leaves the buffer
+            // holding last frame's values and the LOD vanishes entirely. That is why the pass cannot be
+            // switched off, and why the per-section occlusion cull that used to live on top of this
+            // bookkeeping was deleted rather than disabled: it measured at ~0-6 %, and at exactly 0 for
+            // its default whole-cell form, which re-asked the traversal's own question about the
+            // traversal's own output (lod-bugs.MD 2.1, and the shader's header).
             //
-            // FAIL OPEN when the pyramid has no texture: there is nothing to test against, and
-            // dispatching anyway would sample an unbound texture, i.e. cull on undefined values.
-            // Skipping the pass leaves visibilityData stale, so cmdgen emits NO sections — visibly
-            // wrong, and deliberately so, because a silent wrong answer is what this tree keeps
-            // paying for. It is a guard, not a live path: AbstractRenderPipeline always allocates the
-            // pyramid for the LOD pass before it calls buildDrawCalls.
-            final var hizTexture = viewport.hiZBuffer.getHizTexture();
-            if (SECTION_CULL && hizTexture != null) {
-                try (var encoder = this.backend.beginComputePass()) {
-                    encoder.setPipeline(this.sectionCullPipeline);
-                    encoder.setBuffer(0, this.uniformFor(viewport), 0);
-                    // The section metadata: the pass decodes each section's box from it, with the
-                    // vertex path's decoders (quad_util.glsl) — see the shader.
-                    encoder.setBuffer(1, this.geometryManager.getMetadataBuffer(), 0);
-                    encoder.setBuffer(2, viewport.visibilityBuffer, 0);
-                    encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
-                    // Texture/sampler are a DIFFERENT namespace from buffers, so slot 0 here does
-                    // not collide with the scene uniform at buffer 0 — the same slot the traversal
-                    // binds the pyramid to. One sampler, shared from HiZBuffer, so a second copy of
-                    // a filtering mode cannot start disagreeing with the pyramid's texels.
-                    encoder.setTexture(0, hizTexture);
-                    encoder.setSampler(0, viewport.hiZBuffer.getSampler());
-                    encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
-                                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-                    // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
-                    // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
-                    // matching this shader's local_size_x=128.
-                    encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
-                    encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
-                }
+            // It walks `indirectLookup`, the traversal's render queue. Nothing else is needed: no box,
+            // no metadata, no depth pyramid, so there is no longer a guard for a missing pyramid
+            // texture. The unconditional dispatch is what makes this a required pass instead of a cull
+            // with a fail-open branch.
+            try (var encoder = this.backend.beginComputePass()) {
+                encoder.setPipeline(this.forceAllVisiblePipeline);
+                encoder.setBuffer(0, this.uniformFor(viewport), 0);
+                encoder.setBuffer(1, this.geometryManager.getMetadataBuffer(), 0);
+                encoder.setBuffer(2, viewport.visibilityBuffer, 0);
+                encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
+                encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
+                                ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
+                // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
+                // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
+                // matching this shader's local_size_x=128.
+                encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
+                encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
             }
         }
-        if (computeSerialize) this.backend.submit(); // serialize: cull/visibility complete before commandGen
+        if (computeSerialize) this.backend.submit(); // serialize: visibility complete before commandGen
 
 
         {//Generate the commands
@@ -2652,7 +2828,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (this.translucentTerrainPipeline != null) this.translucentTerrainPipeline.close();
         if (this.terrainPipeline != null) this.terrainPipeline.close();
         this.commandGenPipeline.close();
-        this.sectionCullPipeline.close();
+        this.forceAllVisiblePipeline.close();
         this.prepPipeline.close();
         this.translucentGenPipeline.close();
         this.prefixSumPipeline.close();

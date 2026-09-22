@@ -1,0 +1,60 @@
+#version 430
+
+// Mark every section in the traversal's render list visible for this frame.
+//
+// THIS PASS IS NOT OPTIONAL, AND IT IS NOT A CULL. It is the only writer of `visibilityData`, the
+// buffer cmdgen gates every draw on (`shouldRender = (visibilityData[sid] & 0x7fffffff) == frameId`).
+// If it does not run, that buffer keeps last frame's values, cmdgen emits no commands, and the entire
+// LOD disappears. So something has to run here and write a verdict for every listed section.
+//
+// It was `section_cull.comp` until 2026-09-22, when the cull on top of this bookkeeping was removed.
+// That cull asked, per section, whether the section's box lay entirely behind the depth buffer's
+// already-drawn terrain, and suppressed the draw if so. It was measured at approximately nothing:
+//
+//   * The first form -- testing the section's whole cell -- is a PROVABLE NO-OP. The list this pass
+//     iterates IS the traversal's own render queue, and every entry in it already passed that same
+//     test with that same box on the way in. Re-asking an answered question removes nothing, by
+//     construction. It is arithmetic, not a measurement.
+//   * The second form -- the tight box around the section's actual geometry -- was measured at
+//     roughly 0-6%. By section granularity the traversal has already discarded everything genuinely
+//     hidden; what is left is mostly visible, and a section's geometry usually fills most of its
+//     cell, so the tight box is not much smaller than the cell and the test rarely changes the answer.
+//
+// An A/B confirms it independently: neutralising the cull (`VOXY_LOD_SECCULL_BOX=force`, now gone)
+// moved the frame's one-frame-gap rate from 15.6% to 13.4% -- inside the run-to-run spread -- so the
+// cull was not measurably changing what reached the screen.
+//
+// The name is `force_all_visible` deliberately: it is the name of the stub this pass replaced, and it
+// says what the pass does. `cull.MD` 8.8 records what a name asserting the wrong meaning costs -- a
+// file called `force_all_visible` that had quietly become a cull is how a whole investigation went
+// looking in the wrong place. The inverse mistake is available here and is being avoided.
+//
+// The bit-31 write is UNCHANGED and is not an oversight. cmdgen reads it as
+// `renderTemporally = (dat & 0x80000000) == 0`, i.e. "route this section to the temporal slice". This
+// pass sets it, so the temporal slice stays empty. That differs from upstream, where the raster cull
+// writes `frameId | (wasVisibleLastFrame << 31)` and the temporal slice carries newly-appearing
+// sections; see lod-bugs.MD 2.3(b). Changing it is a real rendering change (it would start drawing
+// newly-appearing sections temporally) and is deliberately NOT bundled into removing the cull.
+
+layout(local_size_x = 128) in;
+
+#ifndef VISIBILITY_BUFFER_BINDING
+#define VISIBILITY_BUFFER_BINDING 2
+#endif
+#ifndef VISIBILITY_ACCESS
+#define VISIBILITY_ACCESS writeonly
+#endif
+#ifndef INDIRECT_SECTION_LOOKUP_BINDING
+#define INDIRECT_SECTION_LOOKUP_BINDING 3
+#endif
+
+#import <voxy:lod/gl46/bindings.glsl>
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= sectionCount) return;
+    uint sid = indirectLookup[gid];
+
+    // bit31 set: cmdgen's temporal slice stays empty (see the header note).
+    visibilityData[sid] = (frameId & 0x7fffffffu) | 0x80000000u;
+}

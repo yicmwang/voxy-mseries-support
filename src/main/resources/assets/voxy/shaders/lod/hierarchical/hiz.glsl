@@ -1,10 +1,14 @@
 //The hierarchical-Z occlusion test, in ONE place.
 //
-//Extracted from lod/hierarchical/screenspace.glsl so that the traversal and the
-//per-section cull pass (lod/gl46/section_cull.comp) ask the *same* predicate
-//about the *same* depth convention. Two copies of this test is exactly how this
-//project got a cull whose box frame disagreed with the geometry it was culling
-//(cull.MD 8.8), so the definition is shared rather than duplicated.
+//Extracted from lod/hierarchical/screenspace.glsl when a second caller existed: a per-section cull
+//pass (lod/gl46/section_cull.comp) that re-asked this same question about every section the traversal
+//had already kept. That pass was removed 2026-09-22 — it measured at ~0-6 %, and at exactly 0 for its
+//default whole-cell form, which re-asked the traversal's own question about the traversal's own output
+//(lod-bugs.MD 2.1). The traversal is the only caller again.
+//
+//The single definition stays anyway, and the reason is not tidiness. Two copies of this test is how
+//this project got a cull whose box frame disagreed with the geometry it was culling (cull.MD 8.8); the
+//next caller gets the shared one or the bug comes back.
 
 layout(binding = HIZ_BINDING) uniform sampler2D hizDepthSampler;
 

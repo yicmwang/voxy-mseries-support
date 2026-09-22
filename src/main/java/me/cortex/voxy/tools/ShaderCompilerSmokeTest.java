@@ -44,17 +44,15 @@ public final class ShaderCompilerSmokeTest {
                 "HAS_STATISTICS", "1",
                 "STATISTICS_BUFFER_BINDING", "8");
 
-        // Mirrors MDICSectionRenderer.sectionCullDefines() — keep the two in sync. HIZ_BINDING has to
-        // be injected rather than declared: hiz.glsl is shared with the traversal, whose HIZ_BINDING
-        // comes from Java the same way, and a layout id that is still an unexpanded macro is what this
-        // harness rejects. The shader declares all five for itself too, so injection is a check on the
-        // values the Java path passes, not the only definition.
-        Map<String, String> sectionCullDefines = Map.of(
+        // Mirrors MDICSectionRenderer.forceAllVisibleDefines() — keep the two in sync. There is no
+        // HIZ_BINDING and no SECTION_METADATA_BUFFER_BINDING any more: the pass used to sample the
+        // depth pyramid and decode each section's box, and now it only writes the visibility buffer.
+        // The shader declares all three for itself too, so injection is a check on the values the Java
+        // path passes, not the only definition.
+        Map<String, String> forceAllVisibleDefines = Map.of(
                 "VISIBILITY_BUFFER_BINDING", "2",
                 "VISIBILITY_ACCESS", "writeonly",
-                "INDIRECT_SECTION_LOOKUP_BINDING", "3",
-                "SECTION_METADATA_BUFFER_BINDING", "1",
-                "HIZ_BINDING", "0");
+                "INDIRECT_SECTION_LOOKUP_BINDING", "3");
 
         // Defines for M9-migrated shaders — keep in sync with the Java callers
         // (FullscreenBlit constructors in AbstractRenderPipeline / NormalRenderPipeline).
@@ -200,13 +198,15 @@ public final class ShaderCompilerSmokeTest {
                         "lod/gl46/buildtranslucents.comp"),
                 // lod/gl46/cull/raster.vert|frag are deleted: their only dispatcher was
                 // MDICSectionRenderer's GL occlusion-cull arm, which is gone.
-                // The per-section occlusion cull, which replaced the M12 chunk-5 force-all-visible
-                // stub (that name became a lie once it started culling, so the shader is
-                // section_cull.comp). Case-compiled with the defines the renderer injects; it has no
-                // other compiler but this one and the client's startup.
-                new ShaderCase("lod/gl46/section_cull.comp", RuntimeShaderCompiler.Stage.COMPUTE,
-                        sectionCullDefines,
-                        "lod/gl46/section_cull.comp (per-section Hi-Z cull)"),
+                // The section_cull.comp that replaced the M12 chunk-5 force-all-visible stub is gone
+                // too (2026-09-22): the cull measured at ~0-6 %, and at exactly 0 for its default
+                // whole-cell form, which re-asked the traversal's own question about the traversal's
+                // own output. What remains is the stub's job — writing the visibility buffer cmdgen
+                // gates every draw on — under the stub's own name, because a name asserting the wrong
+                // meaning is the failure cull.MD 8.8 records.
+                new ShaderCase("lod/gl46/force_all_visible.comp", RuntimeShaderCompiler.Stage.COMPUTE,
+                        forceAllVisibleDefines,
+                        "lod/gl46/force_all_visible.comp (visibility bookkeeping)"),
                 // Phase C (issue #11) material g-buffer: quads.frag's PATCHED_SHADER
                 // path + the MetalVxGbufferEmitter appended, writing the 3 MRT planes.
                 // Probes that this permutation transpiles to MSL on Apple before the
