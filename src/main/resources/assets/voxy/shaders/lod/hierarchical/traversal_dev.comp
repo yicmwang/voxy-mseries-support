@@ -145,9 +145,27 @@ void traverse(in UnpackedNode node) {
         // child list that genuinely has no mesh still falls through to addRequest + enqueueChildren,
         // exactly as before.
         bool canCoverWithChildren = hasChildren(node) && !childListIsEmpty(node);
-        if (node.lodLevel!=0 && (shouldDecend() || emptyMeshNeedsChildren) && canCoverWithChildren) {
-            //printf("A");
-            enqueueChildren(node);
+        if (node.lodLevel!=0 && (shouldDecend() || emptyMeshNeedsChildren)) {
+            if (canCoverWithChildren) {
+                //printf("A");
+                enqueueChildren(node);
+            } else {
+                //printf("B");
+                // Cannot hand off: either no children at all, or a child list enqueueChildren() would
+                // decline to walk (EMPTY_QUEUE_ID).
+                //
+                // addRequest() MUST stay in this branch. It is not a formality. Without it a node that
+                // wants to subdivide but has nothing to subdivide INTO never asks for children, so it
+                // never gets them, so it draws itself forever -- the LOD sticks at its coarsest level
+                // across the entire world. A first attempt at this fix restructured these two branches
+                // into one and left the request behind in the no-mesh case; that is exactly what it did,
+                // and it was caught by eye, not by a test.
+                addRequest(node);
+                // Render ourselves meanwhile, so the volume stays covered while the children are built.
+                if (!emptyMeshNeedsChildren) {
+                    enqueueSelfForRender(node);
+                }
+            }
         } else {
             if (hasMesh(node)) {
                 //printf("C");
