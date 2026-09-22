@@ -152,9 +152,15 @@ public class MetalRenderBackend implements RenderBackend {
         final long h = this.pendingOrderedWait;
         if (h != 0L) {
             this.pendingOrderedWait = 0L;
+            final boolean retained = this.pendingOrderedWaitRetained;
+            this.pendingOrderedWaitRetained = false;
             MetalNative.mtlCommandBufferWaitUntilCompleted(h);
             // The buffer submitDeferWait() committed: traversal + the five prepasses + the Hi-Z build.
             this.captureGpuTime(h, GPU_TAG_PRE_LOD);
+            // This wait is the deferred half of the pair, so it is where the borrow's +1 goes back.
+            if (retained) {
+                MetalNative.mtlRelease(h);
+            }
         }
     }
 
@@ -175,6 +181,8 @@ public class MetalRenderBackend implements RenderBackend {
      * debug readouts that once defaulted on by accident.
      */
     private static final boolean SUBMIT_ORDER = !"0".equals(System.getenv("VOXY_SUBMIT_ORDER"));
+    /** Set with {@link #pendingOrderedWait}: whether that handle still needs its borrow +1 released. */
+    private boolean pendingOrderedWaitRetained;
     /** False when the active buffer belongs to Metallum and must not be committed or released. */
     private boolean ownsActiveCommandBuffer = true;
     /** Lazily-opened MTLBlitCommandEncoder on the active buffer for stream copies; 0 when closed. */
@@ -588,6 +596,54 @@ public class MetalRenderBackend implements RenderBackend {
         return metallumBuffer != 0L && cachedBuffer != metallumBuffer;
     }
 
+    /**
+     * True when this class holds a +1 on {@link #activeCommandBuffer} that it must release.
+     *
+     * <p>Only ever set for a BORROWED (Metallum-owned) buffer. A buffer Voxy creates with
+     * {@code mtlCommandQueueNewCommandBuffer} already comes back at +1 and is released explicitly in
+     * {@link #submit()}'s owned branch.
+     *
+     * <p><b>Why borrowing needs a retain at all.</b> Metallum releases every command buffer it commits
+     * exactly {@code MAX_SUBMITS_IN_FLIGHT} (3) submits later, from a rotation in
+     * {@code MetalCommandEncoder.submit()}. Between Voxy adopting the handle and Voxy waiting on it
+     * there can be an arbitrary number of Metallum submits -- and at world exit there are always enough,
+     * because Voxy stops encoding while Metallum keeps submitting until teardown. The wait then lands on
+     * a deallocated object: SIGSEGV in {@code objc_msgSend} inside
+     * {@code mtlCommandBufferWaitUntilCompleted}, which is exactly the crash this fixes. It fired once
+     * in ~12 runs; the register state at the fault named it (the selector argument read "wait", and the
+     * receiver's isa was malloc scribble).
+     *
+     * <p>Retaining is what removes the whole class: a retained MTLCommandBuffer cannot be deallocated,
+     * and it keeps its command queue and device alive behind it, so this also covers the case where the
+     * device is torn down during the window rather than the buffer merely rotating out.
+     */
+    private boolean activeCommandBufferRetained;
+
+    /** Take a +1 on the active buffer so it cannot be deallocated while Voxy still means to wait on it. */
+    private void retainActiveCommandBuffer() {
+        if (this.activeCommandBuffer != 0L && !this.activeCommandBufferRetained) {
+            MetalNative.mtlRetain(this.activeCommandBuffer);
+            this.activeCommandBufferRetained = true;
+        }
+    }
+
+    /**
+     * Drop the +1 taken by {@link #retainActiveCommandBuffer()}, if one is held. Idempotent.
+     *
+     * <p>The {@code ownsActiveCommandBuffer} check is structural, not defensive: a buffer Voxy created
+     * came back from {@code mtlCommandQueueNewCommandBuffer} already at +1 and is released explicitly in
+     * submit()'s owned branch, so releasing it here as well would be an over-release -- a crash that
+     * would surface far from its cause. This makes that impossible regardless of how the flag got set.
+     */
+    private void releaseActiveCommandBufferRetain() {
+        if (this.activeCommandBufferRetained) {
+            if (!this.ownsActiveCommandBuffer && this.activeCommandBuffer != 0L) {
+                MetalNative.mtlRelease(this.activeCommandBuffer);
+            }
+            this.activeCommandBufferRetained = false;
+        }
+    }
+
     private void ensureActiveCommandBuffer() {
         if (this.ownsActiveCommandBuffer && this.activeCommandBuffer != 0L) {
             return;
@@ -599,7 +655,14 @@ public class MetalRenderBackend implements RenderBackend {
             if (shouldAdoptMetallumBuffer(this.activeCommandBuffer, metallumBuffer)) {
                 // A blit batch cannot span a buffer change: its encoder belongs to the old buffer.
                 this.endActiveBlitEncoder();
+                // Superseded before it was ever waited on, so this frame's wait will land on the new
+                // buffer; the old retain is ours to drop now.
+                this.releaseActiveCommandBufferRetain();
                 this.activeCommandBuffer = metallumBuffer;
+                // +1 WHILE IT IS KNOWN LIVE. Metallum has just handed it over; retaining later, at the
+                // wait, would be retaining an object that may already have been freed -- which is the
+                // bug, not the fix.
+                this.retainActiveCommandBuffer();
             }
             return;
         }
@@ -1164,8 +1227,13 @@ public class MetalRenderBackend implements RenderBackend {
                 // waitUntilCompleted is safe to call as a second waiter on a buffer that also carries a
                 // completion block; it neither consumes nor invalidates anything.
                 final long committed = this.activeCommandBuffer;
+                // The +1 taken when this handle was adopted now travels with `committed`, because the
+                // field is cleared below and the wait happens after. It is released only once the wait
+                // has landed -- until then it is the one thing keeping the buffer allocated.
+                final boolean committedRetained = this.activeCommandBufferRetained;
                 MetallumBridge.flushFrame();
                 this.activeCommandBuffer = 0;
+                this.activeCommandBufferRetained = false;
                 if (SUBMIT_ORDER && committed != 0L) {
                     // Why this wait is load-bearing at all: flushFrame() COMMITS the frame but does not
                     // wait, and the comment above claiming the work is "committed and complete, making
@@ -1185,14 +1253,25 @@ public class MetalRenderBackend implements RenderBackend {
                         // interval on CPU work that overlaps the GPU's prepasses. See submitDeferWait.
                         // The GPU time is captured in awaitCommitted(), where the wait actually lands.
                         this.pendingOrderedWait = committed;
+                        this.pendingOrderedWaitRetained = committedRetained;
                     } else {
                         MetalNative.mtlCommandBufferWaitUntilCompleted(committed);
                         // The buffer this submit() just committed: the LOD render pass alone.
                         this.captureGpuTime(committed, GPU_TAG_POST_LOD);
+                        if (committedRetained) {
+                            MetalNative.mtlRelease(committed);
+                        }
                     }
+                } else if (committedRetained && committed != 0L) {
+                    // SUBMIT_ORDER is off, so no wait is taken -- but the retain was still ours and has
+                    // to go back either way, or every frame leaks a command buffer.
+                    MetalNative.mtlRelease(committed);
                 }
                 return;
             }
+            // Metallum predates the flush hook, so there is no wait to take; drop the borrow and its
+            // retain so the next frame adopts a live handle rather than holding a dead one.
+            this.releaseActiveCommandBufferRetain();
             this.activeCommandBuffer = 0;
             return;
         }
