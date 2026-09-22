@@ -82,7 +82,14 @@ void enqueueSelfForRender(in UnpackedNode node) {
     //printf("render %d@[%d,%d,%d]", node.lodLevel, node.pos.x, node.pos.y, node.pos.z);
     if (renderQueueIndex < renderQueueMaxSize) {
         lastRenderFrame[getId(node)] = frameId;
-        if (!isEmptyMesh(node)) {
+        // hasMesh, not merely !isEmptyMesh. meshPtr has THREE states -- NULL_MESH (0xFFFFFF, "no mesh
+        // and none requested"), EMPTY_MESH (0xFFFFFE, "a mesh that draws nothing") and a real id -- and
+        // isEmptyMesh only excludes the middle one. Without the hasMesh test a NULL_MESH node writes
+        // 0xFFFFFF into renderQueue as though it were a section id, and cmdgen then reads
+        // sectionData[0xFFFFFF] out of a 1<<20-entry buffer: a 16x out-of-bounds SSBO read that
+        // produces garbage draws rather than a clean hole. Reachable via the not-yet-scattered slot
+        // NodeStore.clear() leaves behind.
+        if (hasMesh(node) && !isEmptyMesh(node)) {
             uint renderIndex = atomicAdd(renderQueueIndex, 1);
             if (renderIndex < renderQueueMaxSize) {
                 renderQueue[renderIndex] = getMesh(node);
@@ -116,21 +123,31 @@ void traverse(in UnpackedNode node) {
         // accepting the empty parent as terminal leaves large square holes.
         bool emptyMeshNeedsChildren = isEmptyMesh(node) && hasKnownChildren(node);
 
-        //Only decend if not a root node
-        if (node.lodLevel!=0 && (shouldDecend() || emptyMeshNeedsChildren)) {
-            if (hasChildren(node)) {
-                //printf("A");
-                enqueueChildren(node);
-            } else {
-                //printf("B");
-                addRequest(node);
-                //TODO: use self mesh (is error state if it doesnt have one since all leaf nodes should have a mesh)
-                // Basicly guarenteed to have a mesh, if it doesnt it is very very bad and incorect since its a violation of the graph properties
-                // that all leaf nodes must contain a mesh
-                if (!emptyMeshNeedsChildren) {
-                    enqueueSelfForRender(node);
-                }
-            }
+        // `childListIsEmpty` belongs in this test, not just `hasChildren`.
+        //
+        // hasChildren() is `childPtr != NULL_NODE`, and EMPTY_QUEUE_ID (0xFFFFFE) SATISFIES it -- a
+        // state NodeManager writes deliberately when a node's children reduce to nothing
+        // (NodeManager.java:531-548, `setChildPtr(nodeId, SENTINEL_EMPTY_CHILD_PTR)`). But
+        // enqueueChildren() opens with `if (childListIsEmpty(node)) return;`, so descending on that
+        // sentinel enqueues NOTHING -- and because this branch deliberately does not render the node
+        // itself either, the node's entire volume draws nothing that frame, while its mesh is still
+        // present and GPU-resident (nothing clears an inner node's geometry).
+        //
+        // That is a one-frame hole at a detail boundary, and it only appears while MOVING. Whether the
+        // node takes this branch at all is `screenSize > minSSS`, so a node sitting at the threshold
+        // draws its own mesh on the frames just below it and draws nothing on the frames just above,
+        // flipping frame to frame with the camera's sub-pixel motion. A static camera holds screenSize
+        // still, the state is stable, and the hole never shows -- which is why this reads as "blips
+        // when I move", not as a permanently missing chunk.
+        //
+        // Rendering self here cannot double-draw: childListIsEmpty means enqueueChildren would have
+        // enqueued nothing, so this only ever ADDS the coverage that was missing. A node with an empty
+        // child list that genuinely has no mesh still falls through to addRequest + enqueueChildren,
+        // exactly as before.
+        bool canCoverWithChildren = hasChildren(node) && !childListIsEmpty(node);
+        if (node.lodLevel!=0 && (shouldDecend() || emptyMeshNeedsChildren) && canCoverWithChildren) {
+            //printf("A");
+            enqueueChildren(node);
         } else {
             if (hasMesh(node)) {
                 //printf("C");

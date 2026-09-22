@@ -45,11 +45,31 @@ bool hizOccluded(vec3 minBB, vec3 maxBB) {
     // the smallest value -- so this is a min-reduce. It starts at 1.0 (the near plane) because a min
     // over non-negative depths would otherwise just return the initial value.
     float pointSample = 1.0f;
+    bool sampled = false;
     for (int x = mnbb.x; x<=mxbb.x; x++) {
         for (int y = mnbb.y; y<=mxbb.y; y++) {
             float sp = texelFetch(hizDepthSampler, ivec2(x, y), ml).r;
             pointSample = min(sp, pointSample);
+            sampled = true;
         }
+    }
+    // AN EMPTY RANGE MUST NOT READ AS OCCLUDED.
+    //
+    // 1.0f is the correct IDENTITY for a min-reduce here, but it is also the NEAR PLANE, so if the loop
+    // body never runs the seed survives and `1.0 > maxBB.z` is true for every box that is not itself at
+    // the near plane. "I found no occluder" would then mean "fully occluded" -- the dangerous direction
+    // for a cull, and it silently removes geometry rather than adding it.
+    //
+    // The range is empty when the clamped box degenerates: mnbb = ivec2(minBB.xy*ssize) but
+    // mxbb = min(ivec2(maxBB.xy*ssize), ssize-1), so a box clamped to the far edge (minBB.x == 1.0,
+    // i.e. entirely off the right or bottom) gives mnbb == ssize while mxbb == ssize-1. The two clamps
+    // disagree, and nothing checked.
+    //
+    // Returning false is the conservative answer and the one this test's own reasoning implies: an
+    // unbuilt pyramid and a sky tile both read as "not occluded" (see the note below), so "no samples"
+    // must too, for the same reason -- being wrong in the occluding direction is what loses terrain.
+    if (!sampled) {
+        return false;
     }
     // A box is occluded when it lies entirely BEHIND the tile's farthest occluder. On reverse-Z
     // "behind" means a SMALLER depth, and the box's nearest point is maxBB.z (its largest corner, since
