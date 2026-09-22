@@ -1593,19 +1593,29 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     (double) this.gapDrawnSum / this.gapFrames, this.gapDrawnMin, this.gapDrawnMax,
                     rate, pop));
             final StringBuilder rateP = new StringBuilder();
+            final StringBuilder rawP = new StringBuilder();
+            final StringBuilder popP = new StringBuilder();
             for (int d = 0; d < 8; d++) {
                 if (this.drawnByDetail[d] == 0) continue;
-                if (rateP.length() > 0) rateP.append(',');
-                rateP.append(d).append(':').append(String.format("%.1f",
-                        1000.0 * this.gapByDetailP[d] / this.drawnByDetail[d]));
+                if (rateP.length() > 0) { rateP.append(','); rawP.append(','); popP.append(','); }
+                // PER MILLION, not per thousand. Per thousand of this population is ~0.004 and prints
+                // 0.0 for every level, which made the detail attribution of Bug A unreadable: the
+                // reported artefact is specific to one detail boundary and this field could not show
+                // it. Per million resolves it, and the RAW count is printed beside it so a level with
+                // a handful of gaps cannot be mistaken for a level with none.
+                rateP.append(d).append(':').append(String.format("%.2f",
+                        1_000_000.0 * this.gapByDetailP[d] / this.drawnByDetail[d]));
+                rawP.append(d).append(':').append(this.gapByDetailP[d]);
+                popP.append(d).append(':').append(this.drawnByDetail[d]);
             }
             // The POSITION key, and the number to trust. `bv` above is the same measurement keyed on the
             // geometry-buffer offset, which the allocator recycles; the difference between the two is the
             // churn component.
             me.cortex.voxy.common.Logger.info(String.format(
                     "[Metal-GAPSUM-POS] frames=%d withGap=%d totalGaps=%d worstFrame=%d"
-                            + " | gap/1000 byDetail=[%s]",
-                    this.gapFramesP, this.gapFramesWithGapP, this.gapTotalP, this.gapWorstP, rateP));
+                            + " | gapsByDetail=[%s] drawnByDetail=[%s] gapPerMillion=[%s]",
+                    this.gapFramesP, this.gapFramesWithGapP, this.gapTotalP, this.gapWorstP,
+                    rawP, popP, rateP));
         }
     }
 
