@@ -108,9 +108,43 @@ public class HiZBuffer {
      * A zero-filled pyramid makes the traversal's test answer "not occluded"
      * for every section — slower than real occlusion, but correct.
      */
+    /**
+     * {@code VOXY_HIZ_EXACT=1} allocates the pyramid at the EXACT source size instead of rounding down
+     * to a power of two. Diagnostic arm for the over-culling bug; see {@link #ensureAllocated}.
+     */
+    private static final boolean HIZ_EXACT =
+            "1".equals(System.getenv("VOXY_HIZ_EXACT"));
+
     public void ensureAllocated(int width, int height) {
-        int targetW = Integer.highestOneBit(width);
-        int targetH = Integer.highestOneBit(height);
+        // -----------------------------------------------------------------------------------------
+        // THE POWER-OF-TWO ROUNDING, AND WHY IT IS A SUSPECT.
+        //
+        // `Integer.highestOneBit` rounds the pyramid's mip 0 DOWN to a power of two: for this port's
+        // 1708x960 viewport that is 1024x512. The per-mip blit then draws a full-screen quad into each
+        // level, so mip 0 is a resample of the depth buffer at a ratio of 1024/1708 = 0.5995 in x and
+        // 512/960 = 0.5333 in y -- NOT a halving.
+        //
+        // The blit's reduce is `textureGather`, which returns the 2x2 block around the sample point.
+        // For an exact halving that block is precisely the four children of the destination texel. At a
+        // 0.6 ratio it is not: the sample point lands at a non-integer source coordinate, so the 2x2
+        // blocks step unevenly across the source and roughly 40% of source columns and 47% of source
+        // rows are never gathered at all.
+        //
+        // A MIN-reduce over a subset is >= the true min, and on reverse-Z larger means NEARER. So the
+        // first mip is biased toward NEARER depth -- i.e. toward reporting occlusion that is not there
+        // -- and `pointSample > maxBB.z` then culls boxes it should keep. Every coarser level halves
+        // exactly (1024 -> 512 -> ...), so the error is confined to mip 0 -- which is the level a
+        // SMALL, DISTANT node samples, because the traversal picks its mip from the box's screen
+        // footprint. That is the shape of the report: distant LOD sections, at every camera direction,
+        // needing the depth buffer to fill in first.
+        //
+        // Upstream has the same rounding (`voxy/.../HiZBuffer.java` is structurally identical here), so
+        // this is not a port divergence -- which is exactly why it needs MEASURING rather than
+        // reasoning. One env var, one run: if VOXY_HIZ_EXACT=1 fixes the far field, the resample was
+        // the defect.
+        // -----------------------------------------------------------------------------------------
+        int targetW = HIZ_EXACT ? width : Integer.highestOneBit(width);
+        int targetH = HIZ_EXACT ? height : Integer.highestOneBit(height);
         if (this.texture == null || this.width != targetW || this.height != targetH) {
             if (this.texture != null) {
                 this.texture.free();

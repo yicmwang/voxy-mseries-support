@@ -74,6 +74,23 @@ layout(binding = STATISTICS_BUFFER_BINDING, std430) restrict buffer statisticsBu
     // It is also the natural pair to `descendCounts`: the two together partition the nodes that
     // should have refined, into "did" and "could not".
     uint notReadyCounts[MAX_ITERATIONS];
+    // WHAT THE CULL IS ACTING ON, in two histograms, because every remaining hypothesis about the
+    // over-culling is a claim about these two numbers and neither has ever been observed.
+    //
+    // `hizSampleHist` bins `pointSample` -- the depth the pyramid returned, i.e. the farthest occluder
+    // over the box's footprint. `hizBoxHist` bins `maxBB.z` -- the box's nearest point. The test is
+    // `pointSample > maxBB.z`, so a cull means the sample is NEARER than the box.
+    //
+    // What the shapes would mean. On reverse-Z near is 1.0 and far is 0.0, and in an outdoor scene at
+    // LOD range the depth values are SMALL (depth ~= near/distance, so ~1e-4 at a kilometre):
+    //   * culls whose sample sits in the TOP bucket mean the pyramid is reporting an occluder at the
+    //     near plane, which cannot be terrain -- the pyramid's content or its mapping is wrong.
+    //   * culls whose sample sits LOW and just above the box's own bucket are plausible geometry: a
+    //     nearer hill, correctly occluding. That would say the cull is RIGHT and the missing terrain
+    //     comes from somewhere else, which is a completely different investigation.
+    //   * samples clustered in one bucket across all levels means a constant, not a depth.
+    uint hizSampleHist[8];
+    uint hizBoxHist[8];
 };
 #endif
 
@@ -183,6 +200,11 @@ void traverse(in UnpackedNode node) {
             atomicAdd(frustumCulledCounts[node.lodLevel], 1);
         } else {
             atomicAdd(hizCulledCounts[node.lodLevel], 1);
+            // Bin what the decision was made on. The traversal already stashed the pyramid's answer and
+            // the box's near edge for this node; this only records where they landed. Guarded on the
+            // same statistics flag as everything else, and free when it is off.
+            atomicAdd(hizSampleHist[clamp(int(hizLastSample * 8.0), 0, 7)], 1);
+            atomicAdd(hizBoxHist[clamp(int(maxBB.z * 8.0), 0, 7)], 1);
         }
         #endif
     } else {

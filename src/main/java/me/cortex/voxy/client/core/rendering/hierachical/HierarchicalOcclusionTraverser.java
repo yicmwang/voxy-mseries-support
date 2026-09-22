@@ -126,8 +126,33 @@ public class HierarchicalOcclusionTraverser {
         // is terrain that is missing from the screen. Read this next to `notReady`.
         sb.append("| reqBudget=").append(lastRequestSize)
           .append(" tasks=").append(lastTaskCount);
+        // THE TWO HISTOGRAMS, and what their shape decides. `sample` bins the depth the pyramid
+        // returned for a node the cull removed; `box` bins that node's own nearest edge. On reverse-Z
+        // near is 1.0 and far is 0.0, and at LOD range depths are tiny (depth ~= near/distance, so
+        // ~1e-4 at a kilometre), so a healthy outdoor scene should put both LOW.
+        //
+        //   sample in the TOP buckets  -> the pyramid is reporting an occluder near the near plane,
+        //                                 which cannot be terrain: its content or its mapping is wrong.
+        //   sample LOW, just above box -> a nearer hill correctly occluding. The cull is RIGHT and the
+        //                                 missing terrain comes from somewhere else entirely.
+        //   everything in ONE bucket   -> a constant, not a depth.
+        final long histBase = (long) HIST_OFFSET;
+        sb.append(" | hizSampleHist=[");
+        for (int i = 0; i < 8; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(MemoryUtil.memGetInt(addr + histBase + i * 4L));
+        }
+        sb.append("] hizBoxHist=[");
+        for (int i = 0; i < 8; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(MemoryUtil.memGetInt(addr + histBase + 32L + i * 4L));
+        }
+        sb.append(']');
         me.cortex.voxy.common.Logger.info(sb.toString());
     }
+
+    /** Byte offset of the shader's {@code hizSampleHist}, i.e. after the six MAX_ITERATIONS arrays. */
+    private static final int HIST_OFFSET = 6 * MAX_ITERATIONS * 4;
 
     /** Published by {@link #uploadUniform} for {@link #logTraversalStats}; diagnostic only. */
     private static volatile int lastRequestSize = -1;
