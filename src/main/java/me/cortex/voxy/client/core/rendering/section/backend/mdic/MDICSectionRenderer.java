@@ -2063,6 +2063,18 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private void renderTerrainMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder,
                                     me.cortex.voxy.client.core.gpu.IGpuPipeline pipeline,
                                     MDICViewport viewport, long indirectOffset, int maxDrawCount) {
+        // VOXY_LOD_ZERO_DRAWS=1 issues the LOD pass with NO draws at all -- not by zeroing the draw
+        // buffer (VOXY_LOD_ZERO_DRAWBUF does that, and cmdgen refills it, which is why that switch has
+        // never done what its name says), but by clamping the count at the call site.
+        //
+        // It is the calibration for the `gpu` instrument, and it is the first thing to run before any
+        // further optimisation. The LOD pass's `gpu` reads ~16 ms and does not respond to draw count,
+        // fragment count, or per-draw state (optimisation.MD 32). If that number survives having no
+        // draws in it at all, it was never measuring the draws -- and every A/B built on it, including
+        // three separate "explanations" that were each refuted, was measuring the instrument.
+        if (ZERO_DRAWS) {
+            maxDrawCount = 0;
+        }
         traceCommands("off=" + indirectOffset, viewport, indirectOffset, maxDrawCount);
         var gb = this.geometryManager.getGeometryBuffer();
         traceGeometry(viewport, indirectOffset, maxDrawCount,
@@ -2209,6 +2221,12 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             + "(see optimisation.MD 30).";
 
     private static boolean LOD_ICB_LOGGED = false;
+
+    /**
+     * {@code VOXY_LOD_ZERO_DRAWS=1} clamps the LOD pass's draw count to zero. The calibration for the
+     * {@code gpu} instrument — see where it is applied in {@code renderTerrainMetal}.
+     */
+    private static final boolean ZERO_DRAWS = "1".equals(System.getenv("VOXY_LOD_ZERO_DRAWS"));
 
     /**
      * {@code VOXY_LOD_NO_VERTEX_LIGHT=1} replaces the terrain vertex stage's lightmap sample with a
