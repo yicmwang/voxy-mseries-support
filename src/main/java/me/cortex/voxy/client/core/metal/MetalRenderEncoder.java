@@ -266,7 +266,7 @@ public final class MetalRenderEncoder implements RenderEncoder {
      */
     public void drawIndexedIndirectIcb(int primitiveType, IGpuIndirectCommandBuffer icb,
                                        IGpuBuffer drawBuffer, long offset, int drawCount, int stride,
-                                       IGpuBuffer rangeBuffer, long rangeOffset) {
+                                       int baseIndex, IGpuBuffer rangeBuffer, long rangeOffset) {
         if (this.boundIndexBuffer == 0) {
             throw new IllegalStateException("drawIndexedIndirectIcb() before bindIndexBuffer()");
         }
@@ -277,9 +277,9 @@ public final class MetalRenderEncoder implements RenderEncoder {
         long indirectBuf = bufferHandle(drawBuffer);
         if (indirectBuf == 0) throw new IllegalArgumentException("drawIndexedIndirectIcb: draw list is null");
         if (drawCount <= 0) return;
-        if (drawCount > m.maxCommands()) {
-            throw new IllegalArgumentException("drawIndexedIndirectIcb: " + drawCount
-                    + " draws exceeds the ICB's " + m.maxCommands() + " commands");
+        if (baseIndex < 0 || baseIndex + drawCount > m.maxCommands()) {
+            throw new IllegalArgumentException("drawIndexedIndirectIcb: commands [" + baseIndex + ", "
+                    + (baseIndex + drawCount) + ") exceed the ICB's " + m.maxCommands() + " commands");
         }
         long contents = contentsOf(drawBuffer);
         long rangeContents = contentsOf(rangeBuffer);
@@ -296,7 +296,11 @@ public final class MetalRenderEncoder implements RenderEncoder {
         MetalNative.mtlRenderEncoderUseResource(this.encoderHandle, this.boundIndexBuffer,
                 MetalNative.MTLResourceUsageRead, MetalNative.MTLRenderStageVertex);
 
-        m.reset(0, drawCount);
+        // Reset and populate ONLY this pass's region. Each pass of the frame owns a disjoint index
+        // range (opaque / translucent / temporal), because all three encode into one command buffer and
+        // Metal reads the ICB at execution time -- after every pass has been encoded. A shared region
+        // would have all three passes executing whichever pass encoded last.
+        m.reset(baseIndex, drawCount);
         for (int i = 0; i < drawCount; i++) {
             long cmdAddr = contents + offset + (long) i * stride;
             // DrawElementsIndirectCommand: count, instanceCount, firstIndex, baseVertex, baseInstance.
@@ -307,21 +311,37 @@ public final class MetalRenderEncoder implements RenderEncoder {
             int firstIndex = MemoryUtil.memGetInt(cmdAddr + 8);
             int baseVertex = MemoryUtil.memGetInt(cmdAddr + 12);
             int baseInstance = MemoryUtil.memGetInt(cmdAddr + 16);
-            m.encodeDrawIndexedPrimitives(i, metalPrimitive, count, this.boundIndexType,
+            m.encodeDrawIndexedPrimitives(baseIndex + i, metalPrimitive, count, this.boundIndexType,
                     this.boundIndexBuffer, this.boundIndexBufferOffset + (long) firstIndex * indexBytes,
                     instanceCount, baseVertex, baseInstance);
         }
 
-        for (int done = 0; done < drawCount; done += ICB_EXEC_CHUNK) {
-            MemoryUtil.memPutInt(rangeContents + rangeOffset, done);
-            MemoryUtil.memPutInt(rangeContents + rangeOffset + 4, Math.min(ICB_EXEC_CHUNK, drawCount - done));
+        // The range is (location, length) INTO THE ICB, so location is the region base, not 0.
+        //
+        // EVERY CHUNK GETS ITS OWN RANGE SLOT, and that is not tidiness. The range is read at GPU
+        // execution time, so writing chunk 0's range, executing, then overwriting the same slot with
+        // chunk 1's range makes BOTH executes use chunk 1's -- the first 16 384 commands never run at
+        // all. That is not hypothetical: it is what the first version of this method did, and it
+        // rendered the LOD as a band torn with holes because the opaque pass has ~20 000 draws and
+        // silently lost its first 16 384. The caller passes a base with room for
+        // {@code ceil(maxCommands / ICB_EXEC_CHUNK)} slots per pass.
+        for (int done = 0, chunk = 0; done < drawCount; done += ICB_EXEC_CHUNK, chunk++) {
+            long slot = rangeOffset + (long) chunk * ICB_RANGE_SLOT_BYTES;
+            MemoryUtil.memPutInt(rangeContents + slot, baseIndex + done);
+            MemoryUtil.memPutInt(rangeContents + slot + 4, Math.min(ICB_EXEC_CHUNK, drawCount - done));
             MetalNative.mtlRenderEncoderExecuteCommandsInBuffer(this.encoderHandle, m.handle(),
-                    bufferHandle(rangeBuffer), rangeOffset);
+                    bufferHandle(rangeBuffer), slot);
         }
     }
 
     /** {@code MTLIndirectCommandBufferExecutionRange.length} is documented as at most 0x4000. */
     private static final int ICB_EXEC_CHUNK = 0x4000;
+
+    /**
+     * Bytes between consecutive chunks' ranges within one pass's range region. 8 bytes live
+     * ({@code uint32 location; uint32 length;}), 16 to keep each on its own alignment.
+     */
+    public static final long ICB_RANGE_SLOT_BYTES = 16;
 
     /** CPU-visible contents pointer, or 0 when the buffer is private. */
     private static long contentsOf(IGpuBuffer buffer) {

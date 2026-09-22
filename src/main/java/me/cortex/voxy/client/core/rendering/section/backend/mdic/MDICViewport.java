@@ -154,8 +154,35 @@ public class MDICViewport extends Viewport<MDICViewport> {
 
     private static final boolean LOD_ICB = "1".equals(System.getenv("VOXY_LOD_ICB"));
 
-    /** The opaque slice's bound -- the largest of the three. One ICB serves all three passes in turn. */
-    public static final int ICB_CAPACITY = 400_000;
+    /**
+     * One ICB command per slot of {@link #drawCallBuffer}, laid out the SAME way: opaque at 0,
+     * translucent at 400 000, temporal at 500 000.
+     *
+     * <p><b>The three passes must not share a region, and this is the whole reason the layout is
+     * mirrored rather than "one pass at a time".</b> All three passes encode into ONE command buffer,
+     * and Metal reads both the ICB's commands and the execution range at GPU execution time -- which is
+     * after every pass has been encoded. Resetting and repopulating a single shared ICB per pass leaves
+     * the GPU executing the LAST pass's commands three times, and the last range, for all three passes.
+     * Measured: the LOD rendered as a band torn with holes, because the opaque pass was running the
+     * translucent pass's commands. Mirroring the draw buffer's slices means each pass owns its indices
+     * and no pass can overwrite another's.
+     */
+    public static final int ICB_CAPACITY = 400_000 + 100_000 + 100_000;
+
+    /**
+     * Range slots per pass: {@code ceil(400_000 / 0x4000)}, the number of execute chunks the largest
+     * pass can need. Each chunk needs its own slot because the range is read at GPU execution time --
+     * see {@code MetalRenderEncoder.drawIndexedIndirectIcb}.
+     */
+    public static final int ICB_MAX_CHUNKS = (400_000 + 0x3fff) / 0x4000;
+
+    /** Byte stride between the per-pass execution-range regions inside {@link #icbRangeBuffer}. */
+    public static final long ICB_RANGE_STRIDE = ICB_MAX_CHUNKS * 16L;
+
+    /** Which range region a pass owns: opaque, temporal, translucent. Distinct, never shared. */
+    public static final int ICB_PASS_OPAQUE = 0;
+    public static final int ICB_PASS_TEMPORAL = 1;
+    public static final int ICB_PASS_TRANSLUCENT = 2;
 
     private final IGpuIndirectCommandBuffer[] icbRing;
 
@@ -179,7 +206,12 @@ public class MDICViewport extends Viewport<MDICViewport> {
                         .createIndirectCommandBuffer(ICB_CAPACITY)
                         .name("voxy-lod-icb-" + i);
             }
-            this.icbRangeBuffer = RenderBackendFactory.get().createBuffer(16).zero();
+            // One 16-byte range per pass. They must be SEPARATE slots for the same reason the ICB
+            // regions must be: the range is read at GPU execution time, so a single shared slot would
+            // have all three passes reading whichever pass encoded last.
+            this.icbRangeBuffer = RenderBackendFactory.get().createBuffer(3 * ICB_RANGE_STRIDE).zero();
+            me.cortex.voxy.common.Logger.info("[Metal-ICB] range buffer: 3 passes x "
+                    + ICB_MAX_CHUNKS + " chunks x 16 B = " + (3 * ICB_RANGE_STRIDE) + " bytes");
         } else {
             this.icbRing = null;
             this.icbRangeBuffer = null;

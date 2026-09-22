@@ -734,6 +734,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     opaqueDefines.put("VOXY_METAL_BI_FIX", "");
                     translucentDefines.put("VOXY_METAL_BI_FIX", "");
                 }
+                // VOXY_LOD_NO_VERTEX_LIGHT=1: the cost probe for the LOD pass's vertex stage. See
+                // quad_util.glsl. It is a bisection, not a feature -- the image comes back with uniform
+                // lighting, which is the point: only the lightmap fetch changes.
+                if (NO_VERTEX_LIGHT) {
+                    opaqueDefines.put("VOXY_LOD_NO_VERTEX_LIGHT", "");
+                    translucentDefines.put("VOXY_LOD_NO_VERTEX_LIGHT", "");
+                }
             }
 
             // NOTE: MDIC terrain pipelines do NOT opt into supportIndirectCommandBuffers.
@@ -2129,10 +2136,24 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                         + ", 3-slot ring, execute chunks of " + 0x4000 + ")");
                 Logger.info("[Metal-ICB] " + LOD_ICB_SHADER_NOTE);
             }
+            // Each pass gets its OWN region of the ICB and its OWN range slot, at the same indices the
+            // draw-command buffer uses. They cannot share: all three passes encode into one command
+            // buffer and the GPU reads the ICB and the range only when it executes, by which point every
+            // pass has encoded. Sharing made the opaque pass run the translucent pass's commands -- the
+            // LOD rendered as a band torn with holes.
+            int stride = 5 * 4;
+            int baseIndex = (int) (indirectOffset / stride);
+            int passIdx = indirectOffset == 0L
+                    ? me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_OPAQUE
+                    : indirectOffset == (long) TEMPORAL_OFFSET * stride
+                            ? me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TEMPORAL
+                            : me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TRANSLUCENT;
             mre.drawIndexedIndirectIcb(
                     me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
                     icb, viewport.drawCallConsume(viewport.frameId), indirectOffset, maxDrawCount,
-                    /*stride*/ 5 * 4, viewport.icbRangeBuffer, 0L);
+                    stride, baseIndex,
+                    viewport.icbRangeBuffer,
+                    passIdx * me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_RANGE_STRIDE);
         } else {
             encoder.drawIndexedIndirect(
                     me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
@@ -2188,6 +2209,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             + "(see optimisation.MD 30).";
 
     private static boolean LOD_ICB_LOGGED = false;
+
+    /**
+     * {@code VOXY_LOD_NO_VERTEX_LIGHT=1} replaces the terrain vertex stage's lightmap sample with a
+     * constant. A cost probe: it isolates the one dependent texture fetch in the vertex shader, which
+     * the zero-scissor and ICB results between them leave as the largest surviving candidate for the
+     * LOD pass's ~16 ms. The image is deliberately wrong.
+     */
+    private static final boolean NO_VERTEX_LIGHT =
+            "1".equals(System.getenv("VOXY_LOD_NO_VERTEX_LIGHT"));
 
     @Override
     public void buildDrawCalls(MDICViewport viewport) {

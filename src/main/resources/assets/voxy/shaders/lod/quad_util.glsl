@@ -98,7 +98,19 @@ uvec3 makeRemainingAttributes(const in BlockModel model, const in Quad quad, uin
     bool isShaded = modelIsShaded(model);
     bool hasAO = isShaded;
 
+    // VOXY_LOD_NO_VERTEX_LIGHT=1 -- a COST probe, not a feature. Replaces the vertex stage's lightmap
+    // sample with a constant, so every other line of the vertex shader (quad setup, the position fetch,
+    // the face tint, the packing) still runs and only the dependent texture fetch disappears.
+    //
+    // Why it matters: the LOD pass costs ~16 ms of GPU time, and two separate measurements have now
+    // removed the other candidates -- a zero scissor (no fragments at all) leaves it unchanged, and an
+    // ICB (no per-draw setVertexBytes) leaves it unchanged. What survives is vertex work, and this is
+    // the largest single term in it. The rendered image is wrong (uniform lighting) by design.
+    #ifdef VOXY_LOD_NO_VERTEX_LIGHT
+    vec4 tinting = vec4(1.0);
+    #else
     vec4 tinting = getLighting(lighting);
+    #endif
 
     uint conditionalTinting = 0;
     if (tintColour != uint(-1)) {
