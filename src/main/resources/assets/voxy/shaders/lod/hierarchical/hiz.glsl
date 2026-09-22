@@ -29,21 +29,48 @@ vec3 toScreenspace(vec4 p) {
 //caller may not have one (the per-section cull does not), and `textureSize(sampler, ml)` is by
 //construction the equivalent of HiZBuffer's mip rule, `max(w>>ml, 1)`, for every level.
 bool hizOccluded(vec3 minBB, vec3 maxBB) {
-    //Things start breaking down if the area is the entire scree, no idea why, just abort if we hit this case
-    if ((maxBB.xy-minBB.xy)==vec2(1.0f)) return false;
+    // ---------------------------------------------------------------------------------------------
+    // THE FULL-SCREEN GUARD, RESTORED TO UPSTREAM'S FORM. This was the bug.
+    //
+    // Upstream (voxy/lod/hierarchical/screenspace.glsl:157):
+    //     if (any(lessThan(abs(_maxBB.xy-_minBB.xy-vec2(1.0f)), vec2(0.000001f)))) return false;
+    //
+    // The port had it as:
+    //     if ((maxBB.xy-minBB.xy)==vec2(1.0f)) return false;
+    //
+    // `==` on a vec2 in GLSL is an ALL-components comparison, so the port bailed out only when BOTH
+    // axes spanned the whole screen, where upstream bails when EITHER does. The port kept upstream's
+    // own warning on the line above -- "Things start breaking down if the area is the entire screen,
+    // no idea why, just abort if we hit this case" -- and weakened the guard it describes, which is
+    // how a known-bad case stayed reachable.
+    //
+    // WHY THAT MATTERS, and why it produced the reported symptom. A node whose box spans the full
+    // WIDTH but not the full height reaches the test in the port and was bailed out of upstream. That
+    // is the shape of a DISTANT, COARSE node at the horizon -- and the traversal rendering only
+    // leaves, so culling one coarse node removes its entire subtree. That is the owner's report: whole
+    // multi-chunk regions of distant LOD gone, sky showing through, the set of them moving with the
+    // camera, and the loss needing the depth pyramid to fill in first (before that the cull removes
+    // nothing, which is why the first ~30 seconds look correct).
+    //
+    // The two clamps below are upstream's too, and they are the same class: `ceil` on the far edge,
+    // `floor` on the near edge, so the sampled range is a SUPERSET of the box's footprint. The port
+    // truncated the far edge with `ivec2(maxBB.xy*ssize)` -- `int()` truncates toward zero -- which
+    // shrinks the range by up to a texel and biases the min-reduce toward NEARER occluders, i.e. the
+    // direction that culls things it should keep.
+    // ---------------------------------------------------------------------------------------------
+    if (any(lessThan(abs((maxBB.xy - minBB.xy) - vec2(1.0f)), vec2(0.000001f)))) return false;
 
     ivec2 ssize = textureSize(hizDepthSampler, 0);
     vec2 size = (maxBB.xy-minBB.xy)*ssize;
     float miplevel = log2(max(max(size.x, size.y),1));
 
     miplevel = floor(miplevel)-1;
-    //miplevel = clamp(miplevel, 0, 6);
     miplevel = clamp(miplevel, 0, textureQueryLevels(hizDepthSampler)-1);
 
     int ml = int(miplevel);
     ssize = max(ivec2(1), textureSize(hizDepthSampler, ml));
-    ivec2 mxbb = min(ivec2(maxBB.xy*ssize),ssize-1);
-    ivec2 mnbb = ivec2(minBB.xy*ssize);
+    ivec2 mxbb = min(ivec2(ceil(maxBB.xy*ssize)), ssize-1);
+    ivec2 mnbb = ivec2(floor(minBB.xy*ssize));
 
     // Reverse-Z frame: near is 1, far is 0, and the pyramid holds the tile's FARTHEST occluder --
     // the smallest value -- so this is a min-reduce. It starts at 1.0 (the near plane) because a min
@@ -86,5 +113,13 @@ bool hizOccluded(vec3 minBB, vec3 maxBB) {
     // is why the cull never fired. The arithmetic already gives the right answer for both cases:
     // `0.0 > maxBB.z` is false for every box, so an unbuilt pyramid and a sky tile both read as
     // "not occluded" without a special case.
+    //
+    // A CONSERVATIVE MARGIN ON THIS COMPARISON WAS TRIED AND MEASURED NEUTRAL, and is not here.
+    // Upstream's rasterized cull brings the box closer to the camera before its depth test
+    // (`gl_Position.z += CLOSER_SIGN*0.000001f * gl_Position.w`), and the analytic test inherited no
+    // equivalent, which is a real difference worth knowing about. It is not this bug: a relative
+    // margin of 1% and of 5% moved the artefact's own measure not at all (386 497 and 393 927 sky
+    // pixels against 386 497 for no margin, where the corrected band is 235 000-253 000). Whatever is
+    // wrong here is not a marginal comparison. See lod-bugs.MD 11.
     return pointSample > maxBB.z;
 }

@@ -85,6 +85,8 @@ public class HierarchicalOcclusionTraverser {
      * this one touches the same lines: if the LOD sticks at its coarsest level, set this to 0.
      */
     private static final boolean CHILD_READY = !"0".equals(System.getenv("VOXY_LOD_CHILD_READY"));
+
+
     private static long travStatsFrame = 0;
 
     /** Reads the six arrays back and logs one line. Called from the download callback. */
