@@ -709,6 +709,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     opaqueDefines.put("VOXY_LOD_NO_MODEL_FETCH", "");
                     translucentDefines.put("VOXY_LOD_NO_MODEL_FETCH", "");
                 }
+                // VOXY_MODEL_TIGHT=1: drop BlockModel's 28 bytes of unwritten padding, so the model
+                // array's stride is 36 instead of 64. The bytes-vs-latency discriminator -- same loads,
+                // same indices, fewer bytes per element. ModelStore.MODEL_SIZE reads the same variable,
+                // so the CPU stride and the struct layout cannot disagree.
+                if (MODEL_TIGHT) {
+                    opaqueDefines.put("VOXY_MODEL_TIGHT", "");
+                    translucentDefines.put("VOXY_MODEL_TIGHT", "");
+                }
 
                 // The define report, AFTER every define is registered -- see the note where the
                 // declaration locals are set up. The list of injections is HAND-MAINTAINED, so it
@@ -2435,9 +2443,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
             int modelId = me.cortex.voxy.client.core.rendering.util.LodVertexMath.stateId(qx, qy);
             int face = me.cortex.voxy.client.core.rendering.util.LodVertexMath.face(qx, qy);
-            // BlockModel = { uint faceData[6]; ... } at MODEL_SIZE bytes per entry.
+            // BlockModel = { uint faceData[6]; ... } at MODEL_SIZE bytes per entry. Read from the
+            // constant, NOT a literal 64: under VOXY_MODEL_TIGHT the stride is 36, and a hardcoded
+            // stride here would silently read the wrong model's face data -- a wrong answer that still
+            // looks like a number.
             int faceData = (modelId < (1 << 16) && face < 6)
-                    ? org.lwjgl.system.MemoryUtil.memGetInt(mp + (long) modelId * 64L + face * 4L)
+                    ? org.lwjgl.system.MemoryUtil.memGetInt(
+                            mp + (long) modelId * me.cortex.voxy.client.core.model.ModelStore.MODEL_SIZE
+                                    + face * 4L)
                     : -1;
 
             float[] c = me.cortex.voxy.client.core.rendering.util.LodVertexMath.corners(
@@ -2672,6 +2685,21 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static final boolean NO_MODEL_FETCH =
             "1".equals(System.getenv("VOXY_LOD_NO_MODEL_FETCH"));
+
+    /**
+     * {@code VOXY_MODEL_TIGHT=1} removes {@code BlockModel}'s 28 bytes of padding, taking the model
+     * array's stride from 64 to 36. Read by {@code ModelStore.MODEL_SIZE} as well, so the CPU-side
+     * stride and the shader's struct layout move together.
+     *
+     * <p>This is the experiment {@code NO_MODEL_FETCH} makes decidable. That probe removed the load
+     * entirely and took 13.0 % off the LOD pass's {@code gpu}; this one keeps every load and every
+     * index identical and only shrinks each element. So the split between the two results says which
+     * regime the vertex stage is in — most of the 13 % recovered means bandwidth, little recovered
+     * means the dependent load's latency, and the fix is then to bake the face constants into
+     * {@code Quad} rather than to pack the model.
+     */
+    private static final boolean MODEL_TIGHT =
+            "1".equals(System.getenv("VOXY_MODEL_TIGHT"));
 
     @Override
     public void buildDrawCalls(MDICViewport viewport) {
