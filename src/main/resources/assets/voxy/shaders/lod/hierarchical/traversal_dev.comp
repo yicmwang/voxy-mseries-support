@@ -91,6 +91,38 @@ void enqueueChildren(in UnpackedNode node) {
     }
 }
 
+/**
+ * Whether EVERY child has a mesh, i.e. whether descending will actually put something on screen.
+ *
+ * <p>Why this is needed. A node that descends does not render itself -- rendering is leaves-only by
+ * design, and drawing parent and children together would z-fight, since both cover the same volume at
+ * different tessellation. So the frame rests entirely on the children. A node becomes "inner" (gains
+ * children) the moment the world reports they exist, but those children are new graph nodes with no
+ * meshes yet, and a mesh takes frames to arrive. In that window the parent is suppressed AND the
+ * children draw nothing: a hole.
+ *
+ * <p>It is worst at the level-1 -> level-0 handover, which is what the user reports: level 0 are the
+ * only nodes that never descend (`node.lodLevel != 0` above), so they are terminal, and they are both
+ * the most numerous and the most expensive to mesh -- the longest possible wait, at the closest
+ * possible range.
+ *
+ * <p>Only NULL_MESH blocks. EMPTY_MESH is a legitimate state meaning "this node draws nothing, look at
+ * its children", so treating it as un-ready would suppress a parent that is correctly handing off to
+ * grandchildren, and draw both.
+ */
+bool childrenCanDraw(in UnpackedNode node) {
+    uint childCount = getChildCount(node);
+    uint ptr = getChildPtr(node);
+    for (uint i = 0u; i < childCount; i++) {
+        UnpackedNode child;
+        unpackNode(child, ptr + i);
+        if (!hasMesh(child)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void enqueueSelfForRender(in UnpackedNode node) {
     //printf("render %d@[%d,%d,%d]", node.lodLevel, node.pos.x, node.pos.y, node.pos.z);
     if (renderQueueIndex < renderQueueMaxSize) {
@@ -170,12 +202,38 @@ void traverse(in UnpackedNode node) {
         // child list that genuinely has no mesh still falls through to addRequest + enqueueChildren,
         // exactly as before.
         bool canCoverWithChildren = hasChildren(node) && !childListIsEmpty(node);
+        // VOXY_LOD_CHILD_READY=0 restores the old behaviour, where a node descends into children that
+        // cannot draw yet and leaves a hole until their meshes arrive. It is the escape hatch.
+        #ifndef VOXY_LOD_NO_CHILD_READY
+        bool childrenReady = canCoverWithChildren && childrenCanDraw(node);
+        #else
+        bool childrenReady = canCoverWithChildren;
+        #endif
         if (node.lodLevel!=0 && (shouldDecend() || emptyMeshNeedsChildren)) {
-            if (canCoverWithChildren) {
+            if (childrenReady) {
                 //printf("A");
                 #ifdef HAS_STATISTICS
                 atomicAdd(descendCounts[node.lodLevel], 1);
                 #endif
+                enqueueChildren(node);
+            } else if (canCoverWithChildren) {
+                //printf("A'");
+                // Children exist but at least one has no mesh yet, so descending would draw NOTHING for
+                // this volume. Cover it with our own mesh until they are ready.
+                //
+                // enqueueChildren() is still called, and that is load-bearing rather than tidy: the
+                // children are only VISITED -- and therefore only ever get requested and meshed -- by
+                // being enqueued. Skipping the descent here would leave them unrequested forever, so
+                // they would never become ready and the LOD would stick coarse across the world. That
+                // is not hypothetical; an earlier attempt at this file's descend branch dropped a
+                // request in exactly this way and pinned every node at its coarsest level.
+                //
+                // No double-draw while they are unready: an unmeshed child renders nothing, so there is
+                // no second surface to z-fight with. On the frame they become ready this branch is not
+                // taken and the parent stops being drawn, which is the handover the design intends.
+                if (!emptyMeshNeedsChildren) {
+                    enqueueSelfForRender(node);
+                }
                 enqueueChildren(node);
             } else {
                 //printf("B");

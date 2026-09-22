@@ -71,6 +71,20 @@ public class HierarchicalOcclusionTraverser {
      * declares them: visited, enqueued, frustumCulled, hizCulled, descended.
      */
     private static final boolean TRAV_STATS = "1".equals(System.getenv("VOXY_TRAV_STATS"));
+
+    /**
+     * {@code VOXY_LOD_CHILD_READY=0} restores the old behaviour: a node descends into children that
+     * cannot draw yet, leaving a hole until their meshes arrive.
+     *
+     * <p>ON by default. The user-reported symptom it fixes is a chunk blinking out as it crosses from
+     * the second-finest detail level to the finest -- the last subdivision, and the one where the wait
+     * for a mesh is longest (level-0 nodes are the most numerous and most expensive) at the closest
+     * range, so it is the most visible. See {@code childrenCanDraw} in traversal_dev.comp.
+     *
+     * <p>The escape hatch exists because the previous attempt at this branch broke the LOD entirely and
+     * this one touches the same lines: if the LOD sticks at its coarsest level, set this to 0.
+     */
+    private static final boolean CHILD_READY = !"0".equals(System.getenv("VOXY_LOD_CHILD_READY"));
     private static long travStatsFrame = 0;
 
     /** Reads the five arrays back and logs one line. Called from the download callback. */
@@ -193,9 +207,19 @@ public class HierarchicalOcclusionTraverser {
         m.put("NODE_QUEUE_SINK_BINDING", Integer.toString(NODE_QUEUE_SINK_BINDING));
         m.put("RENDER_TRACKER_BINDING", Integer.toString(RENDER_TRACKER_BINDING));
         m.put("PUSH_BINDING", Integer.toString(PUSH_BINDING));
-        if (RenderStatistics.enabled) {
+        // THREE gates, all of which must be open together: this define, the setBuffer in the dispatch
+        // loop, and the readback. Only opening some of them is how a diagnostic returns a clean,
+        // confident, entirely empty series -- which is exactly what happened here: the first run of
+        // these counters produced 12 368 frames of zeros, which reads as "nothing is being culled"
+        // rather than "the instrument is not connected".
+        if (RenderStatistics.enabled || TRAV_STATS) {
             m.put("HAS_STATISTICS", "");
             m.put("STATISTICS_BUFFER_BINDING", Integer.toString(STATISTICS_BUFFER_BINDING));
+        }
+        // VOXY_LOD_CHILD_READY=0 restores the old descend behaviour, where a node hands off to
+        // children that have no meshes yet and leaves a hole until they arrive. The escape hatch.
+        if (!CHILD_READY) {
+            m.put("VOXY_LOD_NO_CHILD_READY", "");
         }
         return m;
     }
