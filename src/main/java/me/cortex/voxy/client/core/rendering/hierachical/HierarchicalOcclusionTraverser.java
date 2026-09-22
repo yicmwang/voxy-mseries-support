@@ -86,6 +86,40 @@ public class HierarchicalOcclusionTraverser {
      */
     private static final boolean CHILD_READY = !"0".equals(System.getenv("VOXY_LOD_CHILD_READY"));
 
+    /**
+     * {@code VOXY_HIZ_DILATE=<n>} widens the texel band the Hi-Z test samples, by n texels on each
+     * side, at the mip the box selected. Default 1.
+     *
+     * <p>Why it exists: the pyramid is built from frame N-1's depth while the box is where the node is
+     * at frame N, so with the camera moving the test reads a footprint whose texels describe a region
+     * the box may only partly occupy. Widening the band is the conservative direction on a reverse-Z
+     * frame — {@code pointSample} is a min, so more texels can only lower it, so the cull can only
+     * become less likely — which makes it the safe way to spend a little culling to buy stability.
+     * See {@code hiz.glsl} and lod-bugs.MD §17.
+     *
+     * <p>{@code =0} restores the exact-footprint test, which is the A/B arm.
+     *
+     * <p><b>The default is 4, not 1, and that is a measured choice.</b> 1 was the first guess and it is
+     * worth almost nothing: 0.970 % of frames against the exact-footprint arm's 1.057 %, which is 1.4σ
+     * and inside run noise. 4 is the first value that does anything — 0.229 %, a 4.6x reduction — and it
+     * costs about 13 % of the cull's draw saving (drawn-per-frame 3 762 against 3 227 at n=1, with the
+     * cull-off ceiling at 4 143). Phase 4 of Bug A's investigation, lod-bugs.MD §17.10. Shipping 1 would
+     * have been shipping a no-op that reads like a fix.
+     */
+    private static final int HIZ_DILATE = readEnvInt("VOXY_HIZ_DILATE", 4);
+
+    /** Local copy of VoxyClient's parser, which is private there. Returns {@code def} on anything odd. */
+    private static int readEnvInt(final String name, final int def) {
+        final String v = System.getenv(name);
+        if (v == null || v.isBlank()) return def;
+        try {
+            return Math.max(0, Integer.parseInt(v.trim()));
+        } catch (NumberFormatException e) {
+            me.cortex.voxy.common.Logger.error(name + " must be an integer; got \"" + v + "\"", e);
+            return def;
+        }
+    }
+
     /** One-shot gate for the [Metal-TRAVSW] configuration record; see the define map. */
     private static boolean switchesLogged = false;
 
@@ -275,6 +309,10 @@ public class HierarchicalOcclusionTraverser {
         if (!CHILD_READY) {
             m.put("VOXY_LOD_NO_CHILD_READY", "");
         }
+        // The Hi-Z footprint margin. Always injected, including 0, so the arm is explicit in the shader
+        // rather than an absence -- an absent define and a define of 0 must not be allowed to look the
+        // same in a log.
+        m.put("VOXY_HIZ_DILATE", Integer.toString(HIZ_DILATE));
         // A ONE-SHOT RECORD OF WHICH TRAVERSAL SWITCHES ARE ACTUALLY ON.
         //
         // This exists because a switch that silently never applied makes two A/B arms the same build
@@ -285,12 +323,26 @@ public class HierarchicalOcclusionTraverser {
         // gap it exposed is general, so the traversal now states its own configuration once per run.
         if (!switchesLogged) {
             switchesLogged = true;
+            // KEYS *AND VALUES*, and the values are the point. The first version of this line printed
+            // `m.keySet()` and was useless for the exact case that motivated it: VOXY_HIZ_DILATE rides
+            // this define map as "0", "1" or "4", and a keySet prints `VOXY_HIZ_DILATE` identically for
+            // all three. An arm whose switch value cannot be read out of the log is an arm that cannot
+            // be believed, which is the whole reason this log exists -- so it was found to be
+            // inadequate on its own first real use, one round after being added. Bindings are dropped
+            // because they are noise here; everything else is printed verbatim.
+            final StringBuilder defs = new StringBuilder();
+            for (final var e : new java.util.TreeMap<>(m).entrySet()) {
+                if (e.getKey().endsWith("_BINDING")) continue;
+                if (defs.length() > 0) defs.append(' ');
+                defs.append(e.getKey());
+                if (!e.getValue().isEmpty()) defs.append('=').append(e.getValue());
+            }
             me.cortex.voxy.common.Logger.info("[Metal-TRAVSW] traversal switches: "
                     + "CULL_DISABLED=" + CULL_DISABLED
                     + " CHILD_READY=" + CHILD_READY
                     + " TRAV_STATS=" + TRAV_STATS
                     + " HOT_SERIALIZE=" + HOT_SERIALIZE
-                    + " | defines injected: " + m.keySet());
+                    + " | defines: " + defs);
         }
         return m;
     }

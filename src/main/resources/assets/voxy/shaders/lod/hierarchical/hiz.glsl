@@ -77,6 +77,42 @@ bool hizOccluded(vec3 minBB, vec3 maxBB) {
     ivec2 mnbb = ivec2(floor(minBB.xy*ssize));
 
     // -------------------------------------------------------------------------------------------
+    // THE FOOTPRINT MARGIN — because the map the test reads is ONE FRAME OLD.
+    //
+    // The pyramid is built from frame N-1's LOD depth (AbstractRenderPipeline), while the box being
+    // tested is where the node is on screen at frame N. If the camera moved, those are two different
+    // places, and the test then asks "is everything in THIS footprint nearer than the box?" of a
+    // footprint whose texels describe a region the box may only partly occupy. Near the camera the
+    // screen-space displacement per frame is largest — which is why the blip is confined to the two
+    // finest levels (lod-bugs.MD 17.7) and why it vanishes when the camera holds still.
+    //
+    // WHY A MARGIN IS THE CONSERVATIVE DIRECTION AND IN WHICH DIRECTION. `pointSample` is a MIN over
+    // the sampled band, on a reverse-Z frame where a smaller depth means further away. Widening the
+    // band can only ADD texels, so the min can only fall, so `pointSample > maxBB.z` can only become
+    // LESS likely. A wider band therefore draws more, never less — the safe way to be wrong.
+    //
+    // WHAT IT IS AND IS NOT. This is a screen-space approximation of a motion term, not the motion
+    // term itself: it covers the footprint shift with a fixed number of texels at the mip the box
+    // selected, so it is exact at one distance and generous closer in. The exact form is to project
+    // the box with the PREVIOUS frame's VP as well and test the union of the two footprints, which
+    // needs a second matrix in the scene uniform — worth doing if this confirms the mechanism, and
+    // not worth doing before it does.
+    //
+    // VOXY_HIZ_DILATE=<n> texels, default 4 (measured; 1 was a no-op). 0 restores the exact-footprint
+    // test for an A/B. The default is always injected by the traversal, so an arm's value is readable
+    // from [Metal-TRAVSW] rather than inferred.
+    // -------------------------------------------------------------------------------------------
+    #ifdef VOXY_HIZ_DILATE
+    const int HIZ_DILATE = VOXY_HIZ_DILATE;
+    #else
+    const int HIZ_DILATE = 4;
+    #endif
+    if (HIZ_DILATE > 0) {
+        mnbb = max(ivec2(0), mnbb - ivec2(HIZ_DILATE));
+        mxbb = min(ssize - 1, mxbb + ivec2(HIZ_DILATE));
+    }
+
+    // -------------------------------------------------------------------------------------------
     // ON THE ROW MIRROR, AND WHY THERE IS NOT ONE HERE.
     //
     // The pyramid's blit was writing every level upside down (see HiZBuffer.buildMipChain): it paired
