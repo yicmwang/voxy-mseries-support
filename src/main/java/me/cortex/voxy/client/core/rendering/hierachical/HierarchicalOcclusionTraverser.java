@@ -526,7 +526,62 @@ public class HierarchicalOcclusionTraverser {
             lastTaskCount = this.meshGen.getTaskCount();
             MemoryUtil.memPutInt(ptr, budget); ptr += 4;
         }
+
+        // -----------------------------------------------------------------------------------------
+        // THE PREVIOUS FRAME'S VP, THE CAMERA DELTA, AND THE SWITCH — Bug A's fix.
+        //
+        // Written after the struct's existing tail, at the std430 offsets the shader declares:
+        // `uint requestQueueSize` ends at 204, `mat4 prevVP` needs 16-byte alignment so it starts at
+        // 208, then `vec3 camDelta` at 272 (also 16-aligned) and `uint usePrevView` at 284.
+        //
+        // WHY. The pyramid the traversal reads is built from frame N-1's depth and cannot be made
+        // current — the LOD pass that fills it runs after this traversal. Projecting the box in frame N
+        // and testing it against frame N-1's map is a self-contradicting comparison, and with the camera
+        // moving it culls distant nodes for one frame by finding the near ground under them: Bug A.
+        // Projecting the box with prevVP too, and testing THAT, makes box and map describe the same
+        // instant. Costs no culling, unlike the sample-band widening that was measured and rejected
+        // (lod-bugs.MD 17.11), and needs no MSL pass (the format-view route Metal refused, 17.12).
+        //
+        // `camDelta` exists because the shader's basePos is camera-relative to the CURRENT origin and
+        // prevVP needs the box relative to the PREVIOUS one: delta = curOrigin - prevOrigin, where
+        // origin = camSecPos*32 + camSubSecPos.
+        ptr += 4;                                   // skip the 4 bytes of std430 padding after 204
+        this.prevMVP.getToAddress(ptr); ptr += 4 * 4 * 4;
+        final float cx = (float) (viewport.section.x * 32.0 + viewport.innerTranslation.x);
+        final float cy = (float) (viewport.section.y * 32.0 + viewport.innerTranslation.y);
+        final float cz = (float) (viewport.section.z * 32.0 + viewport.innerTranslation.z);
+        // camDelta = curOrigin - prevOrigin, which is what turns the shader's camera-relative basePos
+        // into a position relative to where the camera was when the pyramid's depth was written. On the
+        // first frame there is no previous origin, so it is zero -- a garbage delta there would be a
+        // large bogus offset applied to every box for one frame, and the pyramid is empty anyway.
+        MemoryUtil.memPutFloat(ptr, hasPrevOrigin ? cx - this.prevOrigin[0] : 0f);
+        MemoryUtil.memPutFloat(ptr + 4, hasPrevOrigin ? cy - this.prevOrigin[1] : 0f);
+        MemoryUtil.memPutFloat(ptr + 8, hasPrevOrigin ? cz - this.prevOrigin[2] : 0f); ptr += 4 * 3;
+        MemoryUtil.memPutInt(ptr, usePrevViewBox ? 1 : 0); ptr += 4;
+
+        // Record this frame's values for the next frame, AFTER the upload, so the frame that just used
+        // prevMVP is the one that wrote it. Backwards, and the cull is two frames stale instead of one
+        // -- which would read as the bug getting worse rather than better.
+        this.prevMVP.set(viewport.MVP);
+        this.prevOrigin[0] = cx;
+        this.prevOrigin[1] = cy;
+        this.prevOrigin[2] = cz;
+        this.hasPrevOrigin = true;
     }
+
+    /** The previous frame's MVP, and the previous frame's camera origin in blocks. */
+    private final org.joml.Matrix4f prevMVP = new org.joml.Matrix4f();
+    private final float[] prevOrigin = new float[3];
+    private boolean hasPrevOrigin = false;
+
+    /**
+     * {@code VOXY_HIZ_PREVBOX=0} restores the pre-fix behaviour, projecting the occlusion box in the
+     * CURRENT frame and testing it against a pyramid built from the previous one. Default on: that
+     * mismatch is Bug A, and this is its fix rather than a mitigation -- it costs no culling, unlike
+     * widening the sample band, and needs no MSL pass, unlike reading the frame's own depth.
+     */
+    private static final boolean usePrevViewBox =
+            !"0".equals(System.getenv("VOXY_HIZ_PREVBOX"));
 
     public void doTraversal(Viewport<?> viewport) {
         this.uploadUniform(viewport);

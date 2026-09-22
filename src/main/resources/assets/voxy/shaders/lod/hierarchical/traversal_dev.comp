@@ -22,6 +22,36 @@ layout(binding = SCENE_UNIFORM_BINDING, std430) restrict readonly buffer SceneUn
     uint renderQueueMaxSize;
     uint frameId;
     uint requestQueueSize;
+    // ---------------------------------------------------------------------------------------------
+    // THE PREVIOUS FRAME'S VIEW-PROJECTION, AND WHY THE CULL NEEDS IT.
+    //
+    // The Hi-Z pyramid is built from the LOD pass's depth-as-colour attachment, and the build runs
+    // BEFORE the pass that rewrites it -- so the pyramid the traversal consults describes frame N-1,
+    // and it cannot be made to describe frame N because the geometry that fills it is drawn after the
+    // traversal that reads it. That is not a defect to remove; it is the frame's shape.
+    //
+    // The defect was the mismatch: testing frame N's box against frame N-1's depths. With the camera
+    // moving, the box's screen footprint is not where it was when those texels were written, so the
+    // test can find the near ground under a distant node and cull it for one frame. That is Bug A, and
+    // it is confined to the finest levels because that is where per-frame screen displacement is
+    // largest (lod-bugs.MD 17.7-17.10).
+    //
+    // THE FIX IS TO MAKE THE CONSUMER ONE FRAME OLD TOO. Project the box with prevVP as well, and test
+    // THAT footprint against the pyramid. Box and map then describe the same instant, and a consistent
+    // Hi-Z test cannot contradict itself: the node's own surface is in the pyramid it is tested
+    // against, so `pointSample > maxBB.z` is false for anything that was actually visible.
+    //
+    // It costs NOTHING in culling -- unlike widening the sample band, which was measured to buy the
+    // blip back with the cull's whole purpose (17.11). The cull simply lags a frame, which is the same
+    // frame it already lagged.
+    //
+    // vec3 camDelta = camSecPos*32 + camSubSecPos for THIS frame, minus the same for the previous one.
+    // `basePos` below is camera-relative to the CURRENT origin, and the box must be expressed relative
+    // to the PREVIOUS one before prevVP can project it, which is exactly this delta.
+    // ---------------------------------------------------------------------------------------------
+    mat4 prevVP;
+    vec3 camDelta;
+    uint usePrevView;   // 1 = project the box with prevVP for the occlusion test; 0 = the pre-fix arm
 };
 
 #import <voxy:lod/hierarchical/queue.glsl>

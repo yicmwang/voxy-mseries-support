@@ -81,8 +81,40 @@ void setupScreenspace(in UnpackedNode node) {
         return;
     }
 
-    vec4 P000 = VP * vec4(basePos, 1);
-    mat3x4 Axis = mat3x4(VP) * float(32<<node.lodLevel);
+    // -------------------------------------------------------------------------------------------
+    // WHICH FRAME THE BOX IS PROJECTED IN — the whole of Bug A's fix.
+    //
+    // The Hi-Z pyramid the traversal consults is built from frame N-1's depth, and it CANNOT be made
+    // current: the geometry that fills it is drawn by the LOD pass, which runs after this traversal.
+    // That is the frame's shape, not a defect. The defect was projecting the box in frame N and testing
+    // it against frame N-1's map: with the camera moving, the box's footprint is not where it was when
+    // those texels were written, so the test can find the near ground under a distant node and cull it
+    // for one frame. Confined to the finest levels, because that is where per-frame screen displacement
+    // is largest (lod-bugs.MD 17.7-17.10).
+    //
+    // So project the box in frame N-1 as well, using prevVP and a base position re-expressed against
+    // the previous frame's camera origin (camDelta), and test THAT. Box and map then describe the same
+    // instant, and a consistent Hi-Z test cannot contradict itself: the node's own surface is in the
+    // map it is tested against, so `pointSample > maxBB.z` is false for anything actually visible.
+    //
+    // It costs NOTHING in culling -- unlike widening the sample band, measured to buy the blip back
+    // with the cull's entire purpose (17.11) -- and needs no MSL pass (the format-view route Metal
+    // refused outright, 17.12). The cull simply lags a frame, which is the frame it already lagged.
+    //
+    // `screenSize` and the box below both come from this matrix, deliberately: the refine decision
+    // should describe the same frame as the cull that feeds it, and a node's screen size does not
+    // meaningfully change in one frame. The FRUSTUM test above is left on the world-space box, so it is
+    // unaffected either way.
+    // -------------------------------------------------------------------------------------------
+    mat4 boxVP = VP;
+    vec3 boxBasePos = basePos;
+    if (usePrevView == 1u) {
+        boxVP = prevVP;
+        boxBasePos = basePos + camDelta;
+    }
+
+    vec4 P000 = boxVP * vec4(boxBasePos, 1);
+    mat3x4 Axis = mat3x4(boxVP) * float(32<<node.lodLevel);
 
     vec4 P100 = Axis[0] + P000;
     vec4 P001 = Axis[2] + P000;
