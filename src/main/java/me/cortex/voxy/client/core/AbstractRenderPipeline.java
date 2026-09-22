@@ -86,19 +86,34 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private boolean passShapeLogged;
 
     /**
-     * The Hi-Z pyramid build. <b>ON by default</b>, because it now culls. {@code VOXY_HIZ_BUILD=0}
-     * turns it off — which leaves a zero-filled pyramid, whose every box answers "not occluded", so the
-     * cull becomes a no-op rather than being disabled outright.
+     * The Hi-Z pyramid build. <b>OFF by default as of 2026-09-22</b>: the cull built on it removes
+     * terrain it should keep, so the pyramid is left zero-filled — whose every box answers "not
+     * occluded" — and the traversal's Hi-Z test becomes a no-op.
      *
-     * <p>It was off by default while it could not cull, and the reason is worth keeping: the pyramid
-     * was attached as a DEPTH attachment while its blit pipeline declares depth DISABLED and an R32F
-     * COLOUR format, so the blit's output was dropped and nothing ever wrote it. On top of that, the
-     * texture feeding it was RGBA8, and reverse-Z LOD depth (~1e-4) quantises to zero in 8 bits.
-     * With both fixed the pyramid holds real depth and the traversal culls: measured same-session and
-     * same-camera, 24 793 -> 14 387 draws (-42 %), `submit` 21.38 -> 18.08 ms, total 26.44 -> 22.25 ms.
-     * See optimisation.MD 8.8.
+     * <p><b>Why the default flipped, and the exact evidence.</b> The owner reported "entire LOD
+     * sections randomly disappearing depending on camera angle": large regions of DISTANT LOD missing
+     * with sky through them, and detached slabs of terrain floating where no terrain should be.
+     * Measured against `VOXY_HIZ_BUILD=0` on the same build, same camera and same drift, judged from
+     * the screenshots at an honest frame rate with no instrumentation in either arm: with the pyramid
+     * built the far field is missing and fragmented; with it left zero-filled <b>the run "works
+     * great"</b> (owner's words). Both Hi-Z callers are no-ops in that arm — the traversal's test and,
+     * until it was deleted the same day, the per-section cull's — so this is the Hi-Z family as a
+     * whole, not one caller.
+     *
+     * <p>It also fits the onset the owner described: "it looked good for the first 30 seconds, then
+     * exploded". At world join the depth buffer is nearly empty, so the pyramid holds no occluders and
+     * the cull removes nothing; the failure needs the pyramid to fill in first.
+     *
+     * <p>{@code VOXY_HIZ_BUILD=1} re-enables it, and that is the arm to use while fixing it — the
+     * defect is in the test or in the pyramid's content, not in the idea of occlusion culling. The
+     * history is worth keeping: the pyramid was once attached as a DEPTH attachment while its blit
+     * pipeline declares a disabled depth test and an R32F COLOUR format, so the blit's output was
+     * dropped and nothing ever wrote it; on top of that the source texture was RGBA8, and reverse-Z
+     * LOD depth (~1e-4) quantises to zero in 8 bits. Both were fixed, and the cull then measured
+     * 24 793 -> 14 387 draws (-42 %), `submit` 21.38 -> 18.08 ms — which is why it is worth repairing
+     * rather than abandoning. See optimisation.MD 8.8.
      */
-    private static final boolean HIZ_BUILD = !"0".equals(System.getenv("VOXY_HIZ_BUILD"));
+    private static final boolean HIZ_BUILD = "1".equals(System.getenv("VOXY_HIZ_BUILD"));
 
     // Hoisted out of the per-frame body. These were `System.getenv` calls on the render path — three
     // per render pass for ATTACH_TRACE alone — and an env lookup is a native call, not a field read.
