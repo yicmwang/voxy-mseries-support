@@ -76,6 +76,37 @@ bool hizOccluded(vec3 minBB, vec3 maxBB) {
     ivec2 mxbb = min(ivec2(ceil(maxBB.xy*ssize)), ssize-1);
     ivec2 mnbb = ivec2(floor(minBB.xy*ssize));
 
+    // -------------------------------------------------------------------------------------------
+    // ON THE ROW MIRROR, AND WHY THERE IS NOT ONE HERE.
+    //
+    // The pyramid's blit was writing every level upside down (see HiZBuffer.buildMipChain): it paired
+    // uv.y=0 with clip y=-1, and Metal puts clip y=-1 at the BOTTOM of the target where GL puts it at
+    // the top. Two one-line corrections were possible and both were run as A/B arms on 2026-09-22 --
+    // flip the blit's viewport so the writer is orientation-correct, or mirror the row HERE and correct
+    // this one reader.
+    //
+    // Measured: 31 settled spin frames per arm, one build, one camera, section_render_distance 64,
+    // subDivisionSize 256, vanilla render distance 2, no instrumentation. Sky-blue pixels per frame,
+    // counted by tools/farfield_census.py; lower is more far field present.
+    //
+    //   bug      (unflipped blit)                  median 311 761
+    //   WRITER   (blit viewport flipped)           median 245 865    p=3.9e-08 vs bug
+    //   cull off (pyramid zero-filled, no cull)    median 235 865    p=0.11    vs WRITER
+    //   READER   (this mirror, VOXY_HIZ_INDEX_YFLIP=1)  median 306 279, p=0.32 vs bug -- NO EFFECT
+    //
+    // The writer-side fix lands on the cull-off ceiling; the reader-side one does not. That is expected
+    // rather than lucky: this reader mirrors ONE consumer, while the blit's inversion is baked into the
+    // stored pyramid and applies to every level and every future reader. It also could not have worked
+    // in general -- each successive blit inverts again, so a single mirror here can only be right for
+    // alternate mip levels, and the mip a node samples is a step function of its screen footprint.
+    //
+    // Honest caveat on the READER arm: its switch was never proven to reach the shader (there was no
+    // log line for it, and the project has been bitten by unproven switches repeatedly), so its "no
+    // effect" is consistent with both "the mirror does not help" and "the mirror never ran". It was
+    // removed rather than left in place, because on a correctly-oriented pyramid it can only make
+    // things worse. Do not add one back.
+    // -------------------------------------------------------------------------------------------
+
     // Reverse-Z frame: near is 1, far is 0, and the pyramid holds the tile's FARTHEST occluder --
     // the smallest value -- so this is a min-reduce. It starts at 1.0 (the near plane) because a min
     // over non-negative depths would otherwise just return the initial value.

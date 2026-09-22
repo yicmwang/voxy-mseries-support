@@ -113,7 +113,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * 24 793 -> 14 387 draws (-42 %), `submit` 21.38 -> 18.08 ms — which is why it is worth repairing
      * rather than abandoning. See optimisation.MD 8.8.
      */
-    private static final boolean HIZ_BUILD = "1".equals(System.getenv("VOXY_HIZ_BUILD"));
+    private static final boolean HIZ_BUILD = !"0".equals(System.getenv("VOXY_HIZ_BUILD"));
 
     // Hoisted out of the per-frame body. These were `System.getenv` calls on the render path — three
     // per render pass for ATTACH_TRACE alone — and an env lookup is a native call, not a field read.
@@ -396,11 +396,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //    texture, false of the timing, and the sort of claim that sends the next reader looking in
         //    the wrong place.
         //
-        //    OFF BY DEFAULT because it used to be pure cost: the pyramid it built was attached as a
-        //    depth attachment while its pipeline declares an R32F colour format, so the blit's output
-        //    was dropped and nothing ever wrote it -- +3.7 to +7 ms of `submit` for zero culled
-        //    sections. That attachment bug is fixed (see HiZBuffer's class doc), and VOXY_HIZ_BUILD=1
-        //    is what turns the corrected build on so it can be A/B'd against the zero-filled default.
+        //    ON BY DEFAULT AGAIN, 2026-09-22, and the reason it was off is worth keeping. It used to be
+        //    pure cost: the pyramid it built was attached as a depth attachment while its pipeline
+        //    declares an R32F colour format, so the blit's output was dropped and nothing ever wrote it
+        //    -- +3.7 to +7 ms of `submit` for zero culled sections. That attachment bug was fixed (see
+        //    HiZBuffer's class doc) but the switch stayed off, because turning it on removed the distant
+        //    LOD: the pyramid's vertical orientation was inverted (HiZBuffer.buildMipChain), so the
+        //    traversal tested every node against the screen region opposite it. With the orientation
+        //    fixed the cull is safe to ship on, which is what the owner asked for -- "we cannot just
+        //    turn off occlusion cull, there's something broken with the occlusion cull and you should
+        //    fix it". VOXY_HIZ_BUILD=0 remains the ceiling arm for an A/B and is the only way to run
+        //    with the pyramid deliberately zero-filled.
         if (HIZ_BUILD && this.metalDepthTex != null && this.metalDepthTex.id() != -1) {
             // VOXY_HIZ_SOURCE_COLOUR=1 -- EXPERIMENTAL BISECTION, not a feature. Build the pyramid from
             // the LOD pass's ALBEDO attachment (metallumColor) instead of the depth-as-colour one.

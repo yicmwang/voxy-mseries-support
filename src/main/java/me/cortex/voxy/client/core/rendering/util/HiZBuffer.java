@@ -115,6 +115,26 @@ public class HiZBuffer {
     private static final boolean HIZ_EXACT =
             "1".equals(System.getenv("VOXY_HIZ_EXACT"));
 
+    /**
+     * {@code VOXY_HIZ_BLIT_YFLIP=0} restores the UNFLIPPED blit viewport, which is the state this
+     * pyramid was in until 2026-09-22 and is the controlled A/B arm for the orientation fix below.
+     *
+     * <p>Default ON, because the unflipped form is wrong on Metal and was removing the whole distant
+     * LOD. The long derivation is on {@link #buildMipChain}; the short version is that the blit pairs
+     * {@code uv.y = 0} with clip {@code y = -1}, and Metal's viewport puts clip {@code y = -1} at the
+     * BOTTOM of the target where GL puts it at the top, so an unflipped blit mirrors every level it
+     * writes. The traversal reads the pyramid at the same v the LOD pass wrote, so a mirrored pyramid
+     * makes the cull test a distant node against the screen region diametrically opposite it — which
+     * at a downward camera is the near ground, whose depth is large, so the node reads "occluded".
+     */
+    private static final boolean BLIT_YFLIP =
+            !"0".equals(System.getenv("VOXY_HIZ_BLIT_YFLIP"));
+
+    /** One-shot, so the orientation in force is readable from the log rather than inferred from the
+     *  command line. The project has been bitten twice by a switch that silently never applied, and an
+     *  A/B whose two arms are the same build state is indistinguishable from a null result. */
+    private static boolean blitYFlipLogged = false;
+
     public void ensureAllocated(int width, int height) {
         // -----------------------------------------------------------------------------------------
         // THE POWER-OF-TWO ROUNDING, AND WHY IT IS A SUSPECT.
@@ -212,7 +232,51 @@ public class HiZBuffer {
                 encoder.setPipeline(this.blitPipeline);
                 encoder.setTexture(0, currentSource);
                 encoder.setSampler(0, this.sampler);
-                encoder.setViewport(0, 0, cw, ch, 0, 1);
+                // ---------------------------------------------------------------------------------
+                // THE BLIT MUST FLIP, OR EVERY LEVEL IT WRITES IS UPSIDE DOWN.
+                //
+                // blit.vsh emits `gl_Position = vec4(corner*2-1, 0, 1)` with `uv = corner`, i.e. it
+                // pairs uv.y=0 with clip y=-1. Metal's viewport maps clip y=-1 to the BOTTOM of the
+                // target, where GL maps it to the top; so with a positive-height viewport here, uv.y=0
+                // is written to the bottom row while it SAMPLES the source's v=0 — and v=0 is the
+                // source's FIRST row in memory, which on Metal is the image's TOP. Output bottom,
+                // input top: this pass mirrors, and every mip is therefore mirrored against the level
+                // above it, alternating: mip0 is mirrored w.r.t. the source, mip1 w.r.t. mip0 (so
+                // upright again), mip2 mirrored again, and so on. Upstream's GL blit has neither
+                // problem because GL's v=0 is the bottom, which is exactly where clip y=-1 goes; this
+                // is a Metal-convention port bug, not an algorithm difference, and it is invisible in
+                // every other fullscreen blit in this tree because those are orientation-symmetric.
+                //
+                // WHY IT LOOKS LIKE "DISTANT LOD VANISHES". The traversal reads the pyramid at
+                // `v = 0.5 + 0.5*ndc.y` (hiz.glsl's toScreenspace), which is the SAME v the LOD pass
+                // wrote that fragment to — the traversal is calibrated to the source, and correctly so:
+                // the LOD pass renders with a flipped viewport (AbstractRenderPipeline's FLIP_Y), so
+                // its attachment's v=0 row really is the top of the screen. A mirrored pyramid breaks
+                // that agreement, and the cull then tests each node against the screen region
+                // diametrically opposite it. At a downward camera that region is the near ground, whose
+                // reverse-Z depth is LARGE, so `pointSample > maxBB.z` is true for any box whose
+                // mirrored tile is nearer than it — which is every distant box and no near one. That is
+                // the report exactly: the far field goes, the near field stays, at every heading, and
+                // only once the near field has been meshed and drawn enough to fill the mirrored tiles,
+                // which is why the first ~30 s of a run look correct.
+                //
+                // A negative height with originY at the target's bottom edge inverts the mapping, so
+                // output row and input row agree and the parity problem disappears for ALL levels at
+                // once — which is the reason to fix it here rather than by mirroring the lookup in
+                // toScreenspace, since that would correct the even mips and break the odd ones.
+                // ---------------------------------------------------------------------------------
+                if (BLIT_YFLIP) {
+                    encoder.setViewport(0, ch, cw, -ch, 0, 1);
+                } else {
+                    encoder.setViewport(0, 0, cw, ch, 0, 1);
+                }
+                if (!blitYFlipLogged) {
+                    blitYFlipLogged = true;
+                    me.cortex.voxy.common.Logger.info("[Metal-HIZORIENT] blit viewport "
+                            + (BLIT_YFLIP ? "FLIPPED (0,ch,cw,-ch) -- the fix" : "unflipped (0,0,cw,ch)"
+                              + " -- VOXY_HIZ_BLIT_YFLIP=0, the pre-fix arm")
+                            + "; pyramid " + this.width + "x" + this.height + " x" + this.levels + " levels");
+                }
                 encoder.draw(RenderEncoder.PRIMITIVE_TRIANGLE_STRIP, 0, 4, 1, 0);
             }
 

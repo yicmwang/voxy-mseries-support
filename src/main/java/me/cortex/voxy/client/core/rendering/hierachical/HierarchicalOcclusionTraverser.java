@@ -86,6 +86,9 @@ public class HierarchicalOcclusionTraverser {
      */
     private static final boolean CHILD_READY = !"0".equals(System.getenv("VOXY_LOD_CHILD_READY"));
 
+    /** One-shot gate for the [Metal-TRAVSW] configuration record; see the define map. */
+    private static boolean switchesLogged = false;
+
 
     private static long travStatsFrame = 0;
 
@@ -267,6 +270,23 @@ public class HierarchicalOcclusionTraverser {
         // children that have no meshes yet and leaves a hole until they arrive. The escape hatch.
         if (!CHILD_READY) {
             m.put("VOXY_LOD_NO_CHILD_READY", "");
+        }
+        // A ONE-SHOT RECORD OF WHICH TRAVERSAL SWITCHES ARE ACTUALLY ON.
+        //
+        // This exists because a switch that silently never applied makes two A/B arms the same build
+        // state, and a null result is then indistinguishable from a refutation. That has happened in
+        // this project more than once, and it very nearly happened to the Hi-Z orientation A/B on
+        // 2026-09-22: the reader-side arm (VOXY_HIZ_INDEX_YFLIP) reported "no effect" and there was no
+        // way to tell whether the define had reached the shader. It has since been removed, but the
+        // gap it exposed is general, so the traversal now states its own configuration once per run.
+        if (!switchesLogged) {
+            switchesLogged = true;
+            me.cortex.voxy.common.Logger.info("[Metal-TRAVSW] traversal switches: "
+                    + "CULL_DISABLED=" + CULL_DISABLED
+                    + " CHILD_READY=" + CHILD_READY
+                    + " TRAV_STATS=" + TRAV_STATS
+                    + " HOT_SERIALIZE=" + HOT_SERIALIZE
+                    + " | defines injected: " + m.keySet());
         }
         return m;
     }
