@@ -131,6 +131,21 @@ public class ModelFactory {
 
     // this has an issue with scaffolding i believe tho, so maybe make it a probability to render??? idk
     private final long[] metadataCache;
+
+    /**
+     * Per-(model, face) copy of the {@code faceModelData} word the bakery sends to the GPU, indexed
+     * {@code modelId*6 + face}. It is what the mesher bakes into the {@code Quad} element so the vertex
+     * stage can read the face size and face indentation WITHOUT loading {@code modelData[modelId]} —
+     * that load is the second link in {@code gl_VertexID -> quadData -> modelId -> modelData[]} and
+     * costs 14.3 % of the LOD pass's gpu. The cost is the load's latency, not its bytes: shrinking the
+     * model element 64 -> 36 bytes measured +0.8 %, i.e. nothing. See optimisation.MD §33.
+     *
+     * <p>Zero-initialised, and that is the correct value for a model that has not been baked yet: an
+     * allocated-but-not-uploaded model id already gives the shader a ZEROED {@code BlockModel}, so both
+     * paths read {@code faceData = 0} until the bake lands. No new failure mode, and no synchronisation
+     * between the mesher and the bakery is introduced.
+     */
+    private final int[] faceDataCache = new int[6 << 16];
     private final int[] fluidStateLUT;
 
     //Provides a map from id -> model id as multiple ids might have the same internal model id
@@ -597,6 +612,9 @@ public class ModelFactory {
                 metadata |= 0xFF;//Mark the face as non-existent
                 //Set to -1 as safepoint
                 MemoryUtil.memPutInt(faceUploadPtr, -1);
+                // Mirror it: the shader reads -1 here too (modelData[modelId].faceData[face]), so the
+                // baked path must not substitute 0 for a face the GPU calls empty.
+                this.faceDataCache[(modelId * 6) + face] = -1;
 
                 fullyOpaque = false;
                 continue;
@@ -683,6 +701,9 @@ public class ModelFactory {
             }
 
             MemoryUtil.memPutInt(faceUploadPtr, faceModelData);
+            // Retain the same word CPU-side for the mesher to bake into the Quad element. Written at
+            // the one place faceModelData reaches the GPU, so the two cannot disagree.
+            this.faceDataCache[(modelId * 6) + face] = faceModelData;
         }
 
         if (BAKE_DUMP
@@ -1136,6 +1157,22 @@ public class ModelFactory {
 
     public long getModelMetadataFromClientId(int clientId) {
         return this.metadataCache[clientId];
+    }
+
+    /**
+     * The baked {@code faceModelData} word for one face of one model — the CPU-side twin of
+     * {@code modelData[modelId].faceData[face]} the shader would otherwise load, and the value the
+     * mesher bakes into the {@code Quad} element.
+     *
+     * <p>Returns 0 for a model that is not baked yet, which is what the GPU would read there too (an
+     * allocated-but-not-uploaded model id yields a zeroed {@code BlockModel}), so the mesher needs no
+     * synchronisation with the bakery and does not have to wait for anything.
+     *
+     * <p>Callers must have a valid {@code modelId} — the mesher already rejects {@code -1} before it
+     * gets here (see RenderDataFactory's per-block model lookup, which returns an error for it).
+     */
+    public int getFaceModelData(int modelId, int face) {
+        return this.faceDataCache[(modelId * 6) + face];
     }
 
 

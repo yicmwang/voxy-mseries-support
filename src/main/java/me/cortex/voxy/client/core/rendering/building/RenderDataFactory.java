@@ -56,7 +56,9 @@ public class RenderDataFactory {
     //TODO: emit directly to memory buffer instead of long arrays
 
     //Each axis gets a max quad count of 2^16 (65536 quads) since that is the max the basic geometry manager can handle
-    private final MemoryBuffer quadBuffer = new MemoryBuffer(8*(8*(1<<16)));//6 faces + dual direction + translucents
+    // 16 bytes per quad (ivec3 with std430 stride, not the 8 of the old ivec2): the third int
+    // carries the quad's faceModelData. See the emission site and optimisation.MD 33.
+    private final MemoryBuffer quadBuffer = new MemoryBuffer(16*(8*(1<<16)));//6 faces + dual direction + translucents
     private final long quadBufferPtr = this.quadBuffer.address;
     private final int[] quadCounters = new int[8];
 
@@ -150,9 +152,19 @@ public class RenderDataFactory {
             long quad = data | Integer.toUnsignedLong(encodedPosition);
 
 
+            // 16 bytes per quad, not 8: the element is an ivec3 whose third int carries the quad's own
+            // faceModelData, so the vertex stage can read the face size and indentation without
+            // loading modelData[modelId]. std430 gives an ivec3 array a stride of 16, so the record is
+            // written as a long plus two ints and the last 4 bytes are padding.
             int bufferIdx = type+(type==2?face:0);//Translucent, double side, directional
-            long bufferOffset = (RenderDataFactory.this.quadCounters[bufferIdx]++)*8L + bufferIdx*8L*(1<<16);
+            long bufferOffset = (RenderDataFactory.this.quadCounters[bufferIdx]++)*16L + bufferIdx*16L*(1<<16);
             MemoryUtil.memPutLong(RenderDataFactory.this.quadBufferPtr + bufferOffset, quad);
+            // modelId, recovered from `data` with the same shift packPartialQuadData wrote it at. The
+            // low 26 bits were stripped into auxData above, so what remains starts at the model id.
+            final int quadModelId = (int) ((data >>> 26) & 0xFFFFL);
+            MemoryUtil.memPutInt(RenderDataFactory.this.quadBufferPtr + bufferOffset + 8,
+                    RenderDataFactory.this.modelMan.getFaceModelData(quadModelId, face));
+            MemoryUtil.memPutInt(RenderDataFactory.this.quadBufferPtr + bufferOffset + 12, 0);
 
 
             //Update AABB bounds
@@ -1695,13 +1707,13 @@ public class RenderDataFactory {
         }
 
         int[] offsets = new int[8];
-        var buff = new MemoryBuffer(this.quadCount * 8L);
+        var buff = new MemoryBuffer(this.quadCount * 16L);
         long ptr = buff.address;
         int coff = 0;
         for (int buffer = 0; buffer < 8; buffer++) {// translucent, double sided quads, 6 faces
             offsets[buffer] = coff;
             int size = this.quadCounters[buffer];
-            UnsafeUtil.memcpy(this.quadBufferPtr + (buffer*(8*(1<<16))), ptr + coff*8L, (size* 8L));
+            UnsafeUtil.memcpy(this.quadBufferPtr + (buffer*(16*(1<<16))), ptr + coff*16L, (size*16L));
             coff += size;
         }
 

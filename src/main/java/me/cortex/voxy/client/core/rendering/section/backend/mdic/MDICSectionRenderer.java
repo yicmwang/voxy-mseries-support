@@ -1935,8 +1935,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // table, which reads out of bounds and yields a garbage face -- and therefore a garbage
             // UV, a garbage tint and no texture. Both are cheap to decode here (quad_format.glsl:
             // face = q0&7, light = (q1>>>23)&0xFF with sky low, modelId = ((q0>>>26)&0x3F)|((q1&0x3FFF)<<6)).
-            if (gpp != 0 && qs * 8L + 8L <= geo.size()) {
-                final long qa = gpp + qs * 8L;
+            if (gpp != 0 && qs * 16L + 16L <= geo.size()) {
+                final long qa = gpp + qs * 16L;   // 16 B per quad: Quad is an ivec3 (std430 stride)
                 final int q0 = MemoryUtil.memGetInt(qa);
                 final int q1 = MemoryUtil.memGetInt(qa + 4);
                 final int light = (q1 >>> 23) & 0xFF;
@@ -2377,7 +2377,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             if (geo != null) {
                 long gp = geo.getContentsPtr();
                 if (gp != 0) {
-                    long qa = gp + quadIdx * 8L;
+                    long qa = gp + quadIdx * 16L;   // 16 B per quad
                     q0 = org.lwjgl.system.MemoryUtil.memGetInt(qa) & 0xFFFFFFFFL;
                     q1 = org.lwjgl.system.MemoryUtil.memGetInt(qa + 4) & 0xFFFFFFFFL;
                     face   = (int) ((q0 >>> 3) & 1L);
@@ -2429,7 +2429,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             long pa = pp + (long) baseInstance * 8L;
             int sPosX = org.lwjgl.system.MemoryUtil.memGetInt(pa);
             int sPosY = org.lwjgl.system.MemoryUtil.memGetInt(pa + 4);
-            long qa = gp + (Integer.toUnsignedLong(baseVertex) >> 2) * 8L;
+            long qa = gp + (Integer.toUnsignedLong(baseVertex) >> 2) * 16L;   // 16 B per quad
             int qx = org.lwjgl.system.MemoryUtil.memGetInt(qa);
             int qy = org.lwjgl.system.MemoryUtil.memGetInt(qa + 4);
 
