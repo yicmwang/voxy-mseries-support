@@ -86,9 +86,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private boolean passShapeLogged;
 
     /**
-     * The Hi-Z pyramid build. <b>OFF by default as of 2026-09-22</b>: the cull built on it removes
-     * terrain it should keep, so the pyramid is left zero-filled — whose every box answers "not
-     * occluded" — and the traversal's Hi-Z test becomes a no-op.
+     * The Hi-Z pyramid build. <b>ON by default again as of 2026-09-22</b>; {@code VOXY_HIZ_BUILD=0} is
+     * the cull-off ceiling arm. It was off for a period because the cull removed terrain it should keep
+     * — that defect was found and fixed (the pyramid's blit was writing every level vertically mirrored,
+     * lod-bugs.MD §14), and the owner's ruling was always that the cull must be repaired rather than
+     * switched off.
      *
      * <p><b>Why the default flipped, and the exact evidence.</b> The owner reported "entire LOD
      * sections randomly disappearing depending on camera angle": large regions of DISTANT LOD missing
@@ -114,13 +116,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
      * rather than abandoning. See optimisation.MD 8.8.
      */
     private static final boolean HIZ_BUILD = !"0".equals(System.getenv("VOXY_HIZ_BUILD"));
-
-    /**
-     * One-shot gate for the R32Float-depth-view probe. That probe decides whether Bug A's real fix is
-     * reachable at all, so it runs once per run and says so in the log; see the call site for the full
-     * reasoning and {@code lod-bugs.MD} §17.11.
-     */
-    private static boolean DEPTH_VIEW_PROBED = false;
 
     // Hoisted out of the per-frame body. These were `System.getenv` calls on the render path — three
     // per render pass for ATTACH_TRACE alone — and an env lookup is a native call, not a field read.
@@ -367,53 +362,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                 this.metallumDepth = me.cortex.voxy.client.core.metal.MetallumAttachmentTexture.depth();
             }
             this.metallumDepth.refresh();
-        }
-
-        // ---------------------------------------------------------------------------------------
-        // THE ONE PROBE THAT DECIDES BUG A'S REAL FIX — and it runs before anything is built on it.
-        //
-        // See lod-bugs.MD 17.11. The Hi-Z pyramid is built from THIS pass's depth-as-colour attachment,
-        // which is last frame's by construction, so the traversal culls frame N against frame N-1's
-        // depth and a moving camera slides each node's footprint onto texels describing where it used to
-        // be. MC's own depth is the fix: it is already ShaderRead, and at this point in the frame -- the
-        // tail of Sodium's SOLID pass -- it already holds THIS frame's vanilla terrain. The port even
-        // has the handle here and never uses it as the pyramid's source.
-        //
-        // It reads zeros for one reason: a Depth32Float sampled through a `sampler2D` becomes MSL
-        // `texture2d<float>`, which Metal does not allow (it wants `depth2d`). The way round it is an
-        // R32Float VIEW of the same texture, and `newTextureViewWithPixelFormat:` REFUSES to make a view
-        // whose parent lacks MTLTextureUsagePixelFormatView -- which is why metallum's
-        // MetalGpuTexture.toMtlTextureUsage now grants it to every render attachment.
-        //
-        // Whether Metal permits a Depth32Float -> R32Float view AT ALL is unverified and is the whole
-        // question: if it refuses, the fallback is a hand-written MSL `depth2d` compute pass, and none
-        // of the other three steps of the fix are worth writing. So this runs first, logs the answer,
-        // and costs one texture view per run.
-        // ---------------------------------------------------------------------------------------
-        if (this.metallumDepth != null && this.metallumDepth.metalHandle() != 0 && !DEPTH_VIEW_PROBED) {
-            DEPTH_VIEW_PROBED = true;
-            final long dh = this.metallumDepth.metalHandle();
-            final long view = me.cortex.voxy.client.core.metal.MetalNative.mtlTextureNewSubresourceView(
-                    dh, 55 /* MTLPixelFormatR32Float */,
-                    me.cortex.voxy.client.core.metal.MetalNative.mtlTextureGetTextureType(dh),
-                    0, 1, 0, 1);
-            if (view == 0L) {
-                me.cortex.voxy.common.Logger.info("[Metal-DEPTHVIEW] depth fmt="
-                        + this.metallumDepth.mtlPixelFormat() + " (" + this.metallumDepth.getWidth() + "x"
-                        + this.metallumDepth.getHeight() + ") -> R32Float view REFUSED (null). Metal does"
-                        + " not allow this format view, so the pyramid cannot read the frame's depth"
-                        + " this way and lod-bugs.MD 17.11's fallback (a hand-written MSL depth2d pass)"
-                        + " is the only route left.");
-            } else {
-                me.cortex.voxy.common.Logger.info("[Metal-DEPTHVIEW] depth fmt="
-                        + this.metallumDepth.mtlPixelFormat() + " (" + this.metallumDepth.getWidth() + "x"
-                        + this.metallumDepth.getHeight() + ") -> R32Float view OK, handle=" + view
-                        + " fmt=" + me.cortex.voxy.client.core.metal.MetalNative
-                                .mtlTextureGetPixelFormat(view)
-                        + ". The frame's own depth is readable as R32Float, so the pyramid can be built"
-                        + " from THIS frame instead of the last one.");
-                me.cortex.voxy.client.core.metal.MetalNative.mtlRelease(view);
-            }
         }
 
         // 2b) The Voxy-owned depth-texture, allocated BEFORE the build because it is the build's source.
