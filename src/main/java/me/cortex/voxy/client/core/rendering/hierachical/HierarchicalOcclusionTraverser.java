@@ -482,7 +482,20 @@ public class HierarchicalOcclusionTraverser {
                         encoder.setBuffer(NODE_DATA_BINDING, this.nodeBuffer, 0);
                         encoder.setBuffer(NODE_QUEUE_META_BINDING, this.queueMetaBuffer, 0);
                         encoder.setBuffer(RENDER_TRACKER_BINDING, this.nodeCleaner.visibilityBuffer, 0);
-                        if (RenderStatistics.enabled) {
+                        // TRAV_STATS must be here as well as at the readback. Gating only the readback
+                        // left the buffer bound to nothing, so the shader's atomicAdds went to an
+                        // unbound slot and the readback returned a buffer that was zeroed every frame
+                        // and never written -- 12 368 frames of zeros that looked like "no culling is
+                        // happening" rather than "the instrument is not connected". A diagnostic with
+                        // two gates must have both of them opened by the same switch.
+                        //
+                        // (They are exclusive, incidentally: the traversal's own bindings run 1-9 and
+                        // this one is 10, so an unbound statistics slot writes nowhere rather than over
+                        // something that matters. The two classes define the constant separately --
+                        // MDICSectionRenderer's is 8 for cmdgen -- which is fine because they are
+                        // separate shader compiles, but it is not obvious and is worth knowing before
+                        // changing either.)
+                        if (RenderStatistics.enabled || TRAV_STATS) {
                             encoder.setBuffer(STATISTICS_BUFFER_BINDING, this.statisticsBuffer, 0);
                         }
                         encoder.setTexture(HIZ_BINDING, viewport.hiZBuffer.getHizTexture());
