@@ -334,8 +334,47 @@ public final class MetalRenderEncoder implements RenderEncoder {
         }
     }
 
-    /** {@code MTLIndirectCommandBufferExecutionRange.length} is documented as at most 0x4000. */
-    private static final int ICB_EXEC_CHUNK = 0x4000;
+    /**
+     * {@code VOXY_LOD_ICB_OPTIMIZE=1}: execute a range that was populated and optimized OUTSIDE this
+     * render pass, using the CPU-ranged form.
+     *
+     * <p>No population happens here and no range buffer is touched, which is the point: an optimized
+     * range may only be executed whole and from its start, so the range must come from the CPU and must
+     * be the very (location, length) the blit encoder optimized. The caller owns that contract.
+     */
+    public void executeOptimizedIcb(IGpuIndirectCommandBuffer icb, int location, int length) {
+        if (!(icb instanceof MetalIndirectCommandBuffer m)) {
+            throw new IllegalArgumentException("executeOptimizedIcb requires MetalIndirectCommandBuffer, got "
+                    + (icb == null ? "null" : icb.getClass().getName()));
+        }
+        if (this.boundIndexBuffer == 0) {
+            throw new IllegalStateException("executeOptimizedIcb() before bindIndexBuffer()");
+        }
+        if (length <= 0) return;
+        if (location < 0 || location + length > m.maxCommands()) {
+            throw new IllegalArgumentException("executeOptimizedIcb: range [" + location + ", "
+                    + (location + length) + ") exceeds the ICB's " + m.maxCommands() + " commands");
+        }
+        // Same declaration the populate path makes: the index buffer is a draw argument, not an
+        // inherited binding, so Metal aborts validation without this.
+        MetalNative.mtlRenderEncoderUseResource(this.encoderHandle, this.boundIndexBuffer,
+                MetalNative.MTLResourceUsageRead, MetalNative.MTLRenderStageVertex);
+        for (int done = 0; done < length; done += ICB_EXEC_CHUNK) {
+            MetalNative.mtlRenderEncoderExecuteCommandsInBufferWithRange(this.encoderHandle, m.handle(),
+                    location + done, Math.min(ICB_EXEC_CHUNK, length - done));
+        }
+    }
+
+    /**
+     * {@code MTLIndirectCommandBufferExecutionRange.length} is documented as at most 0x4000.
+     *
+     * <p><b>Optimize and execute must chunk identically</b>, which is why this is public. An optimized
+     * range may only be executed WHOLE, from its start — so a single optimized range spanning several
+     * execute chunks is undefined behaviour, and it does not fail loudly: the frame comes back with
+     * geometry correct in some shots and scrambled in others. Optimizing each chunk separately keeps
+     * every executed range exactly equal to an optimized one.
+     */
+    public static final int ICB_EXEC_CHUNK = 0x4000;
 
     /**
      * Bytes between consecutive chunks' ranges within one pass's range region. 8 bytes live

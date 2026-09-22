@@ -201,6 +201,26 @@ Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderEncoderExecuteCommand
     }
 }
 
+// The CPU-ranged execute.
+//
+// `optimizeIndirectCommandBuffer` and the buffer-driven execute are mutually exclusive: an optimized
+// range may only be executed WHOLE, starting at its start, and the buffer-driven form lets the GPU
+// choose where to stop. This variant takes the range from the CPU, which is what makes the pair legal
+// -- so any caller that optimizes must execute through here, with the same (location, length) it
+// optimized.
+extern "C" JNIEXPORT void JNICALL
+Java_me_cortex_voxy_client_core_metal_MetalNative_mtlRenderEncoderExecuteCommandsInBufferWithRange(
+        JNIEnv *, jclass, jlong encoderHandle,
+        jlong icbHandle, jint location, jint length) {
+    @autoreleasepool {
+        if (encoderHandle == 0 || icbHandle == 0 || length <= 0) return;
+        id<MTLRenderCommandEncoder> encoder = voxy_handle_cast<id<MTLRenderCommandEncoder>>(encoderHandle);
+        id<MTLIndirectCommandBuffer> icb = voxy_handle_cast<id<MTLIndirectCommandBuffer>>(icbHandle);
+        [encoder executeCommandsInBuffer:icb
+                               withRange:NSMakeRange((NSUInteger)location, (NSUInteger)length)];
+    }
+}
+
 // ---------- Optional optimization pass (blit encoder side) ----------
 
 extern "C" JNIEXPORT void JNICALL

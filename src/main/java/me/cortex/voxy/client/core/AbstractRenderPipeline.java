@@ -675,6 +675,27 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             }
             return;
         }
+        // VOXY_LOD_ICB_OPTIMIZE=1: populate and optimize the ICBs BEFORE the render pass opens.
+        //
+        // This is the only place it can happen. optimizeIndirectCommandBuffer is a blit-encoder call
+        // and a command buffer has one encoder at a time, so it cannot be issued from inside the pass
+        // the ICB is executed in -- and populating up front is what lets the sequence be
+        // populate -> optimize -> execute, which is the order the API requires. No-op unless the
+        // switch is on. See MDICSectionRenderer.prepareIcb.
+        if (me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_OPTIMIZE
+                && this.sectionRenderer instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICSectionRenderer mdic0
+                && viewport instanceof me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport mv0) {
+            // THE DRAIN MUST COME FIRST, and this is the whole reason the optimized path is arranged
+            // this way. prepareIcb reads the draw list and the draw counts on the CPU; on Metal those
+            // are GPU-written, and until the prepasses are waited for the read is a frame stale -- the
+            // geometry then lands at another section's origin, keeping its own baked light, which is
+            // bug 3 exactly. The ordinary drain lives further down, INSIDE the pass, where it is too
+            // late for a read that has already happened.
+            //
+            // It is idempotent, so the later call finds nothing pending and costs nothing.
+            backend.awaitCommitted();
+            mdic0.prepareIcb(mv0);
+        }
         try (var enc = backend.beginRenderPass(pass)) {
             // Y orientation. Metal's setViewport maps NDC y=+1 to originY, i.e. the TOP of the
             // target, which is the opposite of the GL-style bottom-up convention MC's framebuffer

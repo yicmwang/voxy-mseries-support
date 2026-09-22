@@ -1094,6 +1094,139 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      *       post-buildDrawCalls submit), so stale slots are never drawn.</li>
      * </ul>
      */
+    /**
+     * {@code VOXY_LOD_ICB_OPTIMIZE=1}: populate all three ICB regions from the CONSUME slot and run
+     * {@code optimizeIndirectCommandBuffer:withRange:} over each, <b>before the LOD render pass opens</b>.
+     *
+     * <p>Why before the pass. {@code optimize} is declared only on MTLBlitCommandEncoder and a command
+     * buffer has exactly one encoder at a time, so it cannot be called from inside the render pass the
+     * ICB is executed in. Populating up front is therefore not a stylistic choice — it is the only place
+     * the sequence populate → optimize → execute can happen in that order.
+     *
+     * <p>It is also the reason the counts are cached here: an optimized range must be executed whole and
+     * from its start, so the range executed later must be bit-identical to the range optimized now. Two
+     * independent reads of the same GPU-written count would be a race with undefined behaviour rather
+     * than a benign discrepancy.
+     *
+     * <p>The draw list read is the consume slot — the previous frame's, already complete — so none of
+     * this needs a fence.
+     */
+    public void prepareIcb(MDICViewport viewport) {
+        this.icbPrepared = false;
+        if (!MDICViewport.ICB_OPTIMIZE) return;
+        var icb = viewport.drawIcb(viewport.frameId);
+        if (icb == null) return;
+        if (this.geometryManager.getSectionCount() == 0 || this.terrainPipeline == null) return;
+        if (!(viewport.drawCallConsume(viewport.frameId)
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer)) {
+            return;
+        }
+        // The index buffer is a DRAW ARGUMENT of each ICB command, not an inherited binding, so it has
+        // to be known here. renderTerrainMetal binds exactly these values before executing, and the
+        // commands were baked with them, so the two agree by construction.
+        var indexBuffer = me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer.INSTANCE.getBuffer();
+        long indexHandle = me.cortex.voxy.client.core.metal.MetalHandleMap.getHandle(indexBuffer.id());
+        if (indexHandle == 0) return;
+        int indexType = me.cortex.voxy.client.core.gpu.RenderEncoder.INDEX_TYPE_UINT16;
+        long indexBytes = indexType == me.cortex.voxy.client.core.metal.MetalNative.MTLIndexTypeUInt16 ? 2L : 4L;
+        int stride = 5 * 4;
+        var drawList = viewport.drawCallConsume(viewport.frameId);
+        if (!(drawList instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) || mb.getContentsPtr() == 0) {
+            return;
+        }
+        long contents = mb.getContentsPtr();
+
+        int sectionCount = this.geometryManager.getSectionCount();
+        this.icbCountOpaque = metalDrawCount(viewport, OPAQUE_DRAW_COUNT_OFFSET,
+                Math.min((int) (sectionCount * 4.4 + 128), 400_000));
+        this.icbCountTemporal = metalDrawCount(viewport, TEMPORAL_DRAW_COUNT_OFFSET,
+                Math.min(sectionCount, 100_000));
+        this.icbCountTranslucent = metalDrawCount(viewport, TRANSLUCENT_DRAW_COUNT_OFFSET,
+                Math.min(sectionCount, 100_000));
+
+        var backend = me.cortex.voxy.client.core.gpu.RenderBackendFactory.get();
+        int[][] passes = {
+                { me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_OPAQUE,
+                  0, this.icbCountOpaque },
+                { me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TEMPORAL,
+                  TEMPORAL_OFFSET * 5 * 4, this.icbCountTemporal },
+                { me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TRANSLUCENT,
+                  TRANSLUCENT_OFFSET * 5 * 4, this.icbCountTranslucent },
+        };
+        for (int[] p : passes) {
+            int baseIndex = p[1] / stride;
+            int count = p[2];
+            if (count <= 0) continue;
+            populateIcbRegion(icb, contents, p[1], count, stride, baseIndex,
+                    indexHandle, indexType, indexBytes);
+            // Optimize the EXACT ranges the pass will later execute, CHUNK BY CHUNK.
+            //
+            // Not one range spanning the whole region: an optimized range may only be run whole and
+            // from its start, and the execute side chunks at 0x4000 because that is the documented
+            // ceiling on the execution range. One optimized range over ~19 700 commands executed as
+            // [0,16384) + [16384,19700) is two partial runs of an optimized range -- undefined, and
+            // silently so: measured, it rendered correctly in some shots and scrambled in others.
+            //
+            // Optimizing each execute-sized chunk separately makes every executed range exactly equal
+            // to an optimized one. The chunk size is shared, not duplicated, so the two cannot drift.
+            if (backend instanceof me.cortex.voxy.client.core.metal.MetalRenderBackend mrb) {
+                int chunk = me.cortex.voxy.client.core.metal.MetalRenderEncoder.ICB_EXEC_CHUNK;
+                for (int done = 0; done < count; done += chunk) {
+                    mrb.optimizeIndirectCommandBuffer(icb, baseIndex + done,
+                            Math.min(chunk, count - done));
+                }
+            }
+        }
+        // Periodically, not once. A one-shot log fires on frame 1 -- when the consume slot is still
+        // empty and every count is legitimately 0 -- and then reports zeros forever while looking like
+        // a subject check. Every 600 frames shows the real counts and still costs nothing.
+        if ((ICB_OPT_LOGGED++ % 600) == 1) {
+            Logger.info("[Metal-ICBOPT] optimized ICB ranges before the pass: opaque=" + this.icbCountOpaque
+                    + " temporal=" + this.icbCountTemporal + " translucent=" + this.icbCountTranslucent
+                    + " (executed whole via executeCommandsInBuffer:withRange:)");
+        }
+        this.icbPrepared = true;
+    }
+
+    private static long ICB_OPT_LOGGED = 0;
+
+    /** Bakes one pass's draws into its ICB region. CPU-only; needs no encoder and no fence. */
+    private static void populateIcbRegion(
+            me.cortex.voxy.client.core.gpu.IGpuIndirectCommandBuffer icb, long contents,
+            long offset, int drawCount, int stride, int baseIndex,
+            long indexHandle, int indexType, long indexBytes) {
+        if (!(icb instanceof me.cortex.voxy.client.core.metal.MetalIndirectCommandBuffer m)) return;
+        m.reset(baseIndex, drawCount);
+        for (int i = 0; i < drawCount; i++) {
+            long cmdAddr = contents + offset + (long) i * stride;
+            int count = org.lwjgl.system.MemoryUtil.memGetInt(cmdAddr);
+            int instanceCount = org.lwjgl.system.MemoryUtil.memGetInt(cmdAddr + 4);
+            int firstIndex = org.lwjgl.system.MemoryUtil.memGetInt(cmdAddr + 8);
+            int baseVertex = org.lwjgl.system.MemoryUtil.memGetInt(cmdAddr + 12);
+            int baseInstance = org.lwjgl.system.MemoryUtil.memGetInt(cmdAddr + 16);
+            m.encodeDrawIndexedPrimitives(baseIndex + i,
+                    me.cortex.voxy.client.core.metal.MetalNative.MTLPrimitiveTypeTriangle,
+                    count, indexType, indexHandle, (long) firstIndex * indexBytes,
+                    instanceCount, baseVertex, baseInstance);
+        }
+    }
+
+    /** The count {@link #prepareIcb} cached for a pass, or -1 when it did not prepare. */
+    private int icbPreparedCount(int passIdx) {
+        return switch (passIdx) {
+            case me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_OPAQUE ->
+                    this.icbCountOpaque;
+            case me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TEMPORAL ->
+                    this.icbCountTemporal;
+            default -> this.icbCountTranslucent;
+        };
+    }
+
+    private boolean icbPrepared = false;
+    private int icbCountOpaque = -1;
+    private int icbCountTemporal = -1;
+    private int icbCountTranslucent = -1;
+
     public void renderOpaqueMetal(me.cortex.voxy.client.core.gpu.RenderEncoder encoder, MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
         pfDraws = pfLightZero = pfModelOob = pfCoarse = pfOrphan = pfStraddle = pfSampled = pfEmptyQuad
@@ -2160,12 +2293,20 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     : indirectOffset == (long) TEMPORAL_OFFSET * stride
                             ? me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TEMPORAL
                             : me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_PASS_TRANSLUCENT;
-            mre.drawIndexedIndirectIcb(
-                    me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
-                    icb, viewport.drawCallConsume(viewport.frameId), indirectOffset, maxDrawCount,
-                    stride, baseIndex,
-                    viewport.icbRangeBuffer,
-                    passIdx * me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_RANGE_STRIDE);
+            if (this.icbPrepared) {
+                // Optimized path: the region was populated and optimized before the pass opened, so
+                // there is nothing to encode here -- only to execute, with the very range that was
+                // optimized. Re-populating now would leave the optimized range holding different
+                // commands, which is the undefined case, not a slow one.
+                mre.executeOptimizedIcb(icb, baseIndex, icbPreparedCount(passIdx));
+            } else {
+                mre.drawIndexedIndirectIcb(
+                        me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
+                        icb, viewport.drawCallConsume(viewport.frameId), indirectOffset, maxDrawCount,
+                        stride, baseIndex,
+                        viewport.icbRangeBuffer,
+                        passIdx * me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_RANGE_STRIDE);
+            }
         } else {
             encoder.drawIndexedIndirect(
                     me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,

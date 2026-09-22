@@ -879,6 +879,17 @@ public final class MetalNative {
             long encoder, long icb, long rangeBuffer, long rangeOffset);
 
     /**
+     * Encode {@code executeCommandsInBuffer:withRange:} — the CPU-ranged form.
+     *
+     * <p>Required whenever {@link #mtlBlitEncoderOptimizeIndirectCommandBuffer} has been used on the
+     * same range: an optimized range may only be executed whole and from its start, which the
+     * buffer-driven form cannot promise because the GPU picks the end. The caller must pass exactly the
+     * (location, length) it optimized.
+     */
+    public static native void mtlRenderEncoderExecuteCommandsInBufferWithRange(
+            long encoder, long icb, int location, int length);
+
+    /**
      * Declare an MTLResource as used by the encoder — needed for any
      * buffer/texture an ICB's commands reference indirectly (Metal can't
      * statically track those). usage: MTLResourceUsageRead|Write|Sample.

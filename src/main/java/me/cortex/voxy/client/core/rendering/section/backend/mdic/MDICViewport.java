@@ -155,6 +155,21 @@ public class MDICViewport extends Viewport<MDICViewport> {
     private static final boolean LOD_ICB = "1".equals(System.getenv("VOXY_LOD_ICB"));
 
     /**
+     * {@code VOXY_LOD_ICB_OPTIMIZE=1} additionally runs {@code optimizeIndirectCommandBuffer:withRange:}
+     * over each pass's region, and therefore executes through the CPU-ranged form.
+     *
+     * <p>The two are inseparable. An optimized range may only be run whole and from its start, and the
+     * buffer-driven execute lets the GPU choose the end — so optimizing without also switching the
+     * execute is undefined behaviour, not just a missed optimization. This flag switches both, together,
+     * on purpose. It implies {@link #LOD_ICB}.
+     *
+     * <p>It also forces the populate-and-optimize to happen BEFORE the LOD render pass opens, because
+     * {@code optimize} is a blit-encoder call and a command buffer has only one encoder at a time. See
+     * {@code MDICSectionRenderer.prepareIcb}.
+     */
+    public static final boolean ICB_OPTIMIZE = "1".equals(System.getenv("VOXY_LOD_ICB_OPTIMIZE"));
+
+    /**
      * One ICB command per slot of {@link #drawCallBuffer}, laid out the SAME way: opaque at 0,
      * translucent at 400 000, temporal at 500 000.
      *
@@ -254,6 +269,14 @@ public class MDICViewport extends Viewport<MDICViewport> {
             this.positionRing[i].free();
             this.drawCallRing[i].free();
             this.drawCountRing[i].free();
+        }
+        // The ICB ring and its range buffer exist only under VOXY_LOD_ICB=1, so unlike the rings above
+        // there is no slot 0 -- every slot is ours to free, and all of them are null when it is off.
+        if (this.icbRing != null) {
+            for (IGpuIndirectCommandBuffer icb : this.icbRing) {
+                icb.close();
+            }
+            this.icbRangeBuffer.free();
         }
     }
 

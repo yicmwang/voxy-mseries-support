@@ -530,6 +530,40 @@ public class MetalRenderBackend implements RenderBackend {
      * throwaway one — and the owner path keeps batching, since committing the buffer is a clean
      * boundary that closes encoders anyway.
      */
+    /**
+     * {@code VOXY_LOD_ICB_OPTIMIZE=1}: run {@code optimizeIndirectCommandBuffer:withRange:} over a range
+     * of an ICB that has just been CPU-populated.
+     *
+     * <p>Same encoder discipline as {@link #copyBufferSubData}: it takes the blit encoder slot rather
+     * than opening one while a caller's render pass is still encoding, because Metal refuses a second
+     * encoder on the same command buffer. <b>That is the whole reason the ICB path populates and
+     * optimizes BEFORE the LOD pass opens</b> -- there is no legal place to optimize from inside the
+     * pass, and the LOD pass is the only place the ICB is executed.
+     *
+     * <p>This is the API that makes an ICB cheap to execute: it removes blank commands and duplicated
+     * state that the GPU would otherwise spend time skipping. Voxy's draw list is compact by
+     * construction, so what it has to work with here is small -- see optimisation.MD 32.
+     */
+    public void optimizeIndirectCommandBuffer(me.cortex.voxy.client.core.gpu.IGpuIndirectCommandBuffer icb,
+                                              int location, int length) {
+        if (location < 0 || length <= 0) return;
+        if (!(icb instanceof MetalIndirectCommandBuffer m)) {
+            throw new IllegalArgumentException("optimizeIndirectCommandBuffer requires MetalIndirectCommandBuffer");
+        }
+        this.ensureActiveCommandBuffer();
+        if (this.activeBlitEncoder == 0) {
+            this.endForeignEncoderIfNeeded();
+            this.activeBlitEncoder = MetalNative.mtlCommandBufferNewBlitEncoder(this.activeCommandBuffer);
+            if (this.activeBlitEncoder == 0) {
+                throw new RuntimeException("mtlCommandBufferNewBlitEncoder returned NULL");
+            }
+        }
+        MetalNative.mtlBlitEncoderOptimizeIndirectCommandBuffer(this.activeBlitEncoder, m.handle(),
+                location, length);
+        this.activeBufferHasBlits = true;
+        this.closeBlitEncoderIfGuest();
+    }
+
     private void closeBlitEncoderIfGuest() {
         if (!this.ownsActiveCommandBuffer) {
             this.endActiveBlitEncoder();
