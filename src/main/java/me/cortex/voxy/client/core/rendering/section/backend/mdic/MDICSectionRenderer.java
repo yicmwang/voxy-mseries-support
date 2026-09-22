@@ -1347,6 +1347,65 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 "[Metal-LODDRAW f=%d] sections=%d  rawOpaqueCount=%d  maxDrawCount=%d  %s",
                 LOD_DIAG_FRAME, sectionCount, rawOpaque, maxDrawCount,
                 maxDrawCount == 0 ? "<-- NO DRAWS ISSUED" : "drawing"));
+
+        // GEOMETRY -- a separate line, deliberately, because [Metal-LODDRAW] above is parsed by
+        // position in ab_cull_surface.sh / ab_occ.sh / tools/parse_perf.py and adding fields to it
+        // would move the tokens those read.
+        //
+        // This is the number the whole cost question turns on and nothing in this project has ever
+        // reported it. `rawOpaqueCount` counts DRAWS. The probes between them -- a 1x1 scissor
+        // (fragments), the ICB (per-draw state) and NOLIGHT (the vertex lightmap fetch) -- each removed
+        // a candidate and moved `gpu` by nothing, which leaves VERTEX SHADING and PRIMITIVE ASSEMBLY as
+        // the LOD pass's entire ~16 ms (optimisation.MD 32.4).
+        //
+        // A draw count cannot describe that, and it is also why the pass's cost SATURATES rather than
+        // scaling with it: one section at LOD detail 0 and one at detail 5 are both "a draw", and differ
+        // by orders of magnitude in geometry. tris here is the primitive count the GPU must assemble
+        // and clip, and indices/3 is a lower bound on vertex-shader invocations (the post-transform
+        // cache dedupes, so the true count is between indices/6 and indices).
+        long indices = 0;
+        int nonEmpty = 0;
+        int maxIdx = 0;
+        // ALL THREE slices, because the frame draws all three and only the opaque one has ever been
+        // counted. cmdgen writes a temporal duplicate of any section flagged for temporal reuse
+        // (`if (renderTemporally) writeCmd(tCmdPtr++, ...)`), so if that set is large the frame is
+        // submitting the SAME geometry twice and no existing counter shows it.
+        long[] sliceIdx = new long[3];
+        int[] sliceN = new int[3];
+        if (viewport.drawCallConsume(viewport.frameId)
+                instanceof me.cortex.voxy.client.core.metal.MetalBuffer mb) {
+            long p = mb.getContentsPtr();
+            long[] bases = {0L, (long) TEMPORAL_OFFSET * 20L, (long) TRANSLUCENT_OFFSET * 20L};
+            for (int s = 0; s < 3; s++) {
+                int n = rawOpaqueCount(viewport,
+                        s == 0 ? OPAQUE_DRAW_COUNT_OFFSET
+                                : s == 1 ? TEMPORAL_DRAW_COUNT_OFFSET : TRANSLUCENT_DRAW_COUNT_OFFSET);
+                if (n < 0) continue;
+                for (int i = 0; i < n; i++) {
+                    int c = MemoryUtil.memGetInt(p + bases[s] + (long) i * 20L);
+                    if (c > 0) {
+                        sliceN[s]++;
+                        sliceIdx[s] += Integer.toUnsignedLong(c);
+                    }
+                }
+            }
+            for (int i = 0; i < maxDrawCount; i++) {
+                int c = MemoryUtil.memGetInt(p + (long) i * 20L);   // DrawElementsIndirectCommand.count
+                if (c > 0) {
+                    nonEmpty++;
+                    indices += Integer.toUnsignedLong(c);
+                    if (c > maxIdx) maxIdx = c;
+                }
+            }
+        }
+        long allIdx = sliceIdx[0] + sliceIdx[1] + sliceIdx[2];
+        me.cortex.voxy.common.Logger.info(String.format(
+                "[Metal-LODGEOM f=%d] indices=%d  tris=%d  nonEmpty=%d  maxIdx=%d  avgIdx=%.1f"
+                        + "  |  allTris=%d  opaque=%d/%d  temporal=%d/%d  translucent=%d/%d",
+                LOD_DIAG_FRAME, indices, indices / 3, nonEmpty, maxIdx,
+                nonEmpty == 0 ? 0.0 : (double) indices / nonEmpty,
+                allIdx / 3, sliceN[0], sliceIdx[0] / 3, sliceN[1], sliceIdx[1] / 3,
+                sliceN[2], sliceIdx[2] / 3));
     }
 
     /** Raw (unclamped) value at the opaque draw-count offset, or -1 if unreadable. */
