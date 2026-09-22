@@ -30,6 +30,28 @@ public class VoxyClient implements ClientModInitializer {
     /** How often {@code VOXY_DEV_TIME} re-issues {@code time set} to hold the clock still. */
     private static final int REPIN_TICKS = 100;
 
+    // -------------------------------------------------------------------------------------------
+    // SPIN-TEST ANCHOR STATE. The full method, its caveats and its usage are in optimisation.MD 29;
+    // read that before changing anything here.
+    //
+    // Why this is shared static state rather than two locals: the camera spin and the screenshot
+    // capture are configured in two separate blocks of onInitializeClient that do not share a scope,
+    // and they used to run on INDEPENDENT CLOCKS -- the spin on its own tick counter, the capture on
+    // System.nanoTime. Their phase therefore drifted, and screenshot N of two IDENTICAL runs landed on
+    // different headings. Measured 2026-09-21: 43-46 % of pixels differed, mean abs diff ~12.5, and
+    // the spread across eight shots was under 1 point -- a constant offset, not noise.
+    //
+    // In spin-test mode the capture is driven BY THE SPIN'S TICK COUNT, so shot k is taken at exactly
+    // baseYaw + spin*k*interval degrees. That is deterministic in k, and independent of frame rate and
+    // of how long the world took to load, which is the whole point.
+    // -------------------------------------------------------------------------------------------
+    /** Ticks elapsed since the anchor. The spin's own counter is reset to zero at the same moment. */
+    private static final int[] SPIN_TEST_TICKS = {0};
+    /** False until the settle has elapsed and the pose has been re-asserted; the capture waits for it. */
+    private static volatile boolean SPIN_TEST_ARMED = false;
+    /** Shots taken since the anchor. Shot k is taken at a yaw this counter makes exactly known. */
+    private static final int[] SPIN_TEST_SHOTS = {0};
+
     /** An integer env var, or the default when unset, blank or unparseable. */
     private static int parseEnvIntDefault(final String name, final int def) {
         final String v = System.getenv(name);
@@ -154,6 +176,11 @@ public class VoxyClient implements ClientModInitializer {
         // desktop screencapture (which fails when other windows are
         // frontmost on the test machine).
         String autoShot = System.getenv("VOXY_AUTO_SCREENSHOT");
+        // VOXY_SPIN_TEST=1: capture on the SPIN's clock instead of the wall clock. See SPIN_TEST_TICKS
+        // above and optimisation.MD 29. It needs VOXY_DEV_CAM_SPIN and VOXY_AUTO_SCREENSHOT to be set
+        // too -- without a spin there is no angle to be deterministic about, and without a capture
+        // interval there are no frames. A no-op if either is missing, rather than a silent half-mode.
+        final boolean spinTest = "1".equals(System.getenv("VOXY_SPIN_TEST"));
         if (autoShot != null && !autoShot.isBlank()) {
             int parsedInterval;
             try {
@@ -162,16 +189,32 @@ public class VoxyClient implements ClientModInitializer {
                 parsedInterval = 10;
             }
             final long intervalNanos = parsedInterval * 1_000_000_000L;
+            final int spinTestIntervalTicks = parsedInterval * 20;
             final long[] last = {System.nanoTime()};
             net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
                 if (client.level == null || client.gameRenderer.mainRenderTarget() == null) return;
+                if (spinTest) {
+                    // Shot k is due once the spin has advanced k intervals from the anchor. Driven by
+                    // the TICK COUNT, never by elapsed wall time, so a slow frame or a long load
+                    // cannot shift which heading a given shot number lands on. Shot 0 is taken by the
+                    // anchor block itself (VoxyClient's camera pin), which is why this starts at k=1.
+                    if (!SPIN_TEST_ARMED) return;
+                    if (SPIN_TEST_TICKS[0] < SPIN_TEST_SHOTS[0] * spinTestIntervalTicks) return;
+                    SPIN_TEST_SHOTS[0]++;
+                    net.minecraft.client.Screenshot.grab(client.gameDirectory,
+                            client.gameRenderer.mainRenderTarget(), component -> {});
+                    Logger.info("VOXY_SPIN_TEST shot " + (SPIN_TEST_SHOTS[0] - 1)
+                            + " taken at spin tick " + SPIN_TEST_TICKS[0]);
+                    return;
+                }
                 long now = System.nanoTime();
                 if (now - last[0] < intervalNanos) return;
                 last[0] = now;
                 net.minecraft.client.Screenshot.grab(client.gameDirectory,
                         client.gameRenderer.mainRenderTarget(), component -> {});
             });
-            Logger.info("VOXY_AUTO_SCREENSHOT active: every " + parsedInterval + "s");
+            Logger.info("VOXY_AUTO_SCREENSHOT active: every " + parsedInterval + "s"
+                    + (spinTest ? " (SPIN-RELATIVE: driven by the spin tick counter)" : ""));
         }
 
         // VOXY_DEV_TIME=<time>: pin the world clock a few seconds after joining, so screenshots are
@@ -408,12 +451,47 @@ public class VoxyClient implements ClientModInitializer {
                         Logger.info("VOXY_DEV_CAM active: pinned the camera to " + tpArgs);
                         return;
                     }
+                    // SPIN-TEST ANCHOR. See optimisation.MD 29.
+                    //
+                    // The camera is pinned above; this waits out the settle and then marks a SINGLE
+                    // instant from which both the spin and the capture are measured. Until it fires,
+                    // the world is still streaming LOD in and the frame is not yet what a run should be
+                    // compared against -- which is why the settle exists rather than starting at the
+                    // pin.
+                    //
+                    // At the anchor: the spin's own tick counter is zeroed and the pose is re-asserted,
+                    // so the yaw is EXACTLY baseYaw at shot 0 and exactly baseYaw + spin*k*interval at
+                    // shot k. That is the property the whole method rests on -- the numbers no longer
+                    // depend on how long the world took to load.
+                    //
+                    // SPIN_TEST_TICKS doubles as the settle counter before the anchor fires, then is
+                    // reset to 0 and becomes the spin clock. One field, two uses, no extra state.
+                    if ("1".equals(System.getenv("VOXY_SPIN_TEST")) && !SPIN_TEST_ARMED) {
+                        final int settleTicks = parseEnvIntDefault("VOXY_SPIN_SETTLE", 15) * 20;
+                        if (SPIN_TEST_TICKS[0]++ < settleTicks) return;
+                        driftTicks[0] = 0;
+                        SPIN_TEST_TICKS[0] = 0;
+                        SPIN_TEST_SHOTS[0] = 1;   // shot 0 is taken right here; this is the NEXT index
+                        SPIN_TEST_ARMED = true;
+                        commands.performPrefixedCommand(source, "tp @s " + tpArgs);
+                        net.minecraft.client.Screenshot.grab(client.gameDirectory,
+                                client.gameRenderer.mainRenderTarget(), component -> {});
+                        Logger.info("VOXY_SPIN_TEST armed after " + (settleTicks / 20)
+                                + "s settle: shot 0 at yaw " + baseYaw + " pitch " + basePitch
+                                + ", then one shot per " + parseEnvIntDefault("VOXY_AUTO_SCREENSHOT", 2)
+                                + "s of spin. Shots are numbered by capture order.");
+                        return;
+                    }
+
                     // Re-assert periodically: the first tp can land before the world finishes loading
                     // the chunks under it, and MC will nudge a player that ends up inside geometry.
                     // Under drift it re-asserts every tick, which is what makes the motion continuous
                     // rather than a one-block step per second.
                     if (drift != 0 || spin != 0) {
                         driftTicks[0]++;
+                        // The capture's clock, advanced in lockstep with the spin's -- this is what
+                        // makes shot k's heading deterministic. See the anchor above.
+                        if (SPIN_TEST_ARMED) SPIN_TEST_TICKS[0]++;
                         if (reapplyCountdown[0]-- > 0) return;
                         reapplyCountdown[0] = 1;
                         final String args;
