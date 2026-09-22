@@ -12,19 +12,13 @@ import static org.lwjgl.opengl.GL11.GL_RGBA8;
 
 public class ModelStore {
     /**
-     * Bytes per model entry. 64 by default, which is 36 bytes of data followed by 28 bytes of padding
-     * ({@code BlockModel._pad[7]}) — the padding is written by nobody, since {@code ModelFactory} fills
-     * offsets 0..35 and stops.
-     *
-     * <p>{@code VOXY_MODEL_TIGHT=1} drops the padding to 36. It must be set together with the shader
-     * define of the same name, because the struct in {@code block_model.glsl} defines the layout the
-     * GPU reads; {@code MDICSectionRenderer} injects the define from the same environment variable, so
-     * flipping one flag moves both sides.
-     *
-     * <p>It exists as a bytes-vs-latency discriminator: the load count and every index are identical
-     * between the two settings, so a change in {@code gpu} is attributable purely to bytes per element.
+     * Bytes per model entry: 36 bytes of data (faceData 0..23, flagsA 24, colourTint 28, customId 32)
+     * followed by 28 bytes of padding that nothing writes. A switch once made this 36 to test whether
+     * the vertex stage's 14 % model-load cost was bandwidth; it moved {@code gpu} by +0.8 %, i.e.
+     * nothing, which is how that cost was pinned to the load's latency instead. The padding is
+     * performance-irrelevant — do not remove it expecting a win. {@code optimisation.MD} §33.
      */
-    public static final int MODEL_SIZE = "1".equals(System.getenv("VOXY_MODEL_TIGHT")) ? 36 : 64;
+    public static final int MODEL_SIZE = 64;
     final IGpuBuffer modelBuffer;
     final IGpuBuffer modelColourBuffer;
     final IGpuTexture textures;
