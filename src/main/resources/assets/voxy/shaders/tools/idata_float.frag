@@ -1,6 +1,17 @@
 #version 460 core
 
-// The FRAGMENT HALF OF THE PROPOSED FIX, paired with a case that patches quads3.vert to match.
+// CORRECTION (2026-09-21, optimisation.MD 16). This file was written to separate the INTEGER TYPE from
+// the FLAT QUALIFIER as the ICB blocker. **Both were wrong.** Case 90 (a flat varying with no texture
+// behind it) PASSES, so `flat` is not the trigger; and the smooth-carrier replacement fails too, so
+// the type is not either. The measured rule is: **a texture sample in the VERTEX whose result reaches
+// a varying the FRAGMENT declares** -- here, `interData.y` carries `packVec4(getLighting(...))`, a
+// vertex texture fetch. See optimisation.MD 16 for the case table.
+//
+// This case still FAILS, so it remains a usable negative control -- but it no longer discriminates
+// what it was written to discriminate. The reasoning below is kept only as a record of a superseded
+// inference; do not act on it.
+//
+// The FRAGMENT HALF OF A PROPOSED FIX, paired with a case that patches quads3.vert to match.
 //
 // Case 13 isolated the ICB blocker to `flat uvec4 interData` -- an unsigned-integer, flat-qualified
 // varying. That leaves two candidate causes, and they imply very different amounts of work:

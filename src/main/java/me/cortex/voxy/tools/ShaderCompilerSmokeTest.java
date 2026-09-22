@@ -44,6 +44,18 @@ public final class ShaderCompilerSmokeTest {
                 "HAS_STATISTICS", "1",
                 "STATISTICS_BUFFER_BINDING", "8");
 
+        // Mirrors MDICSectionRenderer.sectionCullDefines() — keep the two in sync. HIZ_BINDING has to
+        // be injected rather than declared: hiz.glsl is shared with the traversal, whose HIZ_BINDING
+        // comes from Java the same way, and a layout id that is still an unexpanded macro is what this
+        // harness rejects. The shader declares all five for itself too, so injection is a check on the
+        // values the Java path passes, not the only definition.
+        Map<String, String> sectionCullDefines = Map.of(
+                "VISIBILITY_BUFFER_BINDING", "2",
+                "VISIBILITY_ACCESS", "writeonly",
+                "INDIRECT_SECTION_LOOKUP_BINDING", "3",
+                "SECTION_METADATA_BUFFER_BINDING", "1",
+                "HIZ_BINDING", "0");
+
         // Defines for M9-migrated shaders — keep in sync with the Java callers
         // (FullscreenBlit constructors in AbstractRenderPipeline / NormalRenderPipeline).
         Map<String, String> blitDepthCutoutFog = Map.of("EMIT_COLOUR", "", "USE_ENV_FOG", "");
@@ -188,9 +200,13 @@ public final class ShaderCompilerSmokeTest {
                         "lod/gl46/buildtranslucents.comp"),
                 // lod/gl46/cull/raster.vert|frag are deleted: their only dispatcher was
                 // MDICSectionRenderer's GL occlusion-cull arm, which is gone.
-                // M12 chunk 5 Metal cull stub — force-all-visible compute.
-                new ShaderCase("lod/gl46/force_all_visible.comp", RuntimeShaderCompiler.Stage.COMPUTE, empty,
-                        "lod/gl46/force_all_visible.comp (M12 Metal cull stub)"),
+                // The per-section occlusion cull, which replaced the M12 chunk-5 force-all-visible
+                // stub (that name became a lie once it started culling, so the shader is
+                // section_cull.comp). Case-compiled with the defines the renderer injects; it has no
+                // other compiler but this one and the client's startup.
+                new ShaderCase("lod/gl46/section_cull.comp", RuntimeShaderCompiler.Stage.COMPUTE,
+                        sectionCullDefines,
+                        "lod/gl46/section_cull.comp (per-section Hi-Z cull)"),
                 // Phase C (issue #11) material g-buffer: quads.frag's PATCHED_SHADER
                 // path + the MetalVxGbufferEmitter appended, writing the 3 MRT planes.
                 // Probes that this permutation transpiles to MSL on Apple before the

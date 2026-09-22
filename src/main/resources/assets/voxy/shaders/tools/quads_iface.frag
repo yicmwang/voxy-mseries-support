@@ -1,5 +1,16 @@
 #version 460 core
 
+// CORRECTION (2026-09-21, optimisation.MD 16): the interface this file declares is quads3.vert's, and
+// it is still right -- but its HEADER USED TO SAY the ICB blocker was `flat`. It is not. Cases 90 and
+// 95-99 measure the real rule: **a texture sample in the VERTEX whose result reaches a varying the
+// FRAGMENT declares**. A flat varying with no texture behind it is ACCEPTED (case 90); the terrain
+// vertex's lightmap fetch (`getLighting` -> `texture(lightSampler, ...)` inside
+// `makeRemainingAttributes`) is what every rejected case has in common. Cases 12 vs 13/14 differed in
+// sample-dependence, not flatness, and the flat theory was inferred from that confounded pair.
+//
+// The real fix is therefore to move the lightmap sample out of the vertex, NOT to change the carrier
+// -- which is why the split-carrier change was reverted as cost-only.
+//
 // Toy fragment that matches quads3.vert's OUTPUT INTERFACE exactly, so a pipeline pairing the real
 // terrain vertex with a trivial fragment actually LINKS.
 //

@@ -236,6 +236,20 @@ public class HiZBuffer {
         return this.texture;
     }
 
+    /**
+     * The pyramid's NEAREST/NEAREST/CLAMP_TO_EDGE sampler — the same configuration the traversal
+     * builds its own copy of, because the pyramid's texels must be read exactly as written: the
+     * occlusion test compares integer mip levels' texels against a box depth, so any filtering
+     * invents occluders. Exposed so a second consumer (the per-section cull pass) binds this one
+     * instead of a third copy.
+     *
+     * <p>Ownership stays here: {@link #free()} closes it, so a sharer must NOT close it, and must
+     * not outlive the owning {@code HiZBuffer}.
+     */
+    public IGpuSampler getSampler() {
+        return this.sampler;
+    }
+
     public int getPackedLevels() {
         return (this.width << 16) | this.height;
     }

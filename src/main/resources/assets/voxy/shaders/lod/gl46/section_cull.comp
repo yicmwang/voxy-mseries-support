@@ -1,0 +1,171 @@
+#version 430
+// Same as quads3.vert / cmdgen.comp: quad_format.glsl picks its Quad representation off
+// GL_ARB_gpu_shader_int64, and shaderc already has the macro defined by the time that header is read,
+// so without this the header takes the uint64_t branch and the type is undeclared.
+#extension GL_ARB_gpu_shader_int64 : enable
+
+//Per-section occlusion cull. Replaces lod/gl46/force_all_visible.comp -- renamed because the old
+//name would otherwise assert the wrong meaning about what this pass does (cull.MD 8.8 is what that
+//cost the last time it happened).
+//
+//For every section in `indirectLookup` (the traversal's render list; it holds SECTION / mesh ids,
+//one per node the traversal kept) this projects the section's box and asks the SAME Hi-Z predicate
+//the traversal asked (lod/hierarchical/hiz.glsl), then writes visibilityData[sid] in the format
+//cmdgen.comp:72-76 reads:
+//     shouldRender     = (visibilityData[sid] & 0x7fffffff) == frameId
+//     renderTemporally = (visibilityData[sid] & 0x80000000) == 0
+//
+//STAGE 1 IS A PROVABLE NO-OP, AND THAT IS DELIBERATE. `indirectLookup` is the traversal's OWN culled
+//render queue: doTraversal fills it AFTER a node passed the traversal's Hi-Z test, with the same box
+//and the same predicate. So with SECCULL_BOX_AABB undefined this pass recomputes the box the
+//traversal already accepted and removes ZERO draws -- it validates the coordinate frame and nothing
+//else (any change in rawOpaque means the frame is wrong). The win is only in a box TIGHTER than the
+//cell, which is what SECCULL_BOX_AABB (Stage 2) selects.
+
+layout(local_size_x = 128) in;
+
+//Defaults, so this shader also compiles standalone; MDICSectionRenderer.sectionCullDefines() injects
+//the same values (HIZ_BINDING 0 matches HierarchicalOcclusionTraverser.HIZ_BINDING -- a texture
+//binding, a different namespace from the buffers at 0/1/2/3, so it does not collide with the scene
+//uniform at buffer 0).
+#ifndef VISIBILITY_BUFFER_BINDING
+#define VISIBILITY_BUFFER_BINDING 2
+#endif
+#ifndef VISIBILITY_ACCESS
+#define VISIBILITY_ACCESS writeonly
+#endif
+#ifndef INDIRECT_SECTION_LOOKUP_BINDING
+#define INDIRECT_SECTION_LOOKUP_BINDING 3
+#endif
+#ifndef SECTION_METADATA_BUFFER_BINDING
+#define SECTION_METADATA_BUFFER_BINDING 1
+#endif
+#ifndef HIZ_BINDING
+#define HIZ_BINDING 0
+#endif
+
+//quad_util.glsl is imported for its decoders (extractDetail / extractLoDPosition) -- the vertex
+//path's own -- and it is not a standalone header: the rest of it references the vertex path's model /
+//lighting resources and face-tint colours. That machinery is dead here (nothing calls setupQuad), but
+//GLSL resolves every reference in the translation unit, so the bindings and tints it names must be
+//declared. These are inert: they are never bound and never read by main(), and their ids are chosen
+//clear of the ones this pass actually uses (buffers 0-3, texture 0).
+#ifndef MODEL_BUFFER_BINDING
+#define MODEL_BUFFER_BINDING 8
+#endif
+#ifndef MODEL_COLOUR_BUFFER_BINDING
+#define MODEL_COLOUR_BUFFER_BINDING 9
+#endif
+#ifndef LIGHTING_SAMPLER_BINDING
+#define LIGHTING_SAMPLER_BINDING 2
+#endif
+#ifndef NO_SHADE_FACE_TINT
+#define NO_SHADE_FACE_TINT 1.0
+#endif
+#ifndef UP_FACE_TINT
+#define UP_FACE_TINT 1.0
+#endif
+#ifndef DOWN_FACE_TINT
+#define DOWN_FACE_TINT 0.5
+#endif
+#ifndef Z_AXIS_FACE_TINT
+#define Z_AXIS_FACE_TINT 0.8
+#endif
+#ifndef X_AXIS_FACE_TINT
+#define X_AXIS_FACE_TINT 0.6
+#endif
+
+#import <voxy:lod/quad_format.glsl>
+#import <voxy:lod/block_model.glsl>
+#import <voxy:lod/section.glsl>
+#import <voxy:lod/gl46/bindings.glsl>
+#import <voxy:lod/quad_util.glsl>
+#import <voxy:lod/hierarchical/hiz.glsl>
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= sectionCount) return;
+    uint sid = indirectLookup[gid];
+
+    //Decode the section's packed position with quad_util.glsl's OWN decoders -- the vertex path's --
+    //rather than section.glsl's second decoding of the same packed field, whose agreement with the
+    //vertex shader's nobody enforces.
+    uvec2 sPos = sectionData[sid].a.xy;
+    uint detail = extractDetail(sPos);
+    ivec3 ipos = extractLoDPosition(sPos);
+
+    //quad_util.glsl:154,190's frame, exactly: `*` and not `<<` (ipos is negative for sections
+    //left/behind the camera, and a left-shift of a negative is UB that SPIRV-Cross miscompiles), and
+    //NO second cameraSubPos subtraction -- MVP already carries translate(-innerTranslation), so
+    //subtracting it here would displace every box by the camera's sub-block position.
+    vec3 basePos = vec3((ipos*(1<<detail) - baseSectionPos)*32);
+
+    vec3 boxMin;
+    vec3 boxMax;
+#ifdef SECCULL_BOX_AABB
+    //Stage 2: the occupied sub-box of the cell (section.glsl's extractAABBOffset/Size, in level-0
+    //blocks relative to the cell origin). Frame ported from upstream's own raster.vert:32-41 --
+    //`pos + offset*(1<<detail)` -- NOT derived here.
+    SectionMeta meta = sectionData[sid];
+    ivec3 aabbOffset = extractAABBOffset(meta);
+    ivec3 aabbSize = extractAABBSize(meta);
+    float lodScale = float(1<<detail);
+    boxMin = basePos + vec3(aabbOffset-1)*lodScale;
+    boxMax = basePos + vec3(aabbOffset-1+aabbSize+2)*lodScale;
+#else
+    //Stage 1: the whole cell, sized exactly as the traversal's node box is (screenspace.glsl's
+    //`float(32<<node.lodLevel)`).
+    boxMin = basePos;
+    boxMax = basePos + vec3(float(32*(1<<detail)));
+#endif
+
+    vec4 P000 = MVP * vec4(boxMin, 1);
+    // The same corner construction as setupScreenspace (screenspace.glsl), with the per-axis extents
+    // folded in: Axis[i] is MVP's column for a unit step along world axis i, which is what the vertex
+    // path adds for a quad at the far corner of its cell.
+    mat3x4 Axis = mat3x4(MVP);
+    vec3 boxSize = boxMax-boxMin;
+
+    vec4 P100 = Axis[0]*boxSize.x + P000;
+    vec4 P001 = Axis[2]*boxSize.z + P000;
+    vec4 P101 = Axis[2]*boxSize.z + P100;
+    vec4 P010 = Axis[1]*boxSize.y + P000;
+    vec4 P110 = Axis[1]*boxSize.y + P100;
+    vec4 P011 = Axis[1]*boxSize.y + P001;
+    vec4 P111 = Axis[1]*boxSize.y + P101;
+
+    vec3 p000 = toScreenspace(P000);
+    vec3 p100 = toScreenspace(P100);
+    vec3 p001 = toScreenspace(P001);
+    vec3 p101 = toScreenspace(P101);
+    vec3 p010 = toScreenspace(P010);
+    vec3 p110 = toScreenspace(P110);
+    vec3 p011 = toScreenspace(P011);
+    vec3 p111 = toScreenspace(P111);
+
+    vec3 mn = min(min(min(p000, p100), min(p001, p101)), min(min(p010, p110), min(p011, p111)));
+    vec3 mx = max(max(max(p000, p100), max(p001, p101)), max(max(p010, p110), max(p011, p111)));
+
+    mn = clamp(mn, vec3(0), vec3(1));
+    mx = clamp(mx, vec3(0), vec3(1));
+
+#ifdef SECCULL_FORCE_VISIBLE
+    // THE BASELINE ARM, restoring exactly what the deleted force_all_visible.comp stub wrote: mark
+    // everything in indirectLookup visible-this-frame and stamp bit 31 so cmdgen's temporal slice
+    // stays empty.
+    //
+    // Why it has to exist as a define rather than as "skip the pass": visibilityData has no other
+    // writer, so skipping leaves it stale and cmdgen emits NOTHING -- the LOD disappears. A skipped
+    // pass is not a no-cull baseline, it is a no-LOD one, and an A/B run against it would compare a
+    // working frame to an empty one.
+    //
+    // The box is still computed above so the two arms differ in the WRITE ONLY, not in the work.
+    visibilityData[sid] = (frameId & 0x7fffffffu) | (1u << 31);
+#else
+    bool occluded = hizOccluded(mn, mx);
+
+    visibilityData[sid] = occluded
+            ? (0x80000000u | ((frameId - 1u) & 0x7fffffffu))   //bit31 set so cmdgen's temporal slice
+            : ((frameId & 0x7fffffffu) | 0x80000000u);         //stays empty, as the stub left it
+#endif
+}

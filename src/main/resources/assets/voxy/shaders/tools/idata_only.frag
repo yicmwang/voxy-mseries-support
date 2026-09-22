@@ -6,10 +6,12 @@
 // the terrain vertex's two-varying interface, which is the last thing standing between the ICB probe
 // and an answer.
 //
-// `flat uvec4` is the more suspicious half: it is an UNSIGNED INTEGER varying with flat interpolation,
-// and nothing else in the probe carries an integer interpolant. The toy pipeline's `in vec3 vColor` is
-// float and is accepted, so if this is the trigger the difference is the integer/flat qualifier rather
-// than the existence of an interface.
+// This file used to argue that "`flat uvec4` is the more suspicious half ... because nothing else in
+// the probe carries an integer interpolant". **That was the wrong inference** (optimisation.MD 16).
+// NEITHER the integer type NOR `flat` is the trigger: a flat varying with no texture behind it is
+// ACCEPTED (case 90), and this case FAILS for a different reason. What it actually isolates is the
+// terrain vertex's LIGHTMAP SAMPLE reaching a varying this fragment declares -- `interData.y` carries
+// `packVec4(getLighting(...))`, a vertex texture fetch, and that is the rule cases 95-99 measure.
 //
 // Lives under assets/voxy/shaders/tools/ to mark it as not part of the production rendering pipeline.
 

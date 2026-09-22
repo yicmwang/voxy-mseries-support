@@ -87,27 +87,26 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
     // The cull graphics pipeline (lod/gl46/cull/raster.vert|frag) was built here and dispatched
     // ONLY by the GL occlusion-cull arm in buildDrawCalls; that arm is deleted, so the pipeline
-    // and its two shader sources are gone. The Metal cull is forceAllVisiblePipeline below plus
-    // quads.frag's per-column built-mask test.
+    // and its two shader sources are gone. The live cull is sectionCullPipeline below (a compute
+    // pass against the Hi-Z pyramid) plus quads.frag's per-section built-mask test.
 
     /**
-     * M12 chunk 5 Metal stub: substitutes for the depth-test-based cull pass
-     * on backends that can't currently open a depth-only render pass against
-     * MC's depth buffer. Writes `visibilityData[sid] = frameId | (1<<31)` for
-     * every section in `indirectLookup`, so cmdgen queues all frustum-visible
-     * sections for rendering (slower than real depth occlusion but
-     * functionally correct). Allocated unconditionally — only dispatched
-     * when the backend isn't OpenGL. Negligible memory cost; the alternative
-     * (gating allocation behind a backend check) makes the class harder to
-     * read for no real benefit.
+     * The per-section occlusion cull (lod/gl46/section_cull.comp), and the replacement for the
+     * M12-chunk-5 force-all-visible stub. It walks exactly the list the stub walked — the
+     * traversal's render list, `indirectLookup` — but decides each section's
+     * {@code visibilityData[sid]} with the same Hi-Z predicate the traversal uses, instead of
+     * marking everything visible. Dispatched only when {@link #SECTION_CULL} is on and the
+     * Hi-Z pyramid has a texture (see the dispatch block in buildDrawCalls). Allocated
+     * unconditionally — negligible memory cost, and gating the allocation behind a backend check
+     * would only make the class harder to read.
      */
-    private final me.cortex.voxy.client.core.gpu.IGpuPipeline forceAllVisiblePipeline = this.backend.createComputePipeline(
+    private final me.cortex.voxy.client.core.gpu.IGpuPipeline sectionCullPipeline = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
-                    ShaderLoader.parse("voxy:lod/gl46/force_all_visible.comp"),
-                    java.util.Map.of(),
+                    ShaderLoader.parse("voxy:lod/gl46/section_cull.comp"),
+                    sectionCullDefines(),
                     null, null,
                     128, 1, 1,
-                    "MDICSectionRenderer.forceAllVisible"));
+                    "MDICSectionRenderer.sectionCull"));
 
     private final me.cortex.voxy.client.core.gpu.IGpuPipeline prefixSumPipeline = this.backend.createComputePipeline(
             new me.cortex.voxy.client.core.gpu.ComputePipelineDesc(
@@ -156,6 +155,67 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static final boolean CHUNK_CULL = CULL_ENABLED
             && !"0".equals(System.getenv("VOXY_LOD_CHUNK_CULL"));
+
+    /**
+     * VOXY_LOD_SECCULL=0 skips the per-section occlusion cull pass, so nothing writes
+     * {@code visibilityData} and cmdgen emits no sections at all (the LOD disappears). It exists to
+     * prove the pass is what changed a measurement, not as a shipping configuration.
+     *
+     * <p>A DIFFERENT question from {@link #CHUNK_CULL}, deliberately kept separate: this one asks
+     * whether a section's box is OCCLUDED (Hi-Z — it lies entirely behind the far side of what the
+     * depth buffer already shows) and decides whether a draw command is emitted at all; CHUNK_CULL
+     * asks whether vanilla has built the chunks the section overlaps, in the fragment stage, per
+     * 16x16x16 section. Both are on; neither licenses removing the other.
+     */
+    private static final boolean SECTION_CULL = !"0".equals(System.getenv("VOXY_LOD_SECCULL"));
+
+    /**
+     * VOXY_LOD_SECCULL_BOX selects the box the cull pass tests: {@code node} (default) is the
+     * section's whole cell, {@code aabb} is the occupied sub-box the mesher recorded for it.
+     *
+     * <p>{@code node} is Stage 1 of the cull work and is a PROVABLE NO-OP: the pass's input list IS
+     * the traversal's render queue, filled only after each section's node passed that same Hi-Z test
+     * with that same box, so Stage 1 removes zero draws by construction — any movement in
+     * {@code rawOpaque} means the pass's coordinate frame is wrong. Only {@code aabb} can remove
+     * draws. Its frame is ported from upstream's raster.vert rather than measured in this tree, so
+     * confirm it by image diff, never by the derivation.
+     */
+    private static final boolean SECTION_CULL_AABB_BOX =
+            "aabb".equals(System.getenv("VOXY_LOD_SECCULL_BOX"));
+
+    /**
+     * VOXY_LOD_SECCULL_BOX=force restores the deleted {@code force_all_visible.comp} stub's behaviour:
+     * every section in the traversal's queue is marked visible-this-frame, so the pass culls nothing.
+     *
+     * <p><b>This is the A/B baseline, and it cannot be reached by disabling the pass.</b> Nothing else
+     * writes {@code visibilityData}, so skipping the dispatch leaves it stale and cmdgen emits no
+     * sections at all — the LOD disappears. A skipped pass is a no-LOD arm, not a no-cull one, and
+     * comparing against it would contrast a working frame with an empty one. The box is still computed
+     * in this mode, so the baseline and the cull arms differ in the write only.
+     */
+    private static final boolean SECTION_CULL_FORCE_VISIBLE =
+            "force".equals(System.getenv("VOXY_LOD_SECCULL_BOX"));
+
+    /**
+     * Bindings and box variant for {@code lod/gl46/section_cull.comp}, mirroring the defaults the
+     * shader declares for itself so neither side is the only place a binding is written down.
+     *
+     * <p>HIZ_BINDING is 0 and that is not a collision with the scene uniform at BUFFER 0: textures and
+     * samplers are a different namespace from buffers (the traversal binds the pyramid to the same
+     * slot while its SceneUniform sits at its own buffer binding). It names the same
+     * NEAREST/NEAREST/CLAMP_TO_EDGE sampler the traversal uses, via HiZBuffer.getSampler().
+     */
+    private static java.util.Map<String, String> sectionCullDefines() {
+        var m = new java.util.LinkedHashMap<String, String>();
+        m.put("VISIBILITY_BUFFER_BINDING", "2");
+        m.put("VISIBILITY_ACCESS", "writeonly");
+        m.put("INDIRECT_SECTION_LOOKUP_BINDING", "3");
+        m.put("SECTION_METADATA_BUFFER_BINDING", "1");
+        m.put("HIZ_BINDING", "0");
+        if (SECTION_CULL_AABB_BOX) m.put("SECCULL_BOX_AABB", "");
+        if (SECTION_CULL_FORCE_VISIBLE) m.put("SECCULL_FORCE_VISIBLE", "");
+        return m;
+    }
 
     private static java.util.Map<String, String> cmdgenDefines() {
         var m = new java.util.LinkedHashMap<String, String>();
@@ -2108,23 +2168,44 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (computeSerialize) this.backend.submit(); // serialize: prep complete
 
         {//Test occlusion
-            // Compute stub that skips occlusion and marks every frustum-visible section as
-            // visible-this-frame + visible-last-frame. Slower than real depth occlusion but
-            // functionally correct. (The GL arm that rasterized each section's AABB against MC's
-            // depth buffer, with optional NV_representative_fragment_test, is deleted along with
-            // lod/gl46/cull/raster.vert|frag and the cullPipeline they compiled.)
-            try (var encoder = this.backend.beginComputePass()) {
-                encoder.setPipeline(this.forceAllVisiblePipeline);
-                encoder.setBuffer(0, this.uniformFor(viewport), 0);
-                encoder.setBuffer(2, viewport.visibilityBuffer, 0);
-                encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
-                encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
-                                ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
-                // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
-                // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
-                // matching this shader's local_size_x=128.
-                encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
-                encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
+            // Per-section Hi-Z cull (lod/gl46/section_cull.comp), which replaced the M12 chunk 5
+            // force-all-visible stub. It walks the same list the stub walked — `indirectLookup`, the
+            // traversal's own render queue — but decides each section's visibilityData with the same
+            // Hi-Z predicate the traversal used, instead of marking everything visible. (The GL arm
+            // that rasterized each section's AABB against MC's depth buffer, with optional
+            // NV_representative_fragment_test, is deleted along with lod/gl46/cull/raster.vert|frag
+            // and the cullPipeline they compiled.)
+            //
+            // FAIL OPEN when the pyramid has no texture: there is nothing to test against, and
+            // dispatching anyway would sample an unbound texture, i.e. cull on undefined values.
+            // Skipping the pass leaves visibilityData stale, so cmdgen emits NO sections — visibly
+            // wrong, and deliberately so, because a silent wrong answer is what this tree keeps
+            // paying for. It is a guard, not a live path: AbstractRenderPipeline always allocates the
+            // pyramid for the LOD pass before it calls buildDrawCalls.
+            final var hizTexture = viewport.hiZBuffer.getHizTexture();
+            if (SECTION_CULL && hizTexture != null) {
+                try (var encoder = this.backend.beginComputePass()) {
+                    encoder.setPipeline(this.sectionCullPipeline);
+                    encoder.setBuffer(0, this.uniformFor(viewport), 0);
+                    // The section metadata: the pass decodes each section's box from it, with the
+                    // vertex path's decoders (quad_util.glsl) — see the shader.
+                    encoder.setBuffer(1, this.geometryManager.getMetadataBuffer(), 0);
+                    encoder.setBuffer(2, viewport.visibilityBuffer, 0);
+                    encoder.setBuffer(3, viewport.indirectLookupBuffer, 0);
+                    // Texture/sampler are a DIFFERENT namespace from buffers, so slot 0 here does
+                    // not collide with the scene uniform at buffer 0 — the same slot the traversal
+                    // binds the pyramid to. One sampler, shared from HiZBuffer, so a second copy of
+                    // a filtering mode cannot start disagreeing with the pyramid's texels.
+                    encoder.setTexture(0, hizTexture);
+                    encoder.setSampler(0, viewport.hiZBuffer.getSampler());
+                    encoder.barrier(ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT,
+                                    ComputeEncoder.BARRIER_SHADER | ComputeEncoder.BARRIER_INDIRECT);
+                    // Reuses prep's dispatch sizing — cmdGenDispatchX/Y/Z at
+                    // offset 0 of drawCountCallBuffer holds ceil(sectionCount/128),
+                    // matching this shader's local_size_x=128.
+                    encoder.dispatchIndirect(viewport.drawCountWrite(viewport.frameId), 0);
+                    encoder.barrier(ComputeEncoder.BARRIER_SHADER, ComputeEncoder.BARRIER_SHADER);
+                }
             }
         }
         if (computeSerialize) this.backend.submit(); // serialize: cull/visibility complete before commandGen
@@ -2249,7 +2330,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (this.translucentTerrainPipeline != null) this.translucentTerrainPipeline.close();
         if (this.terrainPipeline != null) this.terrainPipeline.close();
         this.commandGenPipeline.close();
-        this.forceAllVisiblePipeline.close();
+        this.sectionCullPipeline.close();
         this.prepPipeline.close();
         this.translucentGenPipeline.close();
         this.prefixSumPipeline.close();
