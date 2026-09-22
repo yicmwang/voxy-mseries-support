@@ -51,6 +51,12 @@ public class VoxyClient implements ClientModInitializer {
     private static volatile boolean SPIN_TEST_ARMED = false;
     /** Shots taken since the anchor. Shot k is taken at a yaw this counter makes exactly known. */
     private static final int[] SPIN_TEST_SHOTS = {0};
+    /**
+     * VOXY_SPIN_SHOTS: stop after this many, so the SET of shots a run produces is deterministic and
+     * not just each shot's heading. 0/unset means unlimited. See the capture block for why a count
+     * bound matters to a diff harness.
+     */
+    private static final int SPIN_TEST_MAX = parseEnvIntDefault("VOXY_SPIN_SHOTS", 0);
 
     /** An integer env var, or the default when unset, blank or unparseable. */
     private static int parseEnvIntDefault(final String name, final int def) {
@@ -200,6 +206,13 @@ public class VoxyClient implements ClientModInitializer {
                     // anchor block itself (VoxyClient's camera pin), which is why this starts at k=1.
                     if (!SPIN_TEST_ARMED) return;
                     if (SPIN_TEST_TICKS[0] < SPIN_TEST_SHOTS[0] * spinTestIntervalTicks) return;
+                    // A FIXED SHOT COUNT, and it is not cosmetic. A comparison harness picks shots out
+                    // of run/screenshots by position, so if one run takes 26 and another 25, "the last
+                    // 8" means k=18..25 in one and k=17..24 in the other -- a phase mismatch
+                    // reintroduced by the very script the anchor exists to make safe. Bounding the
+                    // count makes the SET itself deterministic, not just each shot's heading.
+                    // 0 or unset means unlimited (fine for eyeballing, not for diffing).
+                    if (SPIN_TEST_MAX > 0 && SPIN_TEST_SHOTS[0] > SPIN_TEST_MAX) return;
                     SPIN_TEST_SHOTS[0]++;
                     net.minecraft.client.Screenshot.grab(client.gameDirectory,
                             client.gameRenderer.mainRenderTarget(), component -> {});
