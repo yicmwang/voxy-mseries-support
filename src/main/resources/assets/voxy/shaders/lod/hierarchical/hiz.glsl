@@ -77,40 +77,32 @@ bool hizOccluded(vec3 minBB, vec3 maxBB) {
     ivec2 mnbb = ivec2(floor(minBB.xy*ssize));
 
     // -------------------------------------------------------------------------------------------
-    // THE FOOTPRINT MARGIN — because the map the test reads is ONE FRAME OLD.
+    // ON THE FOOTPRINT MARGIN, AND WHY THERE IS NOT ONE HERE.
     //
-    // The pyramid is built from frame N-1's LOD depth (AbstractRenderPipeline), while the box being
-    // tested is where the node is on screen at frame N. If the camera moved, those are two different
-    // places, and the test then asks "is everything in THIS footprint nearer than the box?" of a
-    // footprint whose texels describe a region the box may only partly occupy. Near the camera the
-    // screen-space displacement per frame is largest — which is why the blip is confined to the two
-    // finest levels (lod-bugs.MD 17.7) and why it vanishes when the camera holds still.
+    // Bug A is a one-frame blip, and the cull is its cause. A tempting fix is to widen the sampled
+    // band, which is conservative for a checkable reason (pointSample is a min, so more texels can only
+    // lower it). It was built, measured and REMOVED, because it treats the symptom at the cost of the
+    // thing the cull exists for. Four arms, drift 6, 150 s each:
     //
-    // WHY A MARGIN IS THE CONSERVATIVE DIRECTION AND IN WHICH DIRECTION. `pointSample` is a MIN over
-    // the sampled band, on a reverse-Z frame where a smaller depth means further away. Widening the
-    // band can only ADD texels, so the min can only fall, so `pointSample > maxBB.z` can only become
-    // LESS likely. A wider band therefore draws more, never less — the safe way to be wrong.
+    //   margin  rate      drawn/frame
+    //     0     1.057%      3212
+    //     1     0.970%      3227     (inside run noise: 1.4 sigma, a no-op)
+    //     4     0.229%      3762
+    //     8     0.156%      3904
+    //   cull off  0.000%    4143     <- the ceiling, i.e. no culling at all
     //
-    // WHAT IT IS AND IS NOT. This is a screen-space approximation of a motion term, not the motion
-    // term itself: it covers the footprint shift with a fixed number of texels at the mip the box
-    // selected, so it is exact at one distance and generous closer in. The exact form is to project
-    // the box with the PREVIOUS frame's VP as well and test the union of the two footprints, which
-    // needs a second matrix in the scene uniform — worth doing if this confirms the mechanism, and
-    // not worth doing before it does.
+    // So halving the blip a second time costs almost the entire cull: at margin 8 the draw count is 94%
+    // of the way to not culling at all. The margin trades away the mechanism it is trying to preserve.
     //
-    // VOXY_HIZ_DILATE=<n> texels, default 4 (measured; 1 was a no-op). 0 restores the exact-footprint
-    // test for an A/B. The default is always injected by the traversal, so an arm's value is readable
-    // from [Metal-TRAVSW] rather than inferred.
+    // THE REAL FIX is to stop the pyramid being one frame old. It is built from the LOD pass's own
+    // depth-as-colour attachment, which is last frame's by construction, so with the camera moving the
+    // test reads texels describing where the node USED to be. MC's frame depth texture is already
+    // `ShaderRead` and already holds this frame's vanilla terrain at the point the build runs (the tail
+    // of Sodium's solid pass); it reads zeros only because a Depth32Float sampled through a `sampler2D`
+    // becomes MSL `texture2d<float>`, which Metal does not allow. An R32Float VIEW of it fixes that, and
+    // needs one flag that is not currently set: MTLTextureUsagePixelFormatView.
+    // See lod-bugs.MD 17.11.
     // -------------------------------------------------------------------------------------------
-    #ifdef VOXY_HIZ_DILATE
-    const int HIZ_DILATE = VOXY_HIZ_DILATE;
-    #else
-    const int HIZ_DILATE = 4;
-    #endif
-    if (HIZ_DILATE > 0) {
-        mnbb = max(ivec2(0), mnbb - ivec2(HIZ_DILATE));
-        mxbb = min(ssize - 1, mxbb + ivec2(HIZ_DILATE));
-    }
 
     // -------------------------------------------------------------------------------------------
     // ON THE ROW MIRROR, AND WHY THERE IS NOT ONE HERE.

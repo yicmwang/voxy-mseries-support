@@ -87,38 +87,18 @@ public class HierarchicalOcclusionTraverser {
     private static final boolean CHILD_READY = !"0".equals(System.getenv("VOXY_LOD_CHILD_READY"));
 
     /**
-     * {@code VOXY_HIZ_DILATE=<n>} widens the texel band the Hi-Z test samples, by n texels on each
-     * side, at the mip the box selected. Default 1.
+     * REMOVED: {@code VOXY_HIZ_DILATE}, the Hi-Z footprint margin.
      *
-     * <p>Why it exists: the pyramid is built from frame N-1's depth while the box is where the node is
-     * at frame N, so with the camera moving the test reads a footprint whose texels describe a region
-     * the box may only partly occupy. Widening the band is the conservative direction on a reverse-Z
-     * frame — {@code pointSample} is a min, so more texels can only lower it, so the cull can only
-     * become less likely — which makes it the safe way to spend a little culling to buy stability.
-     * See {@code hiz.glsl} and lod-bugs.MD §17.
+     * <p>It widened the sampled texel band to cover the footprint shift caused by the pyramid being one
+     * frame old. It worked — 1.057 % of frames blipping at margin 0, 0.229 % at 4, 0.156 % at 8 — and it
+     * was removed anyway, because it buys the blip back with the thing the cull exists for: drawn
+     * frames rise 3 212 → 3 762 → 3 904 against a cull-off ceiling of 4 143, so at margin 8 the cull is
+     * down to 6 % of its saving. Making the test more conservative is treating the symptom.
      *
-     * <p>{@code =0} restores the exact-footprint test, which is the A/B arm.
-     *
-     * <p><b>The default is 4, not 1, and that is a measured choice.</b> 1 was the first guess and it is
-     * worth almost nothing: 0.970 % of frames against the exact-footprint arm's 1.057 %, which is 1.4σ
-     * and inside run noise. 4 is the first value that does anything — 0.229 %, a 4.6x reduction — and it
-     * costs about 13 % of the cull's draw saving (drawn-per-frame 3 762 against 3 227 at n=1, with the
-     * cull-off ceiling at 4 143). Phase 4 of Bug A's investigation, lod-bugs.MD §17.10. Shipping 1 would
-     * have been shipping a no-op that reads like a fix.
+     * <p>The real fix is to stop the pyramid being one frame old; see {@code hiz.glsl} and lod-bugs.MD
+     * §17.11. Left here as a comment rather than a switch because a knob whose only effect is to weaken
+     * the cull is a liability, and because the numbers are the argument for the real fix.
      */
-    private static final int HIZ_DILATE = readEnvInt("VOXY_HIZ_DILATE", 4);
-
-    /** Local copy of VoxyClient's parser, which is private there. Returns {@code def} on anything odd. */
-    private static int readEnvInt(final String name, final int def) {
-        final String v = System.getenv(name);
-        if (v == null || v.isBlank()) return def;
-        try {
-            return Math.max(0, Integer.parseInt(v.trim()));
-        } catch (NumberFormatException e) {
-            me.cortex.voxy.common.Logger.error(name + " must be an integer; got \"" + v + "\"", e);
-            return def;
-        }
-    }
 
     /** One-shot gate for the [Metal-TRAVSW] configuration record; see the define map. */
     private static boolean switchesLogged = false;
@@ -309,10 +289,6 @@ public class HierarchicalOcclusionTraverser {
         if (!CHILD_READY) {
             m.put("VOXY_LOD_NO_CHILD_READY", "");
         }
-        // The Hi-Z footprint margin. Always injected, including 0, so the arm is explicit in the shader
-        // rather than an absence -- an absent define and a define of 0 must not be allowed to look the
-        // same in a log.
-        m.put("VOXY_HIZ_DILATE", Integer.toString(HIZ_DILATE));
         // A ONE-SHOT RECORD OF WHICH TRAVERSAL SWITCHES ARE ACTUALLY ON.
         //
         // This exists because a switch that silently never applied makes two A/B arms the same build
