@@ -100,7 +100,13 @@ public class HierarchicalOcclusionTraverser {
         }
         // Per-level breakdown for the two CULLS only: "the far sections vanish" is a statement about
         // LOD level, and the totals alone cannot confirm or refute it.
-        for (int a : new int[]{2, 3}) {
+        // visitedByLevel too, not just the totals: a cull count is meaningless without its denominator.
+        // The traversal only visits a node whose parent passed, so framumCulled/visited is a LOCAL rate
+        // and the useful question -- "is the frustum rejecting as much of the outermost ring as it
+        // should?" -- cannot be answered from totals at all. Absolute counts actively mislead here:
+        // frustumCulledByLevel=[210,103,49,26,30] makes the coarsest level look least-culled, when it is
+        // simply the least-visited.
+        for (int a : new int[]{0, 2, 3}) {
             sb.append("| ").append(names[a]).append("ByLevel=[");
             for (int i = 0; i < MAX_ITERATIONS; i++) {
                 if (i > 0) sb.append(',');
