@@ -157,10 +157,16 @@ public class VoxyRenderSystem {
         // again. A drifted value (user config had 229.18) makes LOD leaves
         // stop subdividing at a huge screen footprint: 16-block voxels at
         // only ~2000 blocks = the "gigantic shapeless distant blocks"
-        // report. Values above 128 can only come from that disabled loop
-        // (the config UI stays well below it), so reset them to the
-        // default 64.
-        if (VoxyConfig.CONFIG.subDivisionSize > 128f) {
+        // report. Values above this threshold are taken to come from that
+        // disabled loop and reset to the default 64.
+        //
+        // 2026-09-21: the threshold was 128, on the stated grounds that "the config UI stays well below
+        // it". THAT WAS WRONG -- VoxyConfigMenu's slider maximum was 256, so the whole upper half of the
+        // slider was silently discarded on the next launch: a user could pick 200, see it applied, and
+        // find 64 after a restart with no explanation. It is now kept in step with the slider's own
+        // maximum so the UI can never produce a value this guard rejects, which also lets the range
+        // reach the HIDPI values the display density actually needs (see VoxyConfigMenu.SUBDIV_MAX).
+        if (VoxyConfig.CONFIG.subDivisionSize > 1024f) {
             Logger.warn("[Metal] sub_division_size drifted to " + VoxyConfig.CONFIG.subDivisionSize
                     + " (residue of the disabled FPS auto-balancer) — resetting to 64 for full LOD detail");
             VoxyConfig.CONFIG.subDivisionSize = 64f;

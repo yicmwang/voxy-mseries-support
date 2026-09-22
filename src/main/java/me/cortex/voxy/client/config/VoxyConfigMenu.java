@@ -95,9 +95,9 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                                 new IntOption(
                                         "voxy:subdivsize",
                                         Component.translatable("voxy.config.general.subDivisionSize"),
-                                        ()->subDiv2ln(CFG.subDivisionSize), v->CFG.subDivisionSize=ln2subDiv(v),
+                                        ()->subDivToSlider(CFG.subDivisionSize), v->CFG.subDivisionSize=sliderToSubDiv(v),
                                         new Range(0, SUBDIV_IN_MAX, 1))
-                                        .setFormatter(v->Component.literal(Integer.toString(Math.round(ln2subDiv(v))))),
+                                        .setFormatter(v->Component.literal(Integer.toString(Math.round(sliderToSubDiv(v))))),
                                 new IntOption(
                                         "voxy:render_distance",
                                         Component.translatable("voxy.config.general.renderDistance"),
@@ -132,18 +132,50 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
 
     private static final int SUBDIV_IN_MAX = 100;
     private static final double SUBDIV_MIN = 28;
-    private static final double SUBDIV_MAX = 256;
-    private static final double SUBDIV_CONST = Math.log(SUBDIV_MAX/SUBDIV_MIN)/Math.log(2);
+    /**
+     * Raised 256 -> 1024 for HIDPI. The value is "maximum screen-space AABB area in pixels^2 before
+     * subdividing", and the viewport it is measured against is the PHYSICAL backbuffer -- 1708x960 for
+     * an 854x480 window on this Retina display. So a node at 64 may cover 4096 physical px^2, which is a
+     * 32x32 LOGICAL square: four times finer on screen than the same setting on a 1x display. Matching
+     * a 1x display's 64 needs 128 here, its 256 needs 512, and 1024 goes coarser than any 1x setting --
+     * which is the range the top of the slider was missing.
+     *
+     * <p>Anything above this is still treated as drift by VoxyRenderSystem's startup guard; that guard's
+     * threshold is kept in step with this constant, because it used to sit BELOW the slider's maximum
+     * and would silently reset a deliberately-chosen high value back to 64 on the next launch.
+     */
+    private static final double SUBDIV_MAX = 1024;
 
-    //In range is 0->200
-    //Out range is 28->256
-    private static float ln2subDiv(int in) {
-        return (float) (SUBDIV_MIN*Math.pow(2, SUBDIV_CONST*((double)in/SUBDIV_IN_MAX)));
+    /**
+     * Slider position -> value, QUADRATIC: {@code pos^2} spread across [SUBDIV_MIN, SUBDIV_MAX].
+     *
+     * <p>0 -> 28, 50 -> 277, 100 -> 1024. The previous mapping was log2, which gives every slider step
+     * the same RATIO. A quadratic instead gives the top of the range finer absolute steps and the bottom
+     * coarser ones -- roughly 2 units of value per slider step at 28, 10 at 277 and 20 at 1024, against
+     * log2's 1, 10 and 37.
+     *
+     * <p>Nothing about the value's meaning changed; it is still "maximum screen-space AABB area in
+     * pixels^2 before subdividing". Only how the slider travels across its range.
+     */
+    private static float sliderToSubDiv(int in) {
+        double t = (double) in / SUBDIV_IN_MAX;
+        return (float) (SUBDIV_MIN + (SUBDIV_MAX - SUBDIV_MIN) * t * t);
     }
 
-    //In range is ... any?
-    //Out range is 0->200
-    private static int subDiv2ln(float in) {
-        return (int) (((Math.log(((double)in)/SUBDIV_MIN)/Math.log(2))/SUBDIV_CONST)*SUBDIV_IN_MAX);
+    /**
+     * Inverse of {@link #sliderToSubDiv}.
+     *
+     * <p>CLAMPED, and that is load-bearing rather than defensive. A config file can hold a value outside
+     * [SUBDIV_MIN, SUBDIV_MAX] -- a hand edit, or a value written by an older build with a different
+     * range -- and the log2 version this replaces did not clamp: a value below SUBDIV_MIN made the log
+     * negative, which landed the slider at a negative position, and it is only the Range's own clamping
+     * that stopped that becoming a visible misbehaviour. Under a square root a negative argument is
+     * worse, not better: {@code (int) Math.sqrt(-x)} is NaN converted to int, i.e. 0, which would place
+     * the slider at the bottom and misreport the value it is actually configured with.
+     */
+    private static int subDivToSlider(float value) {
+        double t = ((double) value - SUBDIV_MIN) / (SUBDIV_MAX - SUBDIV_MIN);
+        t = Math.max(0.0, Math.min(1.0, t));
+        return (int) Math.round(Math.sqrt(t) * SUBDIV_IN_MAX);
     }
 }
