@@ -40,7 +40,11 @@ layout(binding = RENDER_QUEUE_BINDING, std430) restrict buffer renderQueueStruct
     uint[] renderQueue;
 };
 
-layout(binding = RENDER_TRACKER_BINDING, std430) restrict writeonly buffer renderTrackerArray {
+// NOT `writeonly` any more: the flicker counter below has to READ this to ask whether the node it is
+// about to cull was drawn on the previous frame. That single question is the whole of Bug A -- a node
+// drawn at N-1, culled at N, drawn at N+1 is a one-frame hole BY DEFINITION -- and it is answerable
+// here, in the frame the mistake is made, instead of two frames later by diffing the drawn set.
+layout(binding = RENDER_TRACKER_BINDING, std430) restrict buffer renderTrackerArray {
     uint[] lastRenderFrame;
 };
 
@@ -74,6 +78,24 @@ layout(binding = STATISTICS_BUFFER_BINDING, std430) restrict buffer statisticsBu
     // It is also the natural pair to `descendCounts`: the two together partition the nodes that
     // should have refined, into "did" and "could not".
     uint notReadyCounts[MAX_ITERATIONS];
+    // BUG A, MEASURED AT THE MOMENT IT HAPPENS, PER LEVEL.
+    //
+    // `hizCulledCounts` counts culls. This counts the subset of culls that CANNOT be right: the node
+    // was drawn on the previous frame, so the previous frame's pyramid contains its own surface, so
+    // "everything in this footprint is nearer than the node" is a statement the pyramid itself
+    // contradicts. A node drawn at N-1, culled at N and drawn again at N+1 is a one-frame hole by
+    // definition -- that IS Bug A -- and this counter detects it in the frame the error is made rather
+    // than two frames later by diffing the drawn set, which is what `VOXY_LOD_GAP` has to do and why
+    // that instrument cannot attribute the blip to a LOD level.
+    //
+    // The per-level split is the point. The user's report is specific -- the level-1 -> level-0
+    // handover, the closest chunks -- and the post-hoc detector confirms gaps land at detail 0 and 1
+    // but CANNOT say whether the node that got culled was a level-0 leaf or a level-1 node whose whole
+    // level-0 subtree went with it (rendering is leaves-only, so a culled coarse node shows up as
+    // missing FINE leaves). Those want different fixes, and this counter distinguishes them directly:
+    // it records the level of the node the cull was applied to, not the level of the geometry that
+    // disappeared.
+    uint flickerCulledCounts[MAX_ITERATIONS];
     // WHAT THE CULL IS ACTING ON, in two histograms, because every remaining hypothesis about the
     // over-culling is a claim about these two numbers and neither has ever been observed.
     //
@@ -200,6 +222,14 @@ void traverse(in UnpackedNode node) {
             atomicAdd(frustumCulledCounts[node.lodLevel], 1);
         } else {
             atomicAdd(hizCulledCounts[node.lodLevel], 1);
+            // THE ONE-FRAME BLIP, caught in the act. `frameId - 1` is deliberate: lastRenderFrame holds
+            // the frame the node was last enqueued for render, so equality with the previous frame
+            // means its surface is in the pyramid this test just consulted. Note the pyramid is built
+            // from frame N-1's LOD pass (AbstractRenderPipeline), so this is exactly the case where the
+            // test can contradict its own input.
+            if (lastRenderFrame[getId(node)] == frameId - 1u) {
+                atomicAdd(flickerCulledCounts[node.lodLevel], 1);
+            }
             // Bin what the decision was made on. The traversal already stashed the pyramid's answer and
             // the box's near edge for this node; this only records where they landed. Guarded on the
             // same statistics flag as everything else, and free when it is off.

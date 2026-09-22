@@ -95,7 +95,7 @@ public class HierarchicalOcclusionTraverser {
     /** Reads the six arrays back and logs one line. Called from the download callback. */
     private static void logTraversalStats(long addr) {
         final String[] names = {"visited", "enqueued", "frustumCulled", "hizCulled", "descended",
-                "notReady"};
+                "notReady", "flickerCulled"};
         StringBuilder sb = new StringBuilder("[Metal-TRAV f=").append(travStatsFrame++).append("] ");
         for (int a = 0; a < names.length; a++) {
             int total = 0;
@@ -112,7 +112,11 @@ public class HierarchicalOcclusionTraverser {
         // should?" -- cannot be answered from totals at all. Absolute counts actively mislead here:
         // frustumCulledByLevel=[210,103,49,26,30] makes the coarsest level look least-culled, when it is
         // simply the least-visited.
-        for (int a : new int[]{0, 2, 3, 5}) {
+        // Index 6 is `flickerCulled` -- culls applied to a node that was DRAWN on the previous frame,
+        // which is Bug A by definition. Printed per level, because the fix depends on whether the cull
+        // lands on a level-0 leaf or on a level-1 node that takes its whole level-0 subtree with it
+        // (rendering is leaves-only, so both look like missing FINE geometry from outside).
+        for (int a : new int[]{0, 2, 3, 5, 6}) {
             sb.append("| ").append(names[a]).append("ByLevel=[");
             for (int i = 0; i < MAX_ITERATIONS; i++) {
                 if (i > 0) sb.append(',');
@@ -154,8 +158,8 @@ public class HierarchicalOcclusionTraverser {
         me.cortex.voxy.common.Logger.info(sb.toString());
     }
 
-    /** Byte offset of the shader's {@code hizSampleHist}, i.e. after the six MAX_ITERATIONS arrays. */
-    private static final int HIST_OFFSET = 6 * MAX_ITERATIONS * 4;
+    /** Byte offset of the shader's {@code hizSampleHist}, i.e. after the SEVEN MAX_ITERATIONS arrays. */
+    private static final int HIST_OFFSET = 7 * MAX_ITERATIONS * 4;
 
     /** Published by {@link #uploadUniform} for {@link #logTraversalStats}; diagnostic only. */
     private static volatile int lastRequestSize = -1;
