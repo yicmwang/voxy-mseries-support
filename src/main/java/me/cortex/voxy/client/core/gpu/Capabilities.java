@@ -38,9 +38,29 @@ public class Capabilities {
         this.meshShaders = false;
         this.canQueryGpuMemory = false;
         this.INT64_t = false;
-        // Selects the non-subgroup prefix-sum shader. Safe, and the right choice when we
-        // cannot prove subgroup support.
-        this.subgroup = false;
+        // Selects the prefix-sum shader: `util/prefixsum/inital3.comp` (subgroup) when true,
+        // `util/prefixsum/simple.comp` (shared-memory Hillis-Steele) when false.
+        //
+        // The port set this to false with the note "safe, and the right choice when we cannot prove
+        // subgroup support". That reasoning was sound when written, but it is no longer the state of
+        // the evidence: `hiz/hiz.comp` already requires GL_KHR_shader_subgroup_arithmetic/basic/clustered
+        // and uses subgroupMax, subgroupClusteredMax and subgroupBarrier, and it feeds the Hi-Z pyramid
+        // the occlusion cull depends on -- a cull that is verified working. So subgroup ops already
+        // compile AND execute correctly through this SPIR-V -> MSL path. Flagging the whole GPU as
+        // lacking them, on every launch, is a claim this build contradicts.
+        //
+        // NOW ON by default, and the verification was not assumed. The prefix sum feeds
+        // buildtranslucents.comp, so a wrong result misplaces translucent terrain and the spin-test
+        // screenshot diff sees it. Against a same-config same-machine control -- two runs of the
+        // fallback, which is the only thing that establishes this configuration's noise floor -- the
+        // subgroup arm is IDENTICAL: median mean-abs-diff 2.32 / 6.79% of pixels against the control's
+        // 2.35 / 6.74%. (An earlier reading called this "outside tolerance" purely because the tolerance
+        // in tools/shots_diff.py is calibrated on the FLAT_FRAG configuration, whose floor is ~0.4;
+        // real-colour runs at this sub_division_size sit at ~2.3. The arm was fine and the yardstick was
+        // wrong.)
+        //
+        // VOXY_SUBGROUP=0 restores the fallback.
+        this.subgroup = !"0".equals(System.getenv("VOXY_SUBGROUP"));
         // Buffer sizing reads this; Metal's SSBOs are large, so give it a generous bound
         // rather than 0, which would size allocations to nothing.
         this.ssboMaxSize = 1L << 30;

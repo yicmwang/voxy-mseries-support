@@ -132,7 +132,16 @@ public class VoxyClient implements ClientModInitializer {
             VoxyCommon.setInstanceFactory(VoxyClientInstance::new);
 
             if (!Capabilities.INSTANCE.subgroup) {
-                Logger.warn("GPU does not support subgroup operations, expect some performance degradation");
+                // NOT "the GPU does not support subgroup operations" -- it said that, and on this
+                // backend it was not true. The flag is a stub this port hardcodes, and `hiz/hiz.comp`
+                // already requires GL_KHR_shader_subgroup_* and runs correctly through the same
+                // SPIR-V -> MSL path, which is proof the hardware and the transpile both support them.
+                // Say what is actually happening -- which shader is in use -- rather than making a
+                // claim about the GPU that the build itself contradicts. Set VOXY_SUBGROUP=1 for the
+                // subgroup prefix sum.
+                Logger.info("Prefix sum: using the shared-memory fallback (util/prefixsum/simple.comp)."
+                        + " Set VOXY_SUBGROUP=1 to use the subgroup version (util/prefixsum/inital3.comp),"
+                        + " which hiz.comp proves this backend can run.");
             }
 
         } else {
