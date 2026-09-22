@@ -167,7 +167,30 @@ void setupQuad(out QuadData quad, const in Quad rawQuad, uvec2 sPos, bool genera
 
     uint face = extractFace(rawQuad);
     uint modelId = extractStateId(rawQuad);
+    // VOXY_LOD_NO_MODEL_FETCH=1 -- a COST probe, not a feature. Replaces the 64-byte dependent model
+    // load with a constant, so everything else in quad setup still runs (the quad's own 8-byte fetch,
+    // the position buffer read, the packing, the tint) and only THIS load disappears.
+    //
+    // Why this is the next probe. §32.4 leaves the vertex stage as the LOD pass's whole cost, and this
+    // load is the longest dependency in it: gl_VertexID -> quadData[quadId] -> modelId -> modelData[].
+    // Two serialised dependent loads per vertex, and BlockModel is 64 bytes of which 28 are padding
+    // (`_pad[7]`, matched by ModelStore.MODEL_SIZE = 64 on the CPU side).
+    //
+    // The question it answers is bytes vs. latency, and the two have opposite fixes: if `gpu` collapses
+    // here, the model load is the cost and the fix is either trimming the stride or baking the face
+    // constants into Quad so there is only ONE load; if it does not move, the model buffer is
+    // cache-resident (4 MB, 65536 slots, heavily reused) and this whole family of ideas is dead.
+    //
+    // The image is deliberately wrong: every quad gets face 0's geometry constants and no tint.
+    #ifdef VOXY_LOD_NO_MODEL_FETCH
+    BlockModel model;
+    for (int i = 0; i < 6; i++) model.faceData[i] = 0u;
+    model.flagsA = 0u;
+    model.colourTint = 0xFFFFFFFFu;
+    model.customId = 0u;
+    #else
     BlockModel model = modelData[modelId];
+    #endif
     uint faceData = model.faceData[face];
     ivec2 quadSize = extractSize(rawQuad);
 

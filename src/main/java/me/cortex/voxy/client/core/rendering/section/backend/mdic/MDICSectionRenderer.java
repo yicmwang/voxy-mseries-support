@@ -641,16 +641,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 boolean debugMissing = "1".equals(System.getenv("VOXY_BAKERY_DEBUG_MISSING"));
                 // The depth-bound clause is gone from this prose with the mask itself; both the defining
                 // branch and the red-tint variant it named are deleted from quads.frag.
-                Logger.info("[Metal-DEFINES] terrain shader injections: " +
-                        "VOXY_FORCE_OPAQUE_ALPHA" +
-                        (bakeryOff
-                                ? " + VOXY_NO_ATLAS (bakery disabled hash-colour fallback)"
-                                : (debugMissing ? " + VOXY_DEBUG_MAGENTA_MISSING" : " + atlas bakery")) +
-                        (pipeline.useEnvFog() ? " + USE_ENV_FOG" : "") +
-                        // The list above is HAND-MAINTAINED, so it reports what someone remembered to
-                        // write down, not what the shader got. Appending the real map makes the line
-                        // evidence: a define missing here was never injected, whatever the prose says.
-                        " | actual keys: " + opaqueDefines.keySet());
+                //
+                // THE REPORT IS EMITTED AT THE END OF THE DEFINE SETUP, NOT HERE. It used to print at
+                // this point, which is BEFORE the cost-probe defines are added (NO_VERTEX_LIGHT,
+                // NO_MODEL_FETCH, and the rest of the bisection switches below), so its "actual keys"
+                // list could not contain them. That made the line unable to do the one job it exists
+                // for: the comment below says "a define missing here was never injected", and for every
+                // probe define the reverse was true — it was injected and still missing from the list.
+                // A cost probe whose subject check reads "absent" is an arm that cannot be told apart
+                // from a no-op, which is how a switch ends up VOID (lod-bugs.MD 14.5).
 
                 // Default Metal now uses the real atlas path. VOXY_BAKERY_OFF
                 // is retained as a runtime kill switch: ModelTextureBakery
@@ -702,6 +701,26 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     opaqueDefines.put("VOXY_LOD_NO_VERTEX_LIGHT", "");
                     translucentDefines.put("VOXY_LOD_NO_VERTEX_LIGHT", "");
                 }
+                // VOXY_LOD_NO_MODEL_FETCH=1: the cost probe for the OTHER per-vertex dependent load.
+                // See quad_util.glsl. A bisection, not a feature -- the image comes back with every
+                // quad taking face 0's constants and no tint, which is the point: only the 64-byte
+                // modelData[modelId] load changes.
+                if (NO_MODEL_FETCH) {
+                    opaqueDefines.put("VOXY_LOD_NO_MODEL_FETCH", "");
+                    translucentDefines.put("VOXY_LOD_NO_MODEL_FETCH", "");
+                }
+
+                // The define report, AFTER every define is registered -- see the note where the
+                // declaration locals are set up. The list of injections is HAND-MAINTAINED, so it
+                // reports what someone remembered to write down; appending the real map is what makes
+                // the line evidence. A define absent from `actual keys` was genuinely never injected.
+                Logger.info("[Metal-DEFINES] terrain shader injections: " +
+                        "VOXY_FORCE_OPAQUE_ALPHA" +
+                        (bakeryOff
+                                ? " + VOXY_NO_ATLAS (bakery disabled hash-colour fallback)"
+                                : (debugMissing ? " + VOXY_DEBUG_MAGENTA_MISSING" : " + atlas bakery")) +
+                        (pipeline.useEnvFog() ? " + USE_ENV_FOG" : "") +
+                        " | actual keys: " + opaqueDefines.keySet());
             }
 
             // NOTE: MDIC terrain pipelines do NOT opt into supportIndirectCommandBuffers.
@@ -2634,6 +2653,25 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
      */
     private static final boolean NO_VERTEX_LIGHT =
             "1".equals(System.getenv("VOXY_LOD_NO_VERTEX_LIGHT"));
+
+    /**
+     * {@code VOXY_LOD_NO_MODEL_FETCH=1} replaces the terrain vertex stage's {@code modelData[modelId]}
+     * load with a constant — the second and longest link in the vertex shader's dependency chain
+     * ({@code gl_VertexID -> quadData[quadId] -> modelId -> modelData[]}), and a 64-byte fetch of which
+     * 28 bytes are padding ({@code BlockModel._pad[7]}, matched by {@code ModelStore.MODEL_SIZE}).
+     *
+     * <p>The cost probe that follows {@code NO_VERTEX_LIGHT}, which found nothing. {@code NO_VERTEX_LIGHT}
+     * removed the lightmap <em>texture</em> fetch; this removes the <em>buffer</em> fetch, which is the
+     * larger one and the only remaining dependent load in the quad-setup path. It exists to separate
+     * bytes from latency, and the two have opposite fixes: collapsing {@code gpu} means the model load
+     * is the cost (trim the stride, or bake the face constants into {@code Quad} so there is one load
+     * instead of two); no movement means the model buffer is cache-resident — 4 MB, 65536 slots,
+     * heavily reused — and that whole family of ideas is dead.
+     *
+     * <p>The image is deliberately wrong.
+     */
+    private static final boolean NO_MODEL_FETCH =
+            "1".equals(System.getenv("VOXY_LOD_NO_MODEL_FETCH"));
 
     @Override
     public void buildDrawCalls(MDICViewport viewport) {
