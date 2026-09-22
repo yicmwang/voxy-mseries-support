@@ -124,6 +124,19 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private static long attachTraceCount = 0;
 
     /**
+     * {@code VOXY_LOD_EMPTY_SCISSOR=1} draws the LOD pass into a 1x1 scissor rect: the draws all still
+     * issue and the vertex stage still runs, but nothing is rasterised or shaded.
+     *
+     * <p>It answers one question that nothing else can, and the answer bounds every per-draw
+     * optimisation on the docket. The LOD pass costs ~1.0 us/draw with no fixed term (optimisation.MD
+     * 25), which is 5-10x a well-optimised indirect draw. If that time is per-draw overhead and vertex
+     * work, an ICB can reach it. If it is rasterisation and fragment shading, an ICB cannot touch it at
+     * all, and neither can any other change to how commands are issued.
+     */
+    private static final boolean EMPTY_SCISSOR = "1".equals(System.getenv("VOXY_LOD_EMPTY_SCISSOR"));
+    private static boolean EMPTY_SCISSOR_LOGGED = false;
+
+    /**
      * Blit destination for {@link #metalDepthTex} (w×h raw D32F floats) and
      * read source of the export pass. Exists because Metal silently reads
      * zeros when a depth-format texture is sampled through the
@@ -680,6 +693,33 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                 enc.setViewport(0, fbh, fbw, -fbh, 0.0f, 1.0f);
             } else {
                 enc.setViewport(0, 0, fbw, fbh, 0.0f, 1.0f);
+            }
+            // VOXY_LOD_EMPTY_SCISSOR=1 gives the LOD pass a 1x1 scissor rect, so every draw still issues,
+            // still carries its index count, and still runs its vertex shader -- but no fragment is
+            // ever shaded. It exists to split the LOD pass's ~1.0 us/draw into the two halves that an
+            // ICB can and cannot reach: per-draw/vertex work on one side, rasterisation and fragment
+            // shading on the other. The ICB removes the first and nothing whatsoever of the second, so
+            // if this arm collapses `gpu` the ICB is not the lever (optimisation.MD 25.3).
+            //
+            // The scissor is set HERE, in the LOD pass's own setup, and never restored: Voxy closes its
+            // borrowed encoder with the state marked stale, so Metallum rebinds before its next draw.
+            // It is a single-rect state, deliberately 1x1 and not 0x0 -- an empty rect is legal but
+            // there is nothing to gain from arguing with a driver about it, and 1 pixel of 8.3M is
+            // 0.00001% of the rasterisation this arm is removing.
+            //
+            // Deliberately set ONLY in the probe arm. Writing the full-viewport rect in the default
+            // arm would be tidier -- a defined scissor instead of an inherited one -- but it would also
+            // perturb the shipped path, and the reference screenshot set was captured without it. The
+            // baseline arm has to stay byte-identical to today's build or the diff harness starts
+            // reporting a change that the probe did not make.
+            if (EMPTY_SCISSOR) {
+                enc.setScissor(0, 0, 1, 1);
+                if (!EMPTY_SCISSOR_LOGGED) {
+                    EMPTY_SCISSOR_LOGGED = true;
+                    me.cortex.voxy.common.Logger.info("[Metal-SCISSOR] VOXY_LOD_EMPTY_SCISSOR active: LOD"
+                            + " pass rasterises into 1x1, so every draw still issues and every vertex still"
+                            + " shades but no fragment is covered");
+                }
             }
             // M12 close — invoke MDIC's Metal-aware draws in the same order
             // GL runPipeline uses (opaque → temporal → translucent). Iris is

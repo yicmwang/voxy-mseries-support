@@ -1,6 +1,7 @@
 package me.cortex.voxy.client.core.rendering.section.backend.mdic;
 
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
+import me.cortex.voxy.client.core.gpu.IGpuIndirectCommandBuffer;
 import me.cortex.voxy.client.core.gpu.RenderBackendFactory;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser;
@@ -128,6 +129,68 @@ public class MDICViewport extends Viewport<MDICViewport> {
     public IGpuBuffer drawCountConsume(long frameId) {
         return RING_FRAME_BUFFERS
                 ? this.drawCountRing[(int) (((frameId - 1) & 0x7fffffff) % FRAME_SLOTS)] : this.drawCountCallBuffer;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Draw execution through an MTLIndirectCommandBuffer (VOXY_LOD_ICB=1).
+    //
+    // The draws used to go out as a host loop of drawIndexedPrimitives:indirectBuffer: calls, one per
+    // command, each preceded by a setVertexBytes that pushed that command's baseInstance -- because
+    // Apple Silicon does not propagate baseInstance to [[base_instance]] for that draw form. An ICB
+    // command carries baseInstance natively, so the push, and the per-draw host read that forces the
+    // drain, both disappear.
+    //
+    // RUNG, like the draw-command slots above, and for the same reason. Metal keeps MAX_SUBMITS_IN_FLIGHT
+    // command buffers in flight, and an ICB's own command slots are NOT documented as hazard-tracked:
+    // Apple documents hazard tracking for resources "you directly bind to an encoder", and an ICB's
+    // internal slots are reached only through executeCommandsInBuffer. So a CPU resetWithRange: plus
+    // re-populate for frame N+1 while frame N's execute is still running is exactly the unasserted-sync
+    // shape that caused bug 3 -- nothing crashes, the wrong commands run. Hence one ICB per frame slot,
+    // rotating, so a slot is only rewritten three frames after it was last executed.
+    //
+    // Allocated lazily and only when the switch is on: 400k commands is not free, and the default build
+    // should not pay it.
+    // ---------------------------------------------------------------------------------------------
+
+    private static final boolean LOD_ICB = "1".equals(System.getenv("VOXY_LOD_ICB"));
+
+    /** The opaque slice's bound -- the largest of the three. One ICB serves all three passes in turn. */
+    public static final int ICB_CAPACITY = 400_000;
+
+    private final IGpuIndirectCommandBuffer[] icbRing;
+
+    /**
+     * The {@code {uint32 location; uint32 length;}} the encoder reads to decide how much of the ICB to
+     * run. 8 bytes live (MTLIndirectCommandBufferExecutionRange), padded to 16 so it does not share a
+     * cache line with anything else.
+     *
+     * <p>Metal reads this <b>on the GPU at execution time</b> -- MTLRenderCommandEncoder.h: "an indirect
+     * buffer from which the device reads the execution range parameter" -- which is what would let a
+     * GPU-written draw count drive execution in a later phase. Today the CPU still writes it, because
+     * the CPU is what decides how many commands to populate.
+     */
+    public final IGpuBuffer icbRangeBuffer;
+
+    {
+        if (LOD_ICB) {
+            this.icbRing = new IGpuIndirectCommandBuffer[FRAME_SLOTS];
+            for (int i = 0; i < FRAME_SLOTS; i++) {
+                this.icbRing[i] = RenderBackendFactory.get()
+                        .createIndirectCommandBuffer(ICB_CAPACITY)
+                        .name("voxy-lod-icb-" + i);
+            }
+            this.icbRangeBuffer = RenderBackendFactory.get().createBuffer(16).zero();
+        } else {
+            this.icbRing = null;
+            this.icbRangeBuffer = null;
+        }
+    }
+
+    /** The ICB this frame's draws execute, or null when {@code VOXY_LOD_ICB} is off. */
+    public IGpuIndirectCommandBuffer drawIcb(long frameId) {
+        return this.icbRing == null
+                ? null
+                : this.icbRing[(int) (((frameId - 1) & 0x7fffffff) % FRAME_SLOTS)];
     }
 
     /**

@@ -725,8 +725,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 // per-draw baseInstance via setVertexBytes at binding 6;
                 // quads3.vert reads it from a small UBO when this define
                 // is set, instead of gl_BaseInstance.
-                opaqueDefines.put("VOXY_METAL_BI_FIX", "");
-                translucentDefines.put("VOXY_METAL_BI_FIX", "");
+                // VOXY_LOD_ICB=1 removes the reason for the workaround entirely: an ICB command carries
+                // baseInstance natively (proven on hardware), so quads3.vert must take its #else branch
+                // and read gl_BaseInstance. Leaving the define in would make the shader read binding 6,
+                // which nothing pushes on the ICB path -- every draw would then place its quads at
+                // whatever stale index the UBO happened to hold, i.e. bug 3's symptom, self-inflicted.
+                if (!LOD_ICB) {
+                    opaqueDefines.put("VOXY_METAL_BI_FIX", "");
+                    translucentDefines.put("VOXY_METAL_BI_FIX", "");
+                }
             }
 
             // NOTE: MDIC terrain pipelines do NOT opt into supportIndirectCommandBuffers.
@@ -828,6 +835,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                         translucentFormats.length + 1);
                 translucentFormats[translucentFormats.length - 1] = org.lwjgl.opengl.GL30C.GL_R32F;
             }
+            // VOXY_LOD_ICB=1 opts these two pipelines into indirect-command-buffer support. Metal then
+            // validates them at creation and REFUSES any shader pair it cannot link for an ICB, with
+            // "Fragment shader cannot be used with indirect command buffers" -- which is the loud,
+            // early failure we want, not a silent wrong draw. The rule (optimisation.MD 16) is that the
+            // fragment may not declare a varying that a VERTEX TEXTURE FETCH feeds; `flat` is not it.
             this.terrainPipeline = this.backend.createGraphicsPipeline(
                     new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(
                             vertex, vxOpaqueFrag, opaqueDefines,
@@ -835,7 +847,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                             opaqueFormats,
                             me.cortex.voxy.client.core.gpu.VertexLayout.EMPTY,
                             opaqueState,
-                            "MDIC.terrain"));
+                            "MDIC.terrain")
+                            .withIndirectCommandBufferUsage(LOD_ICB));
             this.translucentTerrainPipeline = this.backend.createGraphicsPipeline(
                     new me.cortex.voxy.client.core.gpu.GraphicsPipelineDesc(
                             vertex, vxTransFrag, translucentDefines,
@@ -843,7 +856,8 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                             translucentFormats,
                             me.cortex.voxy.client.core.gpu.VertexLayout.EMPTY,
                             translucentState,
-                            "MDIC.translucentTerrain"));
+                            "MDIC.translucentTerrain")
+                            .withIndirectCommandBufferUsage(LOD_ICB));
         }
     }
 
@@ -2097,11 +2111,35 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
         encoder.bindIndexBuffer(me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer.INSTANCE.getBuffer(),
                 me.cortex.voxy.client.core.gpu.RenderEncoder.INDEX_TYPE_UINT16, 0);
-        encoder.drawIndexedIndirect(
-                me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
-                viewport.drawCallConsume(viewport.frameId), indirectOffset,
-                maxDrawCount,
-                /*stride*/ 5 * 4); // DrawElementsIndirectCommand = 5 uint32
+        // VOXY_LOD_ICB=1: same commands, same order, executed by the GPU out of an ICB instead of by a
+        // host loop. Everything above this line -- the pipeline, the seven buffer bindings, the lightmap
+        // -- is unchanged and shared, which is what makes the two arms comparable: the ONLY difference
+        // between them is how the draw commands reach the rasteriser.
+        //
+        // The indirect offset is the slice base (opaque/translucent/temporal) and stays as it is: the
+        // ICB is reset and re-populated per pass from index 0, so the pass's commands occupy ICB slots
+        // [0, maxDrawCount) and the execute range starts at 0. Passing the slice offset through would
+        // index the wrong commands.
+        me.cortex.voxy.client.core.gpu.IGpuIndirectCommandBuffer icb = viewport.drawIcb(viewport.frameId);
+        if (icb != null && encoder instanceof me.cortex.voxy.client.core.metal.MetalRenderEncoder mre) {
+            if (!LOD_ICB_LOGGED) {
+                LOD_ICB_LOGGED = true;
+                Logger.info("[Metal-ICB] LOD draws via MTLIndirectCommandBuffer (capacity "
+                        + me.cortex.voxy.client.core.rendering.section.backend.mdic.MDICViewport.ICB_CAPACITY
+                        + ", 3-slot ring, execute chunks of " + 0x4000 + ")");
+                Logger.info("[Metal-ICB] " + LOD_ICB_SHADER_NOTE);
+            }
+            mre.drawIndexedIndirectIcb(
+                    me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
+                    icb, viewport.drawCallConsume(viewport.frameId), indirectOffset, maxDrawCount,
+                    /*stride*/ 5 * 4, viewport.icbRangeBuffer, 0L);
+        } else {
+            encoder.drawIndexedIndirect(
+                    me.cortex.voxy.client.core.gpu.RenderEncoder.PRIMITIVE_TRIANGLES,
+                    viewport.drawCallConsume(viewport.frameId), indirectOffset,
+                    maxDrawCount,
+                    /*stride*/ 5 * 4); // DrawElementsIndirectCommand = 5 uint32
+        }
     }
 
     @Override
@@ -2114,6 +2152,42 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     /** Fallback: re-enable the per-frame drawCallBuffer zero on Metal. */
     private static final boolean METAL_ZERO_DRAWBUF =
             "1".equals(System.getenv("VOXY_LOD_ZERO_DRAWBUF"));
+
+    /**
+     * VOXY_LOD_ICB=1 issues the LOD draws through an MTLIndirectCommandBuffer instead of the host loop
+     * of setVertexBytes + drawIndexedPrimitives:indirectBuffer: calls.
+     *
+     * <p>What it is for: the per-draw <b>cost</b>, not the per-draw latency. The loop exists only
+     * because Apple Silicon drops the indirect args' {@code baseInstance}; the workaround pushes it as a
+     * per-draw constant, so each of ~18 000 draws a frame pays a vertex-binding state change. An ICB
+     * command carries {@code baseInstance} itself, so that disappears. See
+     * {@code MetalRenderEncoder.drawIndexedIndirectIcb} for the mechanism and its two silent-failure
+     * traps.
+     *
+     * <p>Default OFF. It also requires the pipeline's shaders to be ICB-linkable, which the real
+     * {@code quads.frag} currently is not -- see {@link #LOD_ICB_SHADER_NOTE}.
+     */
+    private static final boolean LOD_ICB = "1".equals(System.getenv("VOXY_LOD_ICB"));
+
+    /**
+     * The real terrain fragment shader cannot be used with an ICB, because the vertex stage samples the
+     * lightmap ({@code getLighting} -> {@code texture(lightSampler, ...)} in
+     * {@code makeRemainingAttributes}) into a varying the fragment declares ({@code interData.y}), and
+     * Metal rejects that link (optimisation.MD 16). The fix is to move that sample into the fragment;
+     * until it lands, the ICB can only be measured against {@code VOXY_LOD_FLAT_FRAG=1}, which
+     * early-outs before the interface is used and therefore links.
+     *
+     * <p>So a run with ICB=1 and without FLAT_FRAG will fail at pipeline creation. That is deliberate:
+     * the alternative is a silent fallback, which would report a measurement of the old path as though
+     * it were the new one.
+     */
+    private static final String LOD_ICB_SHADER_NOTE =
+            "VOXY_LOD_ICB=1 requires ICB-linkable terrain shaders. If pipeline creation failed with "
+            + "\"Fragment shader cannot be used with indirect command buffers\", either run with "
+            + "VOXY_LOD_FLAT_FRAG=1 (a cost measurement) or land the lightmap-to-fragment move first "
+            + "(see optimisation.MD 30).";
+
+    private static boolean LOD_ICB_LOGGED = false;
 
     @Override
     public void buildDrawCalls(MDICViewport viewport) {

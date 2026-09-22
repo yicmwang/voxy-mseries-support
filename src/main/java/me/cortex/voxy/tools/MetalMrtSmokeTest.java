@@ -256,9 +256,7 @@ public final class MetalMrtSmokeTest {
         icbCase(backend, 10, "real terrain VERTEX WITHOUT VOXY_METAL_BI_FIX (is binding 6 the trigger?)",
                 terrainVert, null, "lod/gl46/quads3.vert",
                 Files0.frag(shadersRoot, "tools/quads_iface.frag"), toyFragDefines,
-                Map.of("NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0",
-                        "DOWN_FACE_TINT", "0.5", "Z_AXIS_FACE_TINT", "0.8",
-                        "X_AXIS_FACE_TINT", "0.6"));
+                TERRAIN_VERT_DEFINES_NO_BI_FIX);
         // Case 11 -- the same vertex again, against a fragment that declares NO inputs. If this passes
         // where case 9 fails, the trigger is the fragment's input interface (dropped by quads.frag's
         // FLAT early-out, which is why case 8 passes) and the vertex is exonerated.
@@ -295,10 +293,27 @@ public final class MetalMrtSmokeTest {
             System.out.println("  case 14 SKIPPED: the quads3.vert patch did not apply — the probe "
                     + "would have tested the unpatched shader and its FAIL would have meant nothing");
         } else {
-            icbCase(backend, 14, "PATCHED vertex: interData as `flat vec4` + floatBitsToUint (THE FIX)",
+            icbCase(backend, 14, "PATCHED vertex: interData as `flat float4` + floatBitsToUint (THE FIX)",
                     floatIfaceVert, null, "lod/gl46/quads3.vert (patched)",
                     Files0.frag(shadersRoot, "tools/idata_float.frag"), toyFragDefines);
         }
+        // Case 15 -- THE PHASE-1 SHAPE, and the only case here that tests a configuration the renderer
+        // actually ships rather than a bisection of one.
+        //
+        // VOXY_LOD_ICB=1 builds the terrain vertex WITHOUT VOXY_METAL_BI_FIX (so it reads
+        // gl_BaseInstance off the ICB command) and, until the lightmap move lands, pairs it with
+        // FLAT_FRAG (whose early-out drops the fragment's input interface entirely). Case 8 tests half
+        // of that -- FLAT_FRAG, but with the workaround still in. Case 10 tests the other half against
+        // a fragment that declares interData, which is why it fails and says nothing about this.
+        //
+        //   PASS -> the ICB arm can be measured today, with no shader change at all.
+        //   FAIL -> Phase 1 has no legal shader pair and the lightmap move (Phase 2) is a prerequisite,
+        //           not an optimisation. That reorders the whole plan, so it is worth four seconds.
+        icbCase(backend, 15, "PHASE-1 SHAPE: terrain vertex w/o BI_FIX + FLAT_FRAG (the ICB arm's pair)",
+                terrainVert, null, "lod/gl46/quads3.vert", terrainFrag,
+                Map.of("VOXY_NO_DEPTH_BOUND", "", "VOXY_FORCE_OPAQUE_ALPHA", "",
+                        "VOXY_NO_ATLAS", "", "VOXY_LOD_FLAT_FRAG", ""),
+                TERRAIN_VERT_DEFINES_NO_BI_FIX);
     }
 
     /**
@@ -310,6 +325,21 @@ public final class MetalMrtSmokeTest {
     private static final Map<String, String> TERRAIN_VERT_DEFINES = Map.of(
             "NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0", "DOWN_FACE_TINT", "0.5",
             "Z_AXIS_FACE_TINT", "0.8", "X_AXIS_FACE_TINT", "0.6", "VOXY_METAL_BI_FIX", "");
+
+    /**
+     * {@link #TERRAIN_VERT_DEFINES} minus the baseInstance workaround — the terrain vertex exactly as
+     * the {@code VOXY_LOD_ICB=1} path builds it, where {@code gl_BaseInstance} arrives from the command
+     * rather than from a pushed constant.
+     *
+     * <p>Case 15 pairs this with {@code FLAT_FRAG}, which is the exact shader pair the ICB arm runs. Case
+     * 10 uses it against {@code quads_iface.frag} and FAILS — but for the reason §16 gives, not because
+     * of the define: that fragment DECLARES {@code interData}, and the terrain vertex feeds it from a
+     * lightmap fetch, which is the one interface Metal refuses. Case 15 is what settles whether the
+     * combination the ICB path actually uses is accepted.
+     */
+    private static final Map<String, String> TERRAIN_VERT_DEFINES_NO_BI_FIX = Map.of(
+            "NO_SHADE_FACE_TINT", "1.0", "UP_FACE_TINT", "1.0", "DOWN_FACE_TINT", "0.5",
+            "Z_AXIS_FACE_TINT", "0.8", "X_AXIS_FACE_TINT", "0.6");
 
     /** One ICB case, compiled with {@link #TERRAIN_VERT_DEFINES}. Never throws. */
     private static void icbCase(MetalRenderBackend backend, int n, String label,

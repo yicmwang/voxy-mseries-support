@@ -1,6 +1,7 @@
 package me.cortex.voxy.client.core.metal;
 
 import me.cortex.voxy.client.core.gpu.IGpuBuffer;
+import me.cortex.voxy.client.core.gpu.IGpuIndirectCommandBuffer;
 import me.cortex.voxy.client.core.gpu.IGpuPipeline;
 import me.cortex.voxy.client.core.gpu.IGpuSampler;
 import me.cortex.voxy.client.core.gpu.IGpuTexture;
@@ -225,6 +226,106 @@ public final class MetalRenderEncoder implements RenderEncoder {
                     this.boundIndexBuffer, this.boundIndexBufferOffset,
                     indirectBuf, cmdAddr);
         }
+    }
+
+    /**
+     * VOXY_LOD_ICB=1: execute the draw list through an {@link IGpuIndirectCommandBuffer} instead of the
+     * host loop of {@code drawIndexedPrimitives:indirectBuffer:} calls above.
+     *
+     * <p><b>Why.</b> The loop above exists only because Apple Silicon does not propagate the indirect
+     * args' {@code baseInstance} to {@code [[base_instance]]}. The workaround pushes it as a per-draw
+     * constant, which costs a {@code setVertexBytes} state change and a CPU read of the GPU-written
+     * command buffer on every one of ~18 000 draws a frame. <b>An ICB command carries {@code
+     * baseInstance} natively</b> (proven on hardware:
+     * {@code MetalIndirectCommandBufferTest.icbCommandsPropagateBaseInstance}), so both the push and the
+     * read disappear.
+     *
+     * <p><b>Why the CPU still populates it.</b> Nothing here writes ICB slots from a shader. The draws
+     * are translated from the draw list the caller passes, which is the CONSUME slot -- the previous
+     * frame's -- so a frame of staleness is harmless and no fence is needed. That is what makes this
+     * different from the old "the drain returns" objection: an ICB command is self-contained, so
+     * deferring it by a frame is safe in a way that a pushed constant is not.
+     *
+     * <p><b>Two Metal rules are load-bearing here, and both are silent when broken.</b>
+     * <ul>
+     *   <li>The ICB is created with {@code inheritBuffers = inheritPipelineState = true}, so its commands
+     *       must NOT encode a pipeline state or a vertex buffer -- that is a driver SIGBUS with no Java
+     *       stack (see {@link MetalIndirectCommandBuffer}). The encoder's bindings are inherited, which
+     *       is exactly right for MDIC: every draw in a pass shares one PSO and one set of buffers.</li>
+     *   <li>The <b>index buffer is not inherited</b> -- it is a draw argument, not a bindable resource
+     *       ({@code MTLIndirectCommandBufferDescriptor} has no {@code maxIndexBufferBindCount} and
+     *       {@code MTLIndirectRenderCommand} has no {@code setIndexBuffer}) -- so it must be declared to
+     *       the encoder with {@code useResource:} or validation aborts with "Indirect Command Buffer
+     *       reads from &lt;buf&gt; which has not been declared to the encoder".</li>
+     * </ul>
+     *
+     * <p><b>Why the execute is chunked.</b> {@code MTLIndirectCommandBufferExecutionRange.length} is
+     * capped at {@code 0x4000} (16 384). MDIC's opaque slice binds up to 400 000, so a single
+     * {@code executeCommandsInBuffer} would run a fraction of the frame's draws and silently look like a
+     * culling win. Chunking is the reason this method takes the count rather than trusting the range.
+     */
+    public void drawIndexedIndirectIcb(int primitiveType, IGpuIndirectCommandBuffer icb,
+                                       IGpuBuffer drawBuffer, long offset, int drawCount, int stride,
+                                       IGpuBuffer rangeBuffer, long rangeOffset) {
+        if (this.boundIndexBuffer == 0) {
+            throw new IllegalStateException("drawIndexedIndirectIcb() before bindIndexBuffer()");
+        }
+        if (!(icb instanceof MetalIndirectCommandBuffer m)) {
+            throw new IllegalArgumentException("drawIndexedIndirectIcb requires MetalIndirectCommandBuffer, got "
+                    + (icb == null ? "null" : icb.getClass().getName()));
+        }
+        long indirectBuf = bufferHandle(drawBuffer);
+        if (indirectBuf == 0) throw new IllegalArgumentException("drawIndexedIndirectIcb: draw list is null");
+        if (drawCount <= 0) return;
+        if (drawCount > m.maxCommands()) {
+            throw new IllegalArgumentException("drawIndexedIndirectIcb: " + drawCount
+                    + " draws exceeds the ICB's " + m.maxCommands() + " commands");
+        }
+        long contents = contentsOf(drawBuffer);
+        long rangeContents = contentsOf(rangeBuffer);
+        if (contents == 0 || rangeContents == 0) {
+            throw new IllegalStateException("drawIndexedIndirectIcb: the draw list and range buffer must be"
+                    + " CPU-visible, since the CPU is what translates commands into ICB slots");
+        }
+
+        int metalPrimitive = mapPrimitiveType(primitiveType);
+        long indexBytes = this.boundIndexType == MetalNative.MTLIndexTypeUInt16 ? 2L : 4L;
+
+        // Declare the index buffer BEFORE executing: the ICB does not inherit it. Reads happen in the
+        // vertex stage (the index buffer feeds vertex fetch), so that is the stage to declare.
+        MetalNative.mtlRenderEncoderUseResource(this.encoderHandle, this.boundIndexBuffer,
+                MetalNative.MTLResourceUsageRead, MetalNative.MTLRenderStageVertex);
+
+        m.reset(0, drawCount);
+        for (int i = 0; i < drawCount; i++) {
+            long cmdAddr = contents + offset + (long) i * stride;
+            // DrawElementsIndirectCommand: count, instanceCount, firstIndex, baseVertex, baseInstance.
+            // Read all five rather than assuming cmdgen's constants -- buildtranslucents.comp writes the
+            // same struct by a different route, and a wrong assumption here misplaces geometry silently.
+            int count = MemoryUtil.memGetInt(cmdAddr);
+            int instanceCount = MemoryUtil.memGetInt(cmdAddr + 4);
+            int firstIndex = MemoryUtil.memGetInt(cmdAddr + 8);
+            int baseVertex = MemoryUtil.memGetInt(cmdAddr + 12);
+            int baseInstance = MemoryUtil.memGetInt(cmdAddr + 16);
+            m.encodeDrawIndexedPrimitives(i, metalPrimitive, count, this.boundIndexType,
+                    this.boundIndexBuffer, this.boundIndexBufferOffset + (long) firstIndex * indexBytes,
+                    instanceCount, baseVertex, baseInstance);
+        }
+
+        for (int done = 0; done < drawCount; done += ICB_EXEC_CHUNK) {
+            MemoryUtil.memPutInt(rangeContents + rangeOffset, done);
+            MemoryUtil.memPutInt(rangeContents + rangeOffset + 4, Math.min(ICB_EXEC_CHUNK, drawCount - done));
+            MetalNative.mtlRenderEncoderExecuteCommandsInBuffer(this.encoderHandle, m.handle(),
+                    bufferHandle(rangeBuffer), rangeOffset);
+        }
+    }
+
+    /** {@code MTLIndirectCommandBufferExecutionRange.length} is documented as at most 0x4000. */
+    private static final int ICB_EXEC_CHUNK = 0x4000;
+
+    /** CPU-visible contents pointer, or 0 when the buffer is private. */
+    private static long contentsOf(IGpuBuffer buffer) {
+        return buffer instanceof MetalBuffer mb ? mb.getContentsPtr() : 0L;
     }
 
     /**
