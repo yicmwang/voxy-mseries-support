@@ -38,6 +38,9 @@ import java.util.concurrent.locks.StampedLock;
 //An "async host" for a NodeManager, has specific synchonius entry and exit points
 // this is done off thread to reduce the amount of work done on the render thread, improving frame stability and reducing runtime overhead
 public class AsyncNodeManager {
+    /** {@code VOXY_QUAD_PROBE=1}: see the one-shot log in the geometry upload. */
+    private static final boolean QUAD_PROBE = "1".equals(System.getenv("VOXY_QUAD_PROBE"));
+    private static boolean quadProbeFired = false;
     private static final VarHandle RESULT_HANDLE;
     private static final VarHandle RESULT_CACHE_1_HANDLE;
     private static final VarHandle RESULT_CACHE_2_HANDLE;
@@ -1018,6 +1021,17 @@ public class AsyncNodeManager {
             }
             int elemSize = (int) (data.size
                     / me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES);
+            // VOXY_QUAD_PROBE=1, one-shot: the FIRST downstream number. The mesher's own count is known
+            // to be right (RenderDataFactory's probe: 84 quads, 1344 bytes, 84 derived), so bisecting
+            // from there: this must also read 84. If it reads 168 the doubling is in this upload or in
+            // what computed data.size; if it reads 84 the doubling is further down, in cmdgen.
+            if (QUAD_PROBE && !quadProbeFired) {
+                quadProbeFired = true;
+                me.cortex.voxy.common.Logger.info("[Metal-QUADPROBE2] AsyncNodeManager.upload point=" + point
+                        + " dataBytes=" + data.size + " elemSize=" + elemSize
+                        + "  -- must equal the mesher's count; 2x means the doubling is here or upstream of"
+                        + " this call, 1x means it is in cmdgen.");
+            }
             this.maxElementAccess = Math.max(this.maxElementAccess, point + elemSize);
             int header = this.dataUploadPoints.get(point);
             if (header != -1) {
