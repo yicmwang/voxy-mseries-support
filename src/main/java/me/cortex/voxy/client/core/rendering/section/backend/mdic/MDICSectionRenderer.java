@@ -1811,7 +1811,13 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         if (cp == 0 || pp == 0 || lp == 0 || mp == 0) return;
 
         final long posEntries = pos.size() / 8L;//uvec2 per entry
-        final long heapElements = geo.size() / 8L;//8 bytes per quad
+        // Quad record size, from the constant that defines it -- NOT a literal 8. This is the third
+        // reader of the quad record's stride to be found: BasicSectionGeometryManager (which nothing
+        // constructs) and AsyncNodeManager.upload both also divided by 8, and each one left the
+        // sections reporting twice their real quad count, so the draw list emitted 1.92x the index
+        // count with a perfectly matched draw list.
+        final long heapElements = geo.size()
+                / me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES;
         final int maxSections = this.geometryManager.getMaxSectionCount();
         long avail = Math.max(0, (cmds.size() - indirectOffset) / 20L);
         int n = (int) Math.min(maxDrawCount, avail);
