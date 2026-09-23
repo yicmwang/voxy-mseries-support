@@ -1007,8 +1007,17 @@ public class AsyncNodeManager {
         }
 
         public void upload(int point, MemoryBuffer data) {
-            if ((data.size%8)!=0) throw new IllegalStateException("Data must be of size multiple 8");
-            int elemSize = (int) (data.size / 8);
+            // Quad record size, from the constant that defines it. This is THE live derivation of a
+            // section's element (quad) count -- the geometry manager's own is in
+            // BasicSectionGeometryManager, which nothing constructs. It read 8, the old record size, so
+            // when the record grew to 16 every section reported TWICE the quads it had: the draw list
+            // emitted 1.92x the index count (17.19M against 8.96M at a matched draw list) and the
+            // geometry was read past its real quads into the padding and the next record.
+            if ((data.size % me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES) != 0) {
+                throw new IllegalStateException("Data must be of size multiple of the quad record size");
+            }
+            int elemSize = (int) (data.size
+                    / me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES);
             this.maxElementAccess = Math.max(this.maxElementAccess, point + elemSize);
             int header = this.dataUploadPoints.get(point);
             if (header != -1) {
