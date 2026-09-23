@@ -167,21 +167,24 @@ void setupQuad(out QuadData quad, const in Quad rawQuad, uvec2 sPos, bool genera
 
     uint face = extractFace(rawQuad);
     uint modelId = extractStateId(rawQuad);
-    // The quad's own faceModelData, baked by the mesher into the element's third int. It is what the
-    // per-vertex path below needs from the model (the face size and the face indentation), so having it
-    // here removes the modelData[modelId] load from 3 of the quad's 4 corners.
+    // The quad's own faceModelData, baked by the mesher into the element's third int, with bit 31 as
+    // "this value is real". When the flag is clear the model was not baked yet when this quad was
+    // meshed, so fall back to loading it -- which is exactly what this shader did before the bake
+    // existed, and therefore renders the same as it always did.
     //
-    // THE LOAD IS NOW INSIDE `generateAttributes`, which is the corner that builds the packed
-    // attributes and genuinely needs the whole BlockModel. What made that safe to do: the load sits
-    // second in the chain gl_VertexID -> quadData[quadId] -> modelId -> modelData[], and the chain's
-    // length is the cost -- removing the load entirely measured 14.3 % of the LOD pass's gpu, while
-    // shrinking the element it reads measured nothing. See optimisation.MD §33.
+    // The flag is load-bearing, not belt-and-braces. The shader's old read of modelData[modelId]
+    // happened at RENDER time, when the model necessarily existed; the mesher's read happens at MESH
+    // time, which for a section meshed during world load can precede the bake. Latching a 0 there
+    // produced a degenerate uvCorner and black terrain -- caught by a bake-vs-pre-bake screenshot diff,
+    // where the pre-bake control was clean and the bake arm was not.
     //
-    // An unbaked model reads identically either way: a model id that is allocated but not yet uploaded
-    // yields a ZEROED BlockModel on the GPU (this is documented at MDICSectionRenderer's colour
-    // attachment note), and ModelFactory's faceModelData cache is zero-initialised for the same reason,
-    // so both paths see faceData = 0 until the bake lands. No new failure mode.
-    uint faceData = uint(rawQuad.z);
+    // faceModelData == 0 is a sound "not baked" test: bits 0..15 are faceSize[0..3] scaled to 0..15 and
+    // a real face has faceSize[2] and faceSize[3] at least 1, so a genuine face is never 0. An empty
+    // face is -1, which has bit 31 set and matches the -1 the model would have given.
+    uint rawQuadFaceData = uint(rawQuad.z);
+    uint faceData = (rawQuadFaceData & 0x80000000u) != 0u
+            ? rawQuadFaceData
+            : modelData[modelId].faceData[face];
     ivec2 quadSize = extractSize(rawQuad);
 
     if (generateAttributes) {

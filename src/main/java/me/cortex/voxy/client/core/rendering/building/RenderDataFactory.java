@@ -162,8 +162,21 @@ public class RenderDataFactory {
             // modelId, recovered from `data` with the same shift packPartialQuadData wrote it at. The
             // low 26 bits were stripped into auxData above, so what remains starts at the model id.
             final int quadModelId = (int) ((data >>> 26) & 0xFFFFL);
+            // The quad's faceModelData, with bit 31 as "this value is real". The mesher runs BEFORE a
+            // block's model is necessarily baked, and a not-yet-baked model has no faceModelData to
+            // bake -- so without the flag the quad would latch a 0 forever, while the shader's old
+            // read of modelData[modelId] happened at RENDER time, by which point the model existed.
+            // That difference in WHEN the value is read is what made a wrong uv and black terrain.
+            //
+            // faceModelData == 0 is a sound "not baked" test: its low 16 bits are faceSize[0..3] scaled
+            // to 0..15, and a real face always has faceSize[2] and faceSize[3] at least 1, so a genuine
+            // face is never 0. An empty face is -1, which has bit 31 set and is the same -1 the shader
+            // would read from the model. On a clear flag the shader falls back to the model load --
+            // which is exactly the pre-bake behaviour, so an unbaked model renders as it always did.
+            final int quadFaceData = RenderDataFactory.this.modelMan
+                    .getFaceModelData(quadModelId, face);
             MemoryUtil.memPutInt(RenderDataFactory.this.quadBufferPtr + bufferOffset + 8,
-                    RenderDataFactory.this.modelMan.getFaceModelData(quadModelId, face));
+                    quadFaceData == 0 ? 0 : (quadFaceData | 0x80000000));
             MemoryUtil.memPutInt(RenderDataFactory.this.quadBufferPtr + bufferOffset + 12, 0);
 
 
