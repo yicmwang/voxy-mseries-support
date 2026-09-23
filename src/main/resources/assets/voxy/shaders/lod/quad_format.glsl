@@ -35,11 +35,31 @@ bool isQuadEmpty(uint64_t quad) {
 #else
 //TODO: FIXME, ivec2 swaps around the data of the x and y cause its written in little endian
 
-#define Quad ivec2
+// ivec3, not ivec2: the third int carries the quad's own faceModelData, which the vertex stage needs
+// for the face size and the face indentation. Baking it here is what lets the per-vertex path skip the
+// `modelData[modelId]` load -- see quad_util.glsl's setupQuad and optimisation.MD §33.
+//
+// That load measured 14.3 % of the LOD pass's gpu (removing it entirely), and the cost is the LOAD'S
+// LATENCY, not the bytes: shrinking the model element 64 -> 36 bytes moved gpu by +0.8 %, i.e. nothing.
+// So the fix is to shorten the dependency chain
+//   gl_VertexID -> quadData[quadId] -> modelId -> modelData[]
+// from two serialised dependent loads per vertex to one, for 3 of the quad's 4 corners.
+//
+// The element grows 8 -> 16 bytes (std430 gives an ivec3 array a stride of 16): 8 more bytes of
+// streaming traffic per quad to delete a 64-byte dependent load, the right trade under a latency cost.
+//
+// THIS IS THE DEFINE THAT WINS. bindings.glsl guards its own `#define Quad` with `#ifndef Quad`, and
+// this file is included first, so a change made only there is dead code -- which is exactly how the
+// first version of this change shipped and failed to compile ('z' : vector swizzle selection out of
+// range, because the shader still saw an ivec2).
+#define Quad ivec3
 
 //#define Eu32(data, amountBits, shift) (uint((data)>>(shift))&((1u<<(amountBits))-1))
 
-uint Eu32v(ivec2 data, int amount, int shift) {
+// Takes ivec3 now, not ivec2: Quad gained a third component for the baked faceModelData. The body only
+// ever reads .x and .y, which a 3-component vector still has, so widening the parameter is the whole
+// change -- but it must be widened, because GLSL does not convert between vector sizes at a call.
+uint Eu32v(ivec3 data, int amount, int shift) {
     if (shift > 31) {
         shift -= 32;
         return (uint(data.y)>>uint(shift))&((1u<<uint(amount))-1);
