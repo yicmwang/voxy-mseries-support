@@ -1010,27 +1010,29 @@ public class AsyncNodeManager {
         }
 
         public void upload(int point, MemoryBuffer data) {
-            // Quad record size, from the constant that defines it. This is THE live derivation of a
-            // section's element (quad) count -- the geometry manager's own is in
-            // BasicSectionGeometryManager, which nothing constructs. It read 8, the old record size, so
-            // when the record grew to 16 every section reported TWICE the quads it had: the draw list
-            // emitted 1.92x the index count (17.19M against 8.96M at a matched draw list) and the
-            // geometry was read past its real quads into the padding and the next record.
-            if ((data.size % me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES) != 0) {
-                throw new IllegalStateException("Data must be of size multiple of the quad record size");
-            }
-            int elemSize = (int) (data.size
-                    / me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES);
-            // VOXY_QUAD_PROBE=1, one-shot: the FIRST downstream number. The mesher's own count is known
-            // to be right (RenderDataFactory's probe: 84 quads, 1344 bytes, 84 derived), so bisecting
-            // from there: this must also read 84. If it reads 168 the doubling is in this upload or in
-            // what computed data.size; if it reads 84 the doubling is further down, in cmdgen.
+            // EIGHT-BYTE COPY UNITS, NOT QUADS. This is not a quad count and must not be divided by the
+            // quad record size. Every consumer of `elemSize` counts 8-byte units: it is written into the
+            // copy header that memcpy.comp reads, and that shader declares its buffers as `uvec2[]`
+            // (`util/memcpy.comp:11,15`), while the CPU side copies to `scratchDataBuffer.address +
+            // alloc*8L` and sizes the arena in the same units.
+            //
+            // A previous change here divided by QUAD_BYTES instead, on the theory that this was the live
+            // quad-count derivation. It is not -- the count comes from BasicAsyncGeometryManager's
+            // metadata -- and the edit halved every section's copy length and scratch allocation, which
+            // is a data-corrupting regression. It is reverted here rather than amended, with this note
+            // so the next reader does not repeat it.
+            if ((data.size % 8) != 0) throw new IllegalStateException("Data must be of size multiple 8");
+            int elemSize = (int) (data.size / 8);
+            // VOXY_QUAD_PROBE=1, one-shot. The mesher's count is known good (RenderDataFactory's probe:
+            // 84 quads, 1344 bytes), and this is deliberately the EIGHT-BYTE unit count -- 168 for those
+            // 84 quads -- because that is what the copy path needs. It is not a doubling and must not be
+            // "fixed" to 84.
             if (QUAD_PROBE && !quadProbeFired) {
                 quadProbeFired = true;
                 me.cortex.voxy.common.Logger.info("[Metal-QUADPROBE2] AsyncNodeManager.upload point=" + point
-                        + " dataBytes=" + data.size + " elemSize=" + elemSize
-                        + "  -- must equal the mesher's count; 2x means the doubling is here or upstream of"
-                        + " this call, 1x means it is in cmdgen.");
+                        + " dataBytes=" + data.size + " copyUnits(8B)=" + elemSize
+                        + "  -- 8-byte copy units, = 2x the quad count by design; the quad count itself"
+                        + " comes from BasicAsyncGeometryManager's metadata.");
             }
             this.maxElementAccess = Math.max(this.maxElementAccess, point + elemSize);
             int header = this.dataUploadPoints.get(point);

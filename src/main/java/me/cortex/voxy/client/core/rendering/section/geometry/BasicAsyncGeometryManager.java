@@ -17,7 +17,24 @@ import java.util.function.Consumer;
 public class BasicAsyncGeometryManager implements IGeometryManager {
     public static final int SECTION_METADATA_SIZE = 32;
 
-    private static final long GEOMETRY_ELEMENT_SIZE = 8;
+    /**
+     * Bytes per geometry element — <b>the quad record size, and it must track {@code
+     * RenderDataFactory.QUAD_BYTES}</b>.
+     *
+     * <p>It has two jobs and both are the quad record. As the <b>divisor</b> in {@code createMeta}, it
+     * turns a section's uploaded byte size into its quad count ({@code itemCount}); as the <b>address
+     * unit</b> of {@code allocationHeap}, it scales the arena pointer that the shaders treat as a quad
+     * index ({@code cmdgen.comp} writes {@code baseVertex = offset*4}, and the vertex stage reads
+     * {@code quadData[baseVertex>>2]} at a 16-byte stride).
+     *
+     * <p>Leaving it at 8 when the record grew to 16 doubled every section's quad count — {@code
+     * itemCount = bytes/8 = 2*quads}, packed into {@code meta.b} and summed by cmdgen as each group's
+     * quad count, so {@code cmd.count = quadCount*6} came out 2x — and simultaneously scaled the arena
+     * address against a 16-byte stride. Measured as {@code indices} 17360118 against 8962794 at a
+     * matched draw list. One constant, both symptoms.
+     */
+    private static final long GEOMETRY_ELEMENT_SIZE =
+            me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES;
     private final HierarchicalBitSet allocationSet;
     private final AllocationArena allocationHeap = new AllocationArena();
     private final ObjectArrayList<SectionMeta> sectionMetadata = new ObjectArrayList<>(1<<15);
