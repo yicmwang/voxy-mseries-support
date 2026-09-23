@@ -84,8 +84,11 @@ public class BasicSectionGeometryManager extends AbstractSectionGeometryManager 
         if (geometryPtr == -1) {
             throw new IllegalStateException("Unable to upload section geometry as geometry buffer is full");
         }
-        //8 bytes per quad
-        return new SectionMeta(geometry.position, geometry.aabb, geometryPtr, (int) (geometry.geometryBuffer.size/8), geometry.offsets, geometry.childExistence);
+        //Quad record size, from the one constant that defines it -- a literal 8 here is what silently
+        //doubled every section's quad count when the record grew to 16.
+        return new SectionMeta(geometry.position, geometry.aabb, geometryPtr,
+                (int) (geometry.geometryBuffer.size / me.cortex.voxy.client.core.rendering.building.RenderDataFactory.QUAD_BYTES),
+                geometry.offsets, geometry.childExistence);
     }
 
     //TODO: move child existence to and external thing to not get confused
