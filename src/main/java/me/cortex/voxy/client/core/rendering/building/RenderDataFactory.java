@@ -69,10 +69,6 @@ public class RenderDataFactory {
      */
     public static final int QUAD_BYTES = 16;
 
-    /** {@code VOXY_QUAD_PROBE=1} prints the quad-count trail once; see the call site in generateMesh. */
-    private static final boolean QUAD_PROBE = "1".equals(System.getenv("VOXY_QUAD_PROBE"));
-    private static boolean quadProbeFired = false;
-
     // 16 bytes per quad: see QUAD_BYTES.
     private final MemoryBuffer quadBuffer = new MemoryBuffer((long) QUAD_BYTES *(8*(1<<16)));//6 faces + dual direction + translucents
     private final long quadBufferPtr = this.quadBuffer.address;
@@ -1755,31 +1751,6 @@ public class RenderDataFactory {
         aabb |= (this.maxX-this.minX-1)<<15;
         aabb |= (this.maxY-this.minY-1)<<20;
         aabb |= (this.maxZ-this.minZ-1)<<25;
-
-        // VOXY_QUAD_PROBE=1 -- GROUND TRUTH for the quad-count trail, fired once per run.
-        //
-        // WHY THIS EXISTS. The record grew 8 -> 16 bytes and every section started reporting 1.937x the
-        // index count it should (17360118 against 8962794 at a MATCHED draw list). Three separate fixes
-        // to places that derived a count as size/8 had ZERO effect on that ratio, which means the count
-        // does not come from any of them and the mechanism is still unread. So stop patching readers and
-        // print the number at its source: what the mesher emitted, what it uploaded, and what the
-        // pipeline would derive from that upload. The first is truth; whichever later number disagrees
-        // with it is the bug, by arithmetic rather than by inspection.
-        if (QUAD_PROBE && !quadProbeFired) {
-            quadProbeFired = true;
-            int counterSum = 0;
-            for (int c : this.quadCounters) counterSum += c;
-            me.cortex.voxy.common.Logger.info("[Metal-QUADPROBE] section="
-                    + WorldEngine.pprintPos(section.key)
-                    + " mesherQuadCount=" + this.quadCount
-                    + " quadCounterSum=" + counterSum
-                    + " uploadedBytes=" + buff.size
-                    + " derivedQuads=" + (buff.size / QUAD_BYTES)
-                    + " QUAD_BYTES=" + QUAD_BYTES
-                    + " offsets=" + java.util.Arrays.toString(offsets)
-                    + "  -- mesherQuadCount is ground truth; any later stage that disagrees with it is the"
-                    + " doubling, and the ratio says where it entered.");
-        }
 
         return new BuiltSection(section.key, section.getNonEmptyChildren(), aabb, buff, offsets);
     }

@@ -38,9 +38,6 @@ import java.util.concurrent.locks.StampedLock;
 //An "async host" for a NodeManager, has specific synchonius entry and exit points
 // this is done off thread to reduce the amount of work done on the render thread, improving frame stability and reducing runtime overhead
 public class AsyncNodeManager {
-    /** {@code VOXY_QUAD_PROBE=1}: see the one-shot log in the geometry upload. */
-    private static final boolean QUAD_PROBE = "1".equals(System.getenv("VOXY_QUAD_PROBE"));
-    private static boolean quadProbeFired = false;
     private static final VarHandle RESULT_HANDLE;
     private static final VarHandle RESULT_CACHE_1_HANDLE;
     private static final VarHandle RESULT_CACHE_2_HANDLE;
@@ -1023,17 +1020,6 @@ public class AsyncNodeManager {
             // so the next reader does not repeat it.
             if ((data.size % 8) != 0) throw new IllegalStateException("Data must be of size multiple 8");
             int elemSize = (int) (data.size / 8);
-            // VOXY_QUAD_PROBE=1, one-shot. The mesher's count is known good (RenderDataFactory's probe:
-            // 84 quads, 1344 bytes), and this is deliberately the EIGHT-BYTE unit count -- 168 for those
-            // 84 quads -- because that is what the copy path needs. It is not a doubling and must not be
-            // "fixed" to 84.
-            if (QUAD_PROBE && !quadProbeFired) {
-                quadProbeFired = true;
-                me.cortex.voxy.common.Logger.info("[Metal-QUADPROBE2] AsyncNodeManager.upload point=" + point
-                        + " dataBytes=" + data.size + " copyUnits(8B)=" + elemSize
-                        + "  -- 8-byte copy units, = 2x the quad count by design; the quad count itself"
-                        + " comes from BasicAsyncGeometryManager's metadata.");
-            }
             this.maxElementAccess = Math.max(this.maxElementAccess, point + elemSize);
             int header = this.dataUploadPoints.get(point);
             if (header != -1) {

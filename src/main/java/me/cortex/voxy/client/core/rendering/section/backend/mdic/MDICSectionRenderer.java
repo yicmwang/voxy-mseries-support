@@ -701,14 +701,14 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     opaqueDefines.put("VOXY_LOD_NO_VERTEX_LIGHT", "");
                     translucentDefines.put("VOXY_LOD_NO_VERTEX_LIGHT", "");
                 }
-                // VOXY_LOD_NO_MODEL_FETCH=1: the cost probe for the OTHER per-vertex dependent load.
-                // See quad_util.glsl. A bisection, not a feature -- the image comes back with every
-                // quad taking face 0's constants and no tint, which is the point: only the 64-byte
-                // modelData[modelId] load changes.
-                if (NO_MODEL_FETCH) {
-                    opaqueDefines.put("VOXY_LOD_NO_MODEL_FETCH", "");
-                    translucentDefines.put("VOXY_LOD_NO_MODEL_FETCH", "");
-                }
+                // VOXY_LOD_NO_MODEL_FETCH used to live here: the cost probe that replaced the vertex
+                // stage's modelData[modelId] load with a constant, which is what measured that load at
+                // 14.3 % of the LOD pass's gpu. It is DELETED rather than kept, because the bake that
+                // now removes the load for real replaced the shader branch the define gated -- so the
+                // define reached the shader and nothing consumed it, which is worse than absent: an arm
+                // that looks like it is testing something. The measurement it produced is recorded in
+                // optimisation.MD 33.1/33.4, and re-running it means reverting the bake, not flipping a
+                // switch.
 
                 // The define report, AFTER every define is registered -- see the note where the
                 // declaration locals are set up. The list of injections is HAND-MAINTAINED, so it
@@ -2665,24 +2665,15 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static final boolean NO_VERTEX_LIGHT =
             "1".equals(System.getenv("VOXY_LOD_NO_VERTEX_LIGHT"));
 
-    /**
-     * {@code VOXY_LOD_NO_MODEL_FETCH=1} replaces the terrain vertex stage's {@code modelData[modelId]}
-     * load with a constant — the second and longest link in the vertex shader's dependency chain
-     * ({@code gl_VertexID -> quadData[quadId] -> modelId -> modelData[]}), and a 64-byte fetch of which
-     * 28 bytes are padding ({@code BlockModel._pad[7]}, matched by {@code ModelStore.MODEL_SIZE}).
-     *
-     * <p>The cost probe that follows {@code NO_VERTEX_LIGHT}, which found nothing. {@code NO_VERTEX_LIGHT}
-     * removed the lightmap <em>texture</em> fetch; this removes the <em>buffer</em> fetch, which is the
-     * larger one and the only remaining dependent load in the quad-setup path. It exists to separate
-     * bytes from latency, and the two have opposite fixes: collapsing {@code gpu} means the model load
-     * is the cost (trim the stride, or bake the face constants into {@code Quad} so there is one load
-     * instead of two); no movement means the model buffer is cache-resident — 4 MB, 65536 slots,
-     * heavily reused — and that whole family of ideas is dead.
-     *
-     * <p>The image is deliberately wrong.
-     */
-    private static final boolean NO_MODEL_FETCH =
-            "1".equals(System.getenv("VOXY_LOD_NO_MODEL_FETCH"));
+    // VOXY_LOD_NO_MODEL_FETCH and VOXY_MODEL_TIGHT both used to be declared here, as the cost probes
+    // that measured this pass. Both are DELETED, and the measurements they produced are in
+    // optimisation.MD 33:
+    //   - NO_MODEL_FETCH replaced the vertex stage's modelData[modelId] load with a constant and
+    //     measured it at 14.3 % of the LOD pass's gpu. The bake now removes that load for real, so the
+    //     shader branch the define gated no longer exists and the switch reached nothing.
+    //   - TIGHT shrank the model record 64 -> 36 bytes and moved gpu by +0.8 %, i.e. nothing, which is
+    //     how the load's cost was pinned to LATENCY rather than bandwidth.
+    // Neither is recoverable by flipping an env var now; re-running either means reverting the bake.
 
     @Override
     public void buildDrawCalls(MDICViewport viewport) {
